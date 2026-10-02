@@ -12,6 +12,7 @@ import asyncio
 import base64
 import hashlib
 import re
+import json
 import secrets
 import socket
 import string
@@ -74,7 +75,17 @@ _AES_SALT = b'JARVIS-DASHBOARD-v1'
 
 
 def _derive_key(session_key: str) -> bytes:
-    """SHA-256(sessionKey‖salt) → 32-byte AES-256 key (microseconds, no PBKDF2 needed)."""
+    """SHA-256(sessionKey‖salt) → 32-byte AES-256 key.
+
+    This is only safe because `session_key` is now a server-generated 256-bit
+    random value, not the six-character PIN the user types. It used to be the
+    PIN: 31**6 ≈ 8.9e8 possibilities, one unsalted hash round, so a captured
+    ciphertext fell to an offline GPU sweep in roughly a tenth of a second.
+
+    The fix was not a slower KDF - it was giving the key 256 bits of entropy and
+    keeping the PIN for authentication only, where a wrong guess is rejected by
+    the server (and now rate-limited) instead of being checkable offline.
+    """
     return hashlib.sha256(session_key.encode('utf-8') + _AES_SALT).digest()
 
 
@@ -466,6 +477,11 @@ class DashboardServer:
         self._wake_callback               = None
         self._connect_callback            = None
         self._pending_keys: dict[str, float] = {}
+        # Encryption key per token. Random, 256-bit, generated here - the PIN the
+        # user types never becomes key material (see _derive_key).
+        self._token_enckey: dict[str, str]   = {}
+        # auth-token -> encryption key, and rate-limit state for /login
+        self._login_fails: dict[str, list]   = {}   # ip -> [timestamps]
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
         self._uploads_dir                 = UPLOADS_DIR
@@ -474,6 +490,39 @@ class DashboardServer:
         self.app                          = self._build_app()
 
     # ── one-time key management ───────────────────────────────────────────
+
+    # ── brute-force guard ─────────────────────────────────────────────────
+    # Six-character keys over a 31-character alphabet are ~8.9e8 combinations.
+    # That is comfortable against a human guessing by hand and worthless against
+    # an unthrottled script on the same LAN - and this server binds 0.0.0.0 and
+    # opens its own firewall rule. So failures are counted per source address
+    # and the address is locked out after _LOGIN_MAX_FAILS.
+    _LOGIN_MAX_FAILS  = 8
+    _LOGIN_WINDOW     = 300.0    # failures older than this stop counting
+    _LOGIN_LOCKOUT    = 600.0    # seconds a locked-out address stays locked
+
+    def _rate_limited(self, ip: str) -> bool:
+        """True when `ip` has failed too often and is still inside its lockout."""
+        now  = time.time()
+        hits = [t for t in self._login_fails.get(ip, []) if now - t < self._LOGIN_WINDOW]
+        if hits:
+            self._login_fails[ip] = hits
+        else:
+            self._login_fails.pop(ip, None)
+        if len(hits) >= self._LOGIN_MAX_FAILS:
+            # still locked out until the newest failure ages out of the lockout
+            return now - hits[-1] < self._LOGIN_LOCKOUT
+        return False
+
+    def _note_login_fail(self, ip: str) -> None:
+        self._login_fails.setdefault(ip, []).append(time.time())
+
+    def _new_enc_key(self, tok: str) -> str:
+        """Mint a random 256-bit encryption key for this session and cache it."""
+        enc = secrets.token_hex(32)
+        self._token_enckey[tok] = enc
+        self._aes_key(enc)                 # pre-derive & cache
+        return enc
 
     def new_key(self, expiry_secs: int = 600) -> str:
         now = time.time()
@@ -567,22 +616,34 @@ class DashboardServer:
 
         @app.post("/login")
         async def login(req: Request):
+            ip = (req.client.host if req.client else "unknown") or "unknown"
+            if self._rate_limited(ip):
+                return JSONResponse(
+                    {"ok": False,
+                     "error": "Too many incorrect keys. Wait a few minutes and "
+                              "generate a new one in JARVIS."},
+                    status_code=429)
+
             body    = await req.json()
             entered = str(body.get("pin", "")).strip().upper()
             now     = time.time()
             if entered in self._pending_keys and self._pending_keys[entered] > now:
                 del self._pending_keys[entered]          # one-time use
+                self._login_fails.pop(ip, None)          # clean slate on success
                 tok = secrets.token_urlsafe(32)
                 self._tokens.add(tok)
-                self._token_keys[tok] = entered
-                self._aes_key(entered)                   # pre-derive & cache
+                self._token_keys[tok] = entered          # kept for bookkeeping
+                enc = self._new_enc_key(tok)             # real key material
                 if self._connect_callback:
                     self._connect_callback()
                 asyncio.create_task(self.broadcast(
                     {"type": "sys", "text": "Remote connection established."}
                 ))
                 # Bearer token in response body — no cookies needed (works on any browser/HTTP)
-                return JSONResponse({"ok": True, "token": tok})
+                # `enc` is 256 random bits; the PIN never becomes key material.
+                return JSONResponse({"ok": True, "token": tok, "enc": enc})
+
+            self._note_login_fail(ip)
             return JSONResponse({"ok": False, "error": "Invalid or expired key"},
                                 status_code=401)
 
@@ -606,9 +667,10 @@ class DashboardServer:
             tok     = secrets.token_urlsafe(32)
             dev_tok = secrets.token_urlsafe(32)
             self._tokens.add(tok)
-            self._token_keys[tok] = key
-            self._aes_key(key)
+            self._token_keys[tok] = key          # bookkeeping only
+            enc = self._new_enc_key(tok)         # 256 random bits = real key material
             self._device_sessions[dev_tok] = {"session_key": key}
+            enc_js = json.dumps(enc)          # safe to embed: hex, no quotes
 
             if self._connect_callback:
                 self._connect_callback()
@@ -626,7 +688,7 @@ class DashboardServer:
 <body>
 <script>
   sessionStorage.setItem('jarvis_token','{tok}');
-  sessionStorage.setItem('jarvis_key','{key}');
+  sessionStorage.setItem('jarvis_key',{enc_js!r});
   localStorage.setItem('jarvis_device_token','{dev_tok}');
   setTimeout(function(){{location.replace('/')}},400);
 </script>
@@ -647,13 +709,15 @@ class DashboardServer:
             tok = secrets.token_urlsafe(32)
             self._tokens.add(tok)
             self._token_keys[tok] = session_key
-            self._aes_key(session_key)
+            enc = self._new_enc_key(tok)
             if self._connect_callback:
                 self._connect_callback()
             asyncio.create_task(self.broadcast(
                 {"type": "sys", "text": "Known device reconnected automatically."}
             ))
-            return JSONResponse({"ok": True, "token": tok, "key": session_key})
+            # `enc` is random; `session_key` (the original PIN) is not returned -
+            # it is auth material, and must never become encryption material.
+            return JSONResponse({"ok": True, "token": tok, "key": enc})
 
         @app.post("/api/revoke-devices")
         async def revoke_devices(req: Request):

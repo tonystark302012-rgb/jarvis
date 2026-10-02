@@ -2959,6 +2959,43 @@ class MainWindow(QMainWindow):
     _quiz_hide_sig  = pyqtSignal()
     _review_sig     = pyqtSignal(str, str, object, object)  # document review payload
 
+    # ── the display screen ─────────────────────────────────────────────────
+    # Content is pushed from anywhere with core.display.display(...); this is
+    # only the window that shows it. Built lazily and every call is guarded -
+    # a problem with the panel must never cost the user the assistant.
+
+    def toggle_display(self) -> None:
+        """Show or hide the JARVIS display screen."""
+        try:
+            if self._display_panel is None:
+                from ui.display_panel import DisplayPanel
+                self._display_panel = DisplayPanel(self)
+            if self._display_panel.isVisible():
+                self._display_panel.hide()
+            else:
+                self._display_panel.refresh()
+                self._display_panel.show()
+                self._display_panel.raise_()
+                self._display_panel.activateWindow()
+        except Exception as e:
+            print(f"[UI] Display panel unavailable: {e}")
+            try:
+                self.write_log(f"SYS: Display panel unavailable ({e})")
+            except Exception:
+                pass
+
+    def show_display(self, kind: str, payload, title: str = "") -> None:
+        """Put something on the display screen and raise it."""
+        try:
+            from core import display as _display
+            _display.display(kind, payload, title=title)
+            if self._display_panel is not None:
+                self._display_panel.refresh()
+            else:
+                self.toggle_display()
+        except Exception as e:
+            print(f"[UI] Could not display {kind}: {e}")
+
     def __init__(self, face_path: str):
         super().__init__()
         self._face_path = face_path
@@ -3248,6 +3285,7 @@ class MainWindow(QMainWindow):
 
         # Clipboard panel (child of central widget, bottom-center)
         self._clipboard_panel = ClipboardPanel(self.centralWidget())
+        self._display_panel    = None   # built on first use (ui/display_panel.py)
         self._clipboard_panel.action_requested.connect(self._on_clipboard_action)
         QApplication.clipboard().dataChanged.connect(self._on_clipboard_changed)
 

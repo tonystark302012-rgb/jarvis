@@ -202,13 +202,21 @@
         shake(); return;
       }
       if (data.ok && data.token) {
-        sessionStorage.setItem('jarvis_key', key);
+        // `data.enc` is a random 256-bit key minted by the server for this
+        // session. The PIN the user typed is authentication only - it is never
+        // used as encryption key material, so a captured ciphertext cannot be
+        // attacked offline by guessing the six characters.
+        sessionStorage.setItem('jarvis_key', data.enc || key);
         sessionStorage.setItem('jarvis_token', data.token);
         location.href = '/';
       } else {
         inp.value = '';
         inp.focus();
-        document.getElementById('err').textContent = 'Invalid or expired key';
+        // 429 is the brute-force lockout; say so instead of "invalid"
+        document.getElementById('err').textContent =
+          (data.error && data.error.indexOf('Too many') === 0)
+            ? data.error
+            : 'Invalid or expired key';
         shake();
       }
     }
