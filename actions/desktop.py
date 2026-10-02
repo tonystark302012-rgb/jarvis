@@ -35,124 +35,6 @@ def _get_desktop() -> Path:
             return Path(xdg)
     return Path.home() / "Desktop"
 
-def _build_sandbox() -> dict:
-    import time
-
-    safe_builtins = {
-        "print": print,
-        "len": len, "str": str, "int": int, "float": float,
-        "bool": bool, "list": list, "dict": dict, "tuple": tuple,
-        "range": range, "enumerate": enumerate, "sorted": sorted,
-        "isinstance": isinstance, "hasattr": hasattr, "getattr": getattr,
-        "max": max, "min": min, "sum": sum, "abs": abs,
-        "zip": zip, "map": map, "filter": filter,
-    }
-
-    sandbox = {
-        "__builtins__": safe_builtins,
-        "Path": Path,
-        "time": time,
-        "shutil": type("shutil", (), {
-            "copy2":      shutil.copy2,
-            "copytree":   shutil.copytree,
-            "disk_usage": shutil.disk_usage,
-        })(),
-        "os_path": os.path,  
-    }
-
-    if _PYAUTOGUI:
-        sandbox["pyautogui"] = pyautogui
-
-    if _OS == "Windows":
-        try:
-            import ctypes
-            import winreg
-            sandbox["ctypes"] = ctypes
-            sandbox["winreg"] = type("winreg", (), {
-                # Sadece okuma
-                "OpenKey":      winreg.OpenKey,
-                "QueryValueEx": winreg.QueryValueEx,
-                "HKEY_CURRENT_USER": winreg.HKEY_CURRENT_USER,
-            })()
-        except ImportError:
-            pass
-
-    return sandbox
-
-
-def _execute_generated_code(code: str, player=None) -> str:
-    if not code or code.strip() == "UNSAFE":
-        return "This action cannot be performed safely."
-
-    # Kod temizleme
-    if code.startswith("```"):
-        lines = code.split("\n")
-        code  = "\n".join(lines[1:-1]).strip()
-
-    sandbox      = _build_sandbox()
-    output_lines = []
-    sandbox["__builtins__"]["print"] = lambda *a: output_lines.append(" ".join(str(x) for x in a))
-
-    try:
-        exec(compile(code, "<jarvis_desktop>", "exec"), sandbox)
-        return "\n".join(output_lines) if output_lines else "Done."
-    except Exception as e:
-        print(f"[Desktop] Exec error: {e}\nCode:\n{code[:300]}")
-        return f"Execution error: {e}"
-
-
-def _ask_gemini_for_desktop_action(task: str) -> str:
-
-    from google import genai as _genai
-
-    desktop = str(_get_desktop())
-
-    os_specific = ""
-    if _OS == "Windows":
-        os_specific = "- ctypes (Windows API calls, read-only)\n- winreg (registry READ only)"
-    elif _OS == "Darwin":
-        os_specific = "- subprocess is NOT available; use pyautogui or Path only"
-    else:
-        os_specific = "- subprocess is NOT available; use pyautogui or Path only"
-
-    prompt = f"""You are a desktop automation assistant.
-Current OS: {_OS}
-Desktop path: {desktop}
-
-Generate safe Python code to accomplish the task below.
-Allowed modules ONLY:
-- pyautogui (mouse, keyboard — if needed)
-- pathlib.Path (file/folder inspection only, no deletion)
-- shutil.copy2, shutil.copytree, shutil.disk_usage (NO move, NO rmtree)
-- os_path (os.path equivalent, read-only)
-- time.sleep
-{os_specific}
-
-Hard rules:
-- NO file deletion (no unlink, no rmtree, no remove)
-- NO subprocess calls
-- NO exec() or eval() inside the code
-- NO import statements (modules are pre-injected)
-- NO file write operations except explicitly requested
-- If task cannot be done safely with these tools, output exactly: UNSAFE
-
-Output ONLY the Python code. No explanation, no markdown, no backticks.
-
-Task: {task}"""
-
-    try:
-        from core import gemini
-        response = gemini.call(prompt, tier=gemini.SMART, timeout_ms=30_000)
-        if response is None:
-            return "ERROR: every Gemini model on the ladder failed"
-        code = (response.text or "").strip()
-        if code.startswith("```"):
-            lines = code.split("\n")
-            code  = "\n".join(lines[1:-1]).strip()
-        return code
-    except Exception as e:
-        return f"ERROR: {e}"
-
 def set_wallpaper(image_path: str) -> str:
     path = Path(image_path).expanduser().resolve()
     if not path.exists():
@@ -412,6 +294,76 @@ def get_desktop_stats() -> str:
         f"  Path    : {desktop}"
     )
 
+# ── Named actions, and nothing else ───────────────────────────────────────────
+#
+# This module used to ask the model to WRITE PYTHON and then exec() it inside a
+# restricted-builtins sandbox. That was not a security boundary: the allow-list
+# contained `getattr`, and attribute access is not constrained by __builtins__,
+# so three lines reached os.system() and ran arbitrary commands. Anything that
+# reached the model - a web page, a document, a transcript - could therefore
+# run code on this machine.
+#
+# Code generation is gone. Every desktop operation is a named function in this
+# file, chosen the way core/computer_settings.py picks one of its 56 actions:
+# keyword hints first, then difflib spelling tolerance. Nothing is executed
+# that is not written here.
+import difflib as _difflib
+
+# Free text -> named action. Deliberately small: the model is better at picking
+# a name from the TOOL description than we are at guessing intent from prose.
+_TASK_HINTS = (
+    (("wallpaper", "background", "desktop image"),      "current_wallpaper"),
+    (("tidy", "organi", "sort", "arrange", "group"),    "organize"),
+    (("clean", "empty", "clear off", "wipe"),           "clean"),
+    (("what is on", "show my desktop", "list", "what's on"), "list"),
+    (("how many", "size", "space", "stats", "count"),   "stats"),
+)
+
+_NAMED_ACTIONS = (
+    "wallpaper", "wallpaper_url", "current_wallpaper",
+    "organize", "clean", "list", "stats",
+)
+
+
+def _resolve_task(task: str, player=None) -> str:
+    """Map free text onto one of the named actions. Never generates code."""
+    low = (task or "").lower().strip()
+    if not low:
+        return "Please describe what you want to do on the desktop."
+
+    for words, action in _TASK_HINTS:
+        if any(w in low for w in words):
+            return _run_named(action, task=task, player=player)
+
+    near = _difflib.get_close_matches(
+        low.replace(" ", "_"), _NAMED_ACTIONS, n=1, cutoff=0.6)
+    if near:
+        return _run_named(near[0], task=task, player=player)
+
+    return ("I can't map that onto a desktop action I actually have. "
+            f"I can: {', '.join(_NAMED_ACTIONS)}. Tell me which one you want.")
+
+
+def _run_named(action: str, task: str = "", player=None) -> str:
+    if player:
+        player.write_log(f"[desktop] -> {action}")
+    try:
+        if action == "current_wallpaper":
+            return get_current_wallpaper()
+        if action == "organize":
+            return organize_desktop("by_type")
+        if action == "clean":
+            return clean_desktop()
+        if action == "list":
+            return list_desktop()
+        if action == "stats":
+            return get_desktop_stats()
+    except Exception as e:
+        return f"Desktop '{action}' failed: {e}"
+    return (f"'{action}' needs more information than '{(task or '')[:60]}' "
+            f"gives me - an image path or a URL.")
+
+
 def desktop_control(
     parameters: dict = None,
     response=None,
@@ -463,18 +415,12 @@ def desktop_control(
             actual_task = task or params.get("description", "")
             if not actual_task:
                 return "Please describe what you want to do on the desktop."
-
-            print(f"[Desktop] Asking Gemini: {actual_task}")
-            if player:
-                player.write_log("[Desktop] Generating action...")
-
-            code = _ask_gemini_for_desktop_action(actual_task)
-            return _execute_generated_code(code, player=player)
+            return _resolve_task(actual_task, player=player)
 
         else:
+            # No generated code is ever executed here.
             if action:
-                code = _ask_gemini_for_desktop_action(action)
-                return _execute_generated_code(code, player=player)
+                return _resolve_task(action, player=player)
             return "No action or task specified."
 
     except Exception as e:

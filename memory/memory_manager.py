@@ -6,6 +6,12 @@ from pathlib import Path
 import sys
 
 
+try:                                   # normal package import
+    from . import semantic_recall
+except ImportError:                    # loaded as a top-level module
+    import semantic_recall
+
+
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -351,31 +357,46 @@ def search_memory(query: str, limit: int = 8) -> str:
     """Find stored facts matching `query`. Backs the recall_memory tool.
 
     An empty query is treated as "show me everything you know", capped - the
-    model asks that when the user says "what do you remember about me?"."""
+    model asks that when the user says "what do you remember about me?".
+
+    Ranking is the hybrid in memory/semantic_recall.py: character-trigram
+    TF-IDF fused with the lexical score above, over a query expanded by a small
+    concept lexicon. See that module for the measured before/after.
+
+    One behavioural change matters more than the ranking: rows scoring zero are
+    no longer discarded. The old code dropped them, so a paraphrase returned
+    "Nothing stored about 'family'" while relationships/mother sat on disk and
+    the assistant told the user it did not know something it did.
+    """
     memory = load_memory()
     words  = [w for w in re.split(r"[^\w]+", (query or "").lower()) if len(w) > 1]
 
-    rows: list[tuple[int, str, str, str]] = []
+    entries: list[tuple[str, str, str]] = []
     for cat, items in memory.items():
         if not isinstance(items, dict):
             continue                     # skip 'sessions', which is a list
         for key, entry in items.items():
             val = _entry_value(entry)
-            if not val:
-                continue
-            s = _score(words, cat, key, val) if words else 1
-            if s > 0:
-                rows.append((s, cat, key, val))
+            if val:
+                entries.append((cat, key, val))
 
-    if not rows:
+    if not entries:
         return (f"Nothing stored about '{query}'." if query
                 else "I have not stored anything about this person yet.")
 
-    rows.sort(key=lambda r: (-r[0], r[2]))
-    lines = [f"{cat}/{_pretty(key)}: {val}" for _s, cat, key, val in rows[:max(1, limit)]]
+    # Empty query = "list everything": equal scores, stable alphabetical order.
+    if not words:
+        scores = [1.0] * len(entries)
+    else:
+        scores = semantic_recall.hybrid_scores(query, entries, _score)
+
+    rows = sorted(zip(scores, entries), key=lambda r: (-r[0], r[1][1]))
+
+    take  = rows[:max(1, limit)]
+    lines = [f"{cat}/{_pretty(key)}: {val}" for _s, (cat, key, val) in take]
     head  = (f"Stored facts matching '{query}':" if query
              else "Everything currently stored:")
-    more  = (f"\n(+{len(rows) - len(lines)} more — search with a narrower keyword)"
+    more  = (f"\n(+{len(rows) - len(lines)} more - search with a narrower keyword)"
              if len(rows) > len(lines) else "")
     return head + "\n" + "\n".join(lines) + more
 
