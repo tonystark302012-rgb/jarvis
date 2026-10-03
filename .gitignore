@@ -21,6 +21,17 @@ config/whatsapp_web/
 # ── Personal data the assistant accumulates about you ─────────────────────────
 memory/long_term.json
 memory/*.db
+# meeting recordings + transcripts (WAV can be 100 MB/hour)
+meetings/*.wav
+meetings/*.txt
+# research reports, saved macros, diagrams/charts, phone-camera frames,
+# tool outputs — all regenerated on demand, never source
+research/
+macros/
+diagrams/
+charts/
+uploads/
+config/automation_rules.json
 
 # ── Python build noise ────────────────────────────────────────────────────────
 __pycache__/

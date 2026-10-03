@@ -828,6 +828,52 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
+        # ── Phone camera → PC vision ─────────────────────────────────────────
+        # The phone streams JPEG frames here; the latest one is kept on disk
+        # for the phone_vision action to read. One file, overwritten each time
+        # — history of what your desk looked like is not the point, the CURRENT
+        # view is. Body is JSON {"frame": "<base64 jpeg>", "ts": epoch} —
+        # no multipart, so the endpoint also works without python-multipart.
+
+        @app.post("/api/camera-frame")
+        async def camera_frame(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Bad JSON"}, status_code=400)
+            import base64 as _b64
+            import binascii
+            raw = str(body.get("frame") or "")
+            if "," in raw and raw.strip().startswith("data:"):
+                raw = raw.split(",", 1)[1]           # data:image/jpeg;base64,…
+            try:
+                data = _b64.b64decode(raw, validate=True)
+            except (binascii.Error, ValueError):
+                return JSONResponse({"error": "Bad base64"},
+                                    status_code=400)
+            if not (100 <= len(data) <= 4 * 1024 * 1024):
+                return JSONResponse(
+                    {"error": "Frame must be 100 B – 4 MB"},
+                    status_code=413)
+            cam_dir = self._uploads_dir / "camera"
+            try:
+                cam_dir.mkdir(parents=True, exist_ok=True)
+                (cam_dir / "frame.jpg").write_bytes(data)
+                (cam_dir / "frame.json").write_text(
+                    json.dumps({"ts": float(body.get("ts") or time.time()),
+                                "size": len(data)}),
+                    encoding="utf-8")
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+            asyncio.create_task(self.broadcast({
+                "type": "camera_frame",
+                "size": len(data),
+                "ts": float(body.get("ts") or time.time()),
+            }, history=False))
+            return JSONResponse({"ok": True, "size": len(data)})
+
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 
         @app.websocket("/ws/phone-audio")

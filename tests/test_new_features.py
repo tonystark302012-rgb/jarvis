@@ -1170,3 +1170,486 @@ class TestResearch:
             self.r._fetch_url("ftp://evil.example/x")
         with pytest.raises(ValueError, match="unsupported scheme"):
             self.r._fetch_url("javascript:alert(1)")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Tier 3: scenes, region OCR, gmail/calendar plugins, phone vision, meeting
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestSceneRules:
+    @pytest.fixture(autouse=True)
+    def _rules(self, tmp_path, monkeypatch):
+        import actions.rules as r
+        monkeypatch.setattr(r, "_path", lambda: tmp_path / "rules.json")
+        r._RULES.clear()
+        r._LOADED = False
+        self.r = r
+        self.calls = []
+        r.set_runner(lambda t, a: self.calls.append((t, a)) or f"{t} ok")
+        r.set_notifier(None)
+
+    def test_multi_step_scene_runs_in_order(self):
+        out = self.r.add_rule(
+            {"type": "phrase", "value": "movie mode"},
+            "", None, label="Movie mode",
+            steps=[{"tool": "video_player", "args": {"action": "play"}},
+                   {"tool": "computer_settings", "args": {"action": "volume", "level": 30}},
+                   {"tool": "focus", "args": {"action": "start"}}])
+        assert "scene(3 steps)" in out
+        fired = self.r.fire_phrase("chalo movie mode on karo")
+        assert fired and "3/3 steps" in fired[0]
+        assert [t for t, _ in self.calls] == [
+            "video_player", "computer_settings", "focus"]
+        # steps persisted
+        import json as _json
+        data = _json.loads(self.r._path().read_text())
+        assert data[0]["steps"][0]["tool"] == "video_player"
+
+    def test_scene_stops_at_first_failure(self):
+        def runner(t, a):
+            if t == "boom":
+                raise RuntimeError("kaboom")
+            self.calls.append((t, a))
+            return f"{t} ok"
+        self.r.set_runner(runner)
+        self.r.add_rule({"type": "phrase", "value": "go"}, "", None,
+                        label="G",
+                        steps=[{"tool": "a", "args": {}},
+                               {"tool": "boom", "args": {}},
+                               {"tool": "c", "args": {}}])
+        out = self.r.fire_phrase("please go now")[0]
+        assert "failed at step 2" in out and "kaboom" in out
+        assert [t for t, _ in self.calls] == ["a"]     # step 3 never ran
+
+    def test_single_tool_rule_unchanged(self):
+        self.r.add_rule({"type": "phrase", "value": "ping"},
+                        "system_monitor", {"action": "cpu"})
+        fired = self.r.fire_phrase("ping me")
+        assert fired and fired[0] == "system_monitor ok"
+        assert self.calls == [("system_monitor", {"action": "cpu"})]
+
+    def test_empty_steps_and_no_tool_rejected(self):
+        out = self.r.add_rule({"type": "phrase", "value": "x"}, "", None)
+        assert "must name a tool" in out
+
+    def test_scene_via_manage_rules_json(self):
+        out = self.r.manage_rules({
+            "action": "add", "trigger_type": "phrase", "value": "workout",
+            "label": "Workout",
+            "steps": '[{"tool":"focus","args":{"action":"start"}},'
+                     '{"tool":"music","args":{"action":"play"}}]',
+        })
+        assert "scene(2 steps)" in out
+        assert "steps" in str(self.r.list_rules())
+
+
+class TestRegionOCR:
+    def test_resolve_box_presets(self):
+        from actions.region_ocr import _resolve_box
+        mon = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        assert _resolve_box("full", mon, [mon]) == mon
+        top = _resolve_box("top", mon, [mon])
+        assert top["height"] == 540 and top["top"] == 0
+        bot = _resolve_box("bottom", mon, [mon])
+        assert bot["top"] == 540
+        left = _resolve_box("left", mon, [mon])
+        assert left["width"] == 960 and left["left"] == 0
+        right = _resolve_box("right", mon, [mon])
+        assert right["left"] == 960 and right["width"] == 960
+        cen = _resolve_box("center", mon, [mon])
+        assert cen["width"] == int(1920 * 0.6)
+        geo = _resolve_box("10,20,300,150", mon, [mon])
+        assert geo == {"left": 10, "top": 20, "width": 300, "height": 150}
+
+    def test_resolve_box_rejects_bad(self):
+        from actions.region_ocr import _resolve_box
+        mon = {"left": 0, "top": 0, "width": 100, "height": 100}
+        for bad in ("nope", "1,2,0,4", "a,b,c,d"):
+            with pytest.raises(ValueError):
+                _resolve_box(bad, mon, [mon])
+
+    def test_single_read(self, monkeypatch):
+        import actions.region_ocr as ro
+        monkeypatch.setattr(ro, "_capture", lambda r: "IMG")
+        monkeypatch.setattr(ro, "_read_text", lambda img, mode="text": "Hello world")
+        out = ro.region_ocr({"region": "center"})
+        assert out == "[center] Hello world"
+
+    def test_empty_read_honest(self, monkeypatch):
+        import actions.region_ocr as ro
+        monkeypatch.setattr(ro, "_capture", lambda r: "IMG")
+        monkeypatch.setattr(ro, "_read_text", lambda img, mode="text": "")
+        assert "No readable text" in ro.region_ocr({})
+
+    def test_capture_failure_reported(self, monkeypatch):
+        import actions.region_ocr as ro
+        def boom(r):
+            raise RuntimeError("no mss")
+        monkeypatch.setattr(ro, "_capture", boom)
+        assert "Region read failed: no mss" in ro.region_ocr({})
+
+    def test_live_repeat_reports_changes_only(self, monkeypatch):
+        import actions.region_ocr as ro
+        monkeypatch.setattr(ro, "_capture", lambda r: "IMG")
+        frames = iter(["10%", "10%", "11%", "11%"])
+        monkeypatch.setattr(ro, "_read_text", lambda img, mode="text": next(frames))
+        out = ro.region_ocr({"repeat": 4, "interval": 0.5})
+        assert "4 captures" in out and "2 change(s)" in out
+        assert "#1: 10%" in out and "#3: 11%" in out
+        assert "#2" not in out                      # unchanged frames dropped
+
+    def test_bad_geometry_value_error(self, monkeypatch):
+        import actions.region_ocr as ro
+        with pytest.raises(ValueError):
+            ro._resolve_box("9,9,abc,9",
+                            {"left": 0, "top": 0, "width": 10, "height": 10},
+                            [{}])
+
+
+class TestGmailPlugin:
+    @pytest.fixture(autouse=True)
+    def _cfg(self, tmp_path, monkeypatch):
+        import plugins.gmail as g
+        monkeypatch.setattr(g, "_cfg_path", lambda: tmp_path / "api_keys.json")
+        self.g = g
+
+    def test_setup_needs_both_fields(self):
+        assert "Setup needs" in self.g.run({"action": "setup"})
+        assert "Setup needs" in self.g.run({"action": "setup",
+                                            "address": "a@b.com"})
+        # unparseable body (no address anywhere) → setup guidance
+        assert "Setup needs" in self.g.run(
+            {"action": "setup", "body": "not-an-email xyz"})
+
+    def test_setup_saves_json_body(self):
+        out = self.g.run({"action": "setup", "body":
+                          '{"gmail_address": "me@gmail.com", '
+                          '"gmail_app_password": "abcd efgh"}'})
+        # login verify will fail offline (no network) — but config MUST persist
+        import json as _json
+        data = _json.loads(self.g._cfg_path().read_text())
+        assert data["gmail_address"] == "me@gmail.com"
+        assert data["gmail_app_password"] == "abcd efgh"
+        assert "Saved" in out or "verified" in out
+
+    def test_setup_saves_key_value_body(self):
+        self.g.run({"action": "setup",
+                    "body": "me@gmail.com abcd efgh ijkl"})
+        import json as _json
+        data = _json.loads(self.g._cfg_path().read_text())
+        assert data["gmail_address"] == "me@gmail.com"
+
+    def test_no_setup_message(self):
+        assert "isn't set up yet" in self.g.run({"action": "unread"})
+        assert "isn't set up yet" in self.g.run({"action": "send",
+                                                 "to": "x@y.z"})
+
+    def test_bad_action(self):
+        assert "Unknown gmail action" in self.g.run({"action": "fly"})
+
+    def test_send_validates_address(self, _creds_fixture=True):
+        self.g._save_cfg({"gmail_address": "me@gmail.com",
+                          "gmail_app_password": "pw"})
+        out = self.g.run({"action": "send", "to": "not-an-address"})
+        assert "doesn't look like" in out
+
+    def test_decode_and_body_helpers(self):
+        import email.message
+        m = email.message.EmailMessage()
+        m["Subject"] = "Plain subject"
+        m.set_content("Body line 1\nBody line 2")
+        assert self.g._decode(m["Subject"]) == "Plain subject"
+        assert "Body line 1" in self.g._body(m)
+
+
+class TestCalendarPlugin:
+    @pytest.fixture(autouse=True)
+    def _cfg(self, tmp_path, monkeypatch):
+        import plugins.calendar as c
+        monkeypatch.setattr(c, "_cfg_path", lambda: tmp_path / "api_keys.json")
+        self.c = c
+
+    def test_no_url_message(self):
+        assert "isn't set up yet" in self.c.run({})
+        assert "isn't set up yet" in self.c.run({"action": "today"})
+
+    def test_setup_validates_scheme(self):
+        assert "http(s) ICS URL" in self.c.run({"action": "setup",
+                                                "url": "ftp://x"})
+        assert "http(s) ICS URL" in self.c.run({"action": "setup", "url": ""})
+
+    def test_setup_saves_url(self, monkeypatch):
+        monkeypatch.setattr(self.c, "_fetch_ics",
+                            lambda u, timeout=20: "BEGIN:VCALENDAR\nEND:VCALENDAR")
+        out = self.c.run({"action": "setup", "url": "https://x/y.ics"})
+        assert "saved and verified" in out
+        assert self.c._get_url() == "https://x/y.ics"
+
+    def test_parse_full_day_and_timed(self):
+        from datetime import datetime
+        ics = ("BEGIN:VCALENDAR\nBEGIN:VEVENT\n"
+               "DTSTART;VALUE=DATE:20261004\nSUMMARY:All day thing\nEND:VEVENT\n"
+               "BEGIN:VEVENT\nDTSTART:20261003T140000\nDTEND:20261003T150000\n"
+               "SUMMARY:Timed thing\nLOCATION:HQ\nEND:VEVENT\nEND:VCALENDAR")
+        evs = self.c.parse_ics(ics, datetime(2026, 10, 3), datetime(2026, 10, 6))
+        assert len(evs) == 2
+        assert evs[0]["allday"] is True or evs[1]["allday"] is True
+        timed = [e for e in evs if not e["allday"]][0]
+        assert timed["summary"] == "Timed thing" and timed["location"] == "HQ"
+
+    def test_rrule_weekly_expansion(self):
+        from datetime import datetime
+        ics = ("BEGIN:VEVENT\nDTSTART:20261003T100000\n"
+               "RRULE:FREQ=WEEKLY;COUNT=3\nSUMMARY:Standup\nEND:VEVENT")
+        evs = self.c.parse_ics(ics, datetime(2026, 10, 1), datetime(2026, 11, 1))
+        assert len(evs) == 3
+        assert evs[1]["start"].day == 10 and evs[2]["start"].day == 17
+
+    def test_rrule_runaway_bounded(self):
+        from datetime import datetime
+        ics = ("BEGIN:VEVENT\nDTSTART:20260101T100000\n"
+               "RRULE:FREQ=DAILY\nSUMMARY:Forever\nEND:VEVENT")
+        # a rule with no UNTIL/COUNT must still terminate fast
+        evs = self.c.parse_ics(ics, datetime(2026, 1, 1), datetime(2036, 1, 1))
+        assert len(evs) <= 1000
+
+    def test_unfold_joins_continuations(self):
+        from datetime import datetime
+        # RFC 5545: CRLF + ONE whitespace char is removed on unfold, so
+        # "the\r\n  title" (fold + original space) → "the title"
+        ics = ("BEGIN:VEVENT\nDTSTART:20261003T100000\n"
+               "SUMMARY:Part one of the\r\n  title continues\r\nEND:VEVENT")
+        evs = self.c.parse_ics(ics, datetime(2026, 10, 3), datetime(2026, 10, 4))
+        assert evs[0]["summary"] == "Part one of the title continues"
+
+    def test_bad_date_action(self):
+        assert "YYYY-MM-DD" in self.c.run({"action": "date", "date": "nope"})
+
+    def test_fetch_rejects_non_http(self):
+        with pytest.raises(ValueError):
+            self.c._fetch_ics("file:///etc/passwd")
+
+
+class TestPhoneVision:
+    @pytest.fixture(autouse=True)
+    def _cam(self, tmp_path, monkeypatch):
+        import actions.phone_vision as pv
+        monkeypatch.setattr(pv, "_camera_dir", lambda: tmp_path / "camera")
+        self.pv = pv
+        self.tmp = tmp_path
+
+    def test_no_frame_message(self):
+        assert "No phone camera frame yet" in self.pv.phone_vision({})
+
+    def test_stale_frame_rejected(self, monkeypatch):
+        import json as _json
+        import time as _time
+        d = self.tmp / "camera"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "frame.jpg").write_bytes(b"x" * 200)
+        (d / "frame.json").write_text(_json.dumps({"ts": _time.time() - 9999}))
+        out = self.pv.phone_vision({})
+        assert "old" in out and "📷" in out
+        # allow_stale flips it into the vision path (which needs a key →
+        # honest error, not a freshness error)
+        monkeypatch.setattr(self.pv, "_ask",
+                            lambda f, p, m: "DESK: laptop + cup")
+        out2 = self.pv.phone_vision({"allow_stale": True})
+        assert "DESK: laptop" in out2
+
+    def test_fresh_frame_answers(self, monkeypatch):
+        import json as _json
+        import time as _time
+        d = self.tmp / "camera"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "frame.jpg").write_bytes(b"y" * 200)
+        (d / "frame.json").write_text(_json.dumps({"ts": _time.time()}))
+        monkeypatch.setattr(self.pv, "_ask",
+                            lambda f, p, m: f"ans({m}): {p}")
+        out = self.pv.phone_vision({"prompt": "what do you see"})
+        assert "ans(ask): what do you see" in out
+        assert "phone camera" in out
+
+    def test_mode_passthrough(self, monkeypatch):
+        import json as _json
+        import time as _time
+        d = self.tmp / "camera"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "frame.jpg").write_bytes(b"z" * 200)
+        (d / "frame.json").write_text(_json.dumps({"ts": _time.time()}))
+        seen = {}
+        def fake_ask(f, p, m):
+            seen["mode"] = m
+            return "ok"
+        monkeypatch.setattr(self.pv, "_ask", fake_ask)
+        self.pv.phone_vision({"mode": "ocr"})
+        assert seen["mode"] == "ocr"
+
+    def test_camera_dir_matches_server(self):
+        # the two must never drift — a frame saved by the server has to be
+        # the file this action reads
+        import dashboard.server as ds
+        if not ds._DEPS_OK:
+            pytest.skip("dashboard deps missing")
+        ds._ensure_network_access = lambda port: None
+        ds._ensure_certs = lambda: False
+        import actions.phone_vision as pv
+        srv = ds.DashboardServer()._uploads_dir / "camera"
+        # both helpers walk the same candidate list — compare by function
+        # source identity is overkill; assert the same relative tail exists
+        assert srv.name == pv._camera_dir().name == "camera"
+
+
+class TestMeetingTool:
+    @pytest.fixture(autouse=True)
+    def _meet(self, tmp_path, monkeypatch):
+        import actions.meeting as m
+        monkeypatch.setattr(m, "_base_dir", lambda: tmp_path)
+        self.m = m
+
+    def test_status_and_idle_stop(self):
+        assert "Not recording" in self.m.meeting({"action": "status"})
+        assert "No meeting is being recorded" in self.m.meeting({"action": "stop"})
+
+    def test_start_stop_with_fake_audio(self, monkeypatch):
+        import numpy as np
+        rec = self.m._Recorder()
+        # fake stream: start/stop without hardware
+        class FakeStream:
+            def start(self): pass
+            def stop(self): pass
+            def close(self): pass
+        monkeypatch.setattr(self.m, "_RECORDER", rec)
+        # inject chunks manually via a patched start
+        def fake_start():
+            rec._stream = FakeStream()
+            rec._started = self.m.time.time()
+            rec._chunks = [np.zeros((16000, 1), dtype=np.float32)]  # 1s silence
+        monkeypatch.setattr(rec, "start", fake_start)
+        out = self.m.meeting({"action": "start"})
+        assert "started" in out
+        assert "Already recording" in self.m.meeting({"action": "start"})
+        assert "Recording" in self.m.meeting({"action": "status"})
+        # stop → WAV saved, no speech → honest message
+        monkeypatch.setattr(self.m, "_transcribe", lambda a: "")
+        out2 = self.m.meeting({"action": "stop"})
+        assert "heard no speech" in out2
+        wavs = list(self.m._meetings_dir().glob("*.wav"))
+        assert len(wavs) == 1 and wavs[0].stat().st_size > 1000
+        assert not rec.running
+
+    def test_stop_writes_transcript(self, monkeypatch):
+        import numpy as np
+        rec = self.m._Recorder()
+        class FakeStream:
+            def start(self): pass
+            def stop(self): pass
+            def close(self): pass
+        rec._stream = FakeStream()
+        rec._started = self.m.time.time()
+        rec._chunks = [np.zeros((16000, 1), dtype=np.float32)]
+        monkeypatch.setattr(self.m, "_RECORDER", rec)
+        monkeypatch.setattr(self.m, "_transcribe", lambda a: "Hello all, let's ship it.")
+        out = self.m.meeting({"action": "stop"})
+        assert "Transcript:" in out and "Hello all" in out
+        txts = list(self.m._meetings_dir().glob("*.txt"))
+        assert len(txts) == 1
+        assert "Hello all" in txts[0].read_text()
+
+    def test_list_and_summary_fallback(self, monkeypatch):
+        d = self.m._meetings_dir()
+        (d / "meeting-20261003-100000.txt").write_text("We decided X.")
+        out = self.m.meeting({"action": "list"})
+        assert "meeting-20261003-100000.txt" in out
+        monkeypatch.setattr(self.m, "_summarize", lambda t, w: "")
+        out2 = self.m.meeting({"action": "summary"})
+        assert "No Gemini key" in out2 and "We decided X." in out2
+
+    def test_summary_uses_model_when_available(self, monkeypatch):
+        d = self.m._meetings_dir()
+        (d / "meeting-a.txt").write_text("Decided: ship Friday.")
+        monkeypatch.setattr(self.m, "_summarize",
+                            lambda t, w: "## Decisions\n- ship Friday")
+        out = self.m.meeting({"action": "summary"})
+        assert "ship Friday" in out
+
+    def test_bad_action(self):
+        assert "Unknown meeting action" in self.m.meeting({"action": "fly"})
+
+
+class TestCameraFrameEndpoint:
+    """POST /api/camera-frame — the phone→PC vision pipe."""
+
+    @pytest.fixture(autouse=True)
+    def _app(self, tmp_path, monkeypatch):
+        pytest.importorskip("fastapi", reason="needs fastapi")
+        import dashboard.server as ds
+        if not ds._DEPS_OK:
+            pytest.skip("dashboard deps incomplete")
+        monkeypatch.setattr(ds, "_ensure_network_access", lambda port: None)
+        monkeypatch.setattr(ds, "_ensure_certs", lambda: False)
+        self.srv = ds.DashboardServer()
+        self.srv._uploads_dir = tmp_path / "uploads"
+        self.token = "tok-camera-1"
+        self.srv._tokens.add(self.token)
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        return TestClient(self.srv.app)
+
+    def _post(self, body, tok=None):
+        import json as _json
+        return self._client().post(
+            "/api/camera-frame",
+            content=_json.dumps(body),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {tok or self.token}"})
+
+    def test_rejects_unauthorized(self):
+        resp = self._post({"frame": "AAAA"}, tok="wrong")
+        assert resp.status_code == 401
+
+    def test_saves_valid_frame(self):
+        import base64 as _b64
+        payload = _b64.b64encode(b"\xff\xd8FAKEJPEG" + b"x" * 300).decode()
+        resp = self._post({"frame": payload, "ts": 1759500000.0})
+        assert resp.status_code == 200 and resp.json()["ok"] is True
+        frame = self.srv._uploads_dir / "camera" / "frame.jpg"
+        assert frame.is_file() and frame.stat().st_size > 100
+        meta = (self.srv._uploads_dir / "camera" / "frame.json").read_text()
+        assert "1759500000" in meta
+
+    def test_accepts_data_url_form(self):
+        import base64 as _b64
+        b64 = _b64.b64encode(b"\xff\xd8FRAME2" + b"y" * 200).decode()
+        resp = self._post({"frame": f"data:image/jpeg;base64,{b64}"})
+        assert resp.status_code == 200
+        frame = self.srv._uploads_dir / "camera" / "frame.jpg"
+        assert frame.is_file()
+
+    def test_rejects_bad_base64(self):
+        resp = self._post({"frame": "not!!base64"})
+        assert resp.status_code == 400
+
+    def test_rejects_tiny_and_huge(self):
+        import base64 as _b64
+        tiny = _b64.b64encode(b"ab").decode()           # < 100 bytes
+        assert self._post({"frame": tiny}).status_code == 413
+        huge = _b64.b64encode(b"z" * (5 * 1024 * 1024)).decode()
+        assert self._post({"frame": huge}).status_code == 413
+
+    def test_frame_overwrites_previous(self):
+        import base64 as _b64
+        for payload in (b"\xff\xd8FIRST" + b"a" * 200,
+                        b"\xff\xd8SECOND" + b"b" * 200):
+            resp = self._post({"frame": _b64.b64encode(payload).decode()})
+            assert resp.status_code == 200
+        data = (self.srv._uploads_dir / "camera" / "frame.jpg").read_bytes()
+        assert b"SECOND" in data and b"FIRST" not in data
+
+    def test_bad_json_rejected(self):
+        resp = self._client().post(
+            "/api/camera-frame", content="{not json",
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.token}"})
+        assert resp.status_code == 400

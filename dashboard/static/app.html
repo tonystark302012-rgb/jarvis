@@ -130,6 +130,20 @@
     #mirror-view img { width:100%; display:block; min-height:80px; }
     #mirror-btn.on { border-color: var(--accent); color: var(--accent); opacity:1; }
 
+    /* ── PHONE CAMERA (→ PC vision) ── */
+    #cam-view {
+      position:fixed; top:56px; left:8px; width:min(30vw,180px); z-index:40;
+      border:1px solid var(--border); border-radius:10px; overflow:hidden;
+      background:#000; box-shadow:0 8px 30px rgba(0,0,0,0.5);
+      display:none;
+    }
+    #cam-view video { width:100%; display:block; transform:scaleX(-1); }
+    #cam-view .cam-tag {
+      position:absolute; bottom:4px; left:6px; font-size:9px; font-weight:700;
+      color:var(--accent); text-shadow:0 1px 3px #000;
+    }
+    #cam-btn.on { border-color: var(--accent); color: var(--accent); opacity:1; }
+
     /* ── TOAST ── */
     #toast {
       position:fixed; top:66px; left:50%; transform:translateX(-50%) translateY(-8px);
@@ -158,10 +172,15 @@
     <input type="file" id="file-inp" multiple accept="*/*" style="display:none">
     <button id="mic-btn" onclick="doMic()" title="Voice command">🎤</button>
     <button class="btn btn-wake" id="mirror-btn" onclick="doMirror()" title="Screen mirror">🖥️</button>
+    <button class="btn btn-wake" id="cam-btn" onclick="doCamera()" title="Stream phone camera to JARVIS (PC vision)">📷</button>
     <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
     <button class="btn btn-send" onclick="doSend()">SEND</button>
   </footer>
   <div id="mirror-view" style="display:none"><img id="mirror-img" alt="PC screen"></div>
+  <div id="cam-view">
+    <video id="cam-video" autoplay playsinline muted></video>
+    <span class="cam-tag" id="cam-tag">LIVE</span>
+  </div>
 
   <script>
     // ── Auth — bearer token ───────────────────────────────────────────────────
@@ -248,6 +267,67 @@
     function _onFrame(m) {
       if (!_mirrorOn) return;
       document.getElementById('mirror-img').src = 'data:image/jpeg;base64,' + m.data;
+    }
+
+    // ── Phone camera → PC vision ─────────────────────────────────────────────
+    // Toggle: getUserMedia (rear cam) → a hidden <video> → a canvas grabs
+    // 640px JPEG frames every ~1.5s → POST /api/camera-frame. The PC's
+    // phone_vision action reads the latest one. Turning off stops every
+    // track, so the camera indicator light really goes out.
+    let _camOn = false, _camStream = null, _camTimer = null;
+    const _camCanvas = document.createElement('canvas');
+    async function doCamera() {
+      if (_camOn) { _camStop(); return; }
+      try {
+        _camStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1280 } },
+          audio: false,
+        });
+      } catch (err) {
+        toast('Camera denied: ' + (err && err.name ? err.name : 'error'));
+        return;
+      }
+      _camOn = true;
+      const v = document.getElementById('cam-video');
+      v.srcObject = _camStream;
+      await v.play().catch(() => {});
+      document.getElementById('cam-view').style.display = 'block';
+      document.getElementById('cam-btn').classList.add('on');
+      toast('Camera streaming to JARVIS');
+      _camTimer = setInterval(_camShot, 1500);
+      _camShot();
+    }
+    function _camStop() {
+      _camOn = false;
+      clearInterval(_camTimer); _camTimer = null;
+      if (_camStream) { _camStream.getTracks().forEach(t => t.stop()); _camStream = null; }
+      document.getElementById('cam-view').style.display = 'none';
+      document.getElementById('cam-btn').classList.remove('on');
+      toast('Camera off');
+    }
+    function _camShot() {
+      const v = document.getElementById('cam-video');
+      if (!_camOn || !v.videoWidth) return;
+      const scale = Math.min(1, 640 / v.videoWidth);
+      _camCanvas.width  = Math.round(v.videoWidth  * scale);
+      _camCanvas.height = Math.round(v.videoHeight * scale);
+      _camCanvas.getContext('2d').drawImage(v, 0, 0,
+        _camCanvas.width, _camCanvas.height);
+      let data;
+      try { data = _camCanvas.toDataURL('image/jpeg', 0.7); }
+      catch { return; }
+      _authFetch('/api/camera-frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ frame: data, ts: Date.now() / 1000 }),
+      }).then(r => r.json()).then(j => {
+        const tag = document.getElementById('cam-tag');
+        if (j && j.ok) tag.textContent = 'SENT ' + (j.size > 999
+          ? (j.size / 1024).toFixed(0) + 'KB' : j.size + 'B');
+        else if (j && j.error) tag.textContent = 'ERR';
+      }).catch(() => {
+        document.getElementById('cam-tag').textContent = 'OFFLINE';
+      });
     }
 
     // ── Mission Control feed (tool activity from the PC) ──────────────────────

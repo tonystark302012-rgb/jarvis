@@ -277,6 +277,12 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 | ☁️ **Git Snapshots** | Every successful `dev_agent` build commits itself — argv-only git, identity env-pinned, failure never fails the build |
 | ⏰ **Reminder List/Cancel** | `reminder action=list` shows upcoming scheduled reminders, `action=cancel 2` removes one |
 | 🌡 **Hourly Weather** | "Kaisa rahega aaj ka weather *next hours*" → a 12-hour strip alongside the daily forecast |
+| 🎬 **Scenes** | Rules grew multi-step: *'movie mode'* can open the player, set volume and start a focus session in order — stop on first failure, `scene(N steps)` in the rules list |
+| 🔡 **Live Region OCR** | `region_ocr` reads the live screen region (presets or `x,y,w,h`) — tesseract offline, Gemini vision next; `repeat` watches a value and reports only changes |
+| 📧 **Gmail** | Bundled plugin over IMAP/SMTP with an app password (stdlib only) — unread/list/read/send/search + guided setup with a live login check |
+| 📅 **Calendar** | Bundled plugin reading any ICS feed (Google Calendar's secret iCal URL) — upcoming/today/explicit date, RFC 5545 unfold + daily/weekly/monthly recurrence, bounded expansion |
+| 📷 **Phone → Vision** | The phone dashboard's 📷 button streams rear-camera JPEG frames to `/api/camera-frame`; `phone_vision` then answers *'what's on my desk'*, OCRs the frame or describes it — with a 5-minute freshness gate |
+| 🎙 **Meeting Recorder** | `meeting start/stop` records the mic to WAV, transcribes offline (faster-whisper), saves a `.txt` next to it and can summarise decisions/action items; 60-minute auto-cap |
 
 ### The guarantees behind it
 

@@ -18,3 +18,4 @@ cryptography>=42,<50            # dashboard AES round-trip test
 requests>=2.31,<3               # weather tests mock the network, not the lib
 psutil>=5.9,<8                  # scanner / system tests
 httpx2>=0.1                     # starlette TestClient — dashboard WS/login tests
+numpy>=1.24,<3                  # meeting recorder tests build fake audio buffers

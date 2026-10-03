@@ -78,26 +78,39 @@ def _mk_id(rule: dict) -> str:
 
 
 def add_rule(trigger: dict, tool: str, args: dict | None = None,
-             label: str = "") -> str:
+             label: str = "", steps: list | None = None) -> str:
+    """Single-tool rule when `steps` is absent; a scene (ordered tool calls)
+    when present. `tool` may be empty for scenes — label or first step names it."""
     _load()
     if not isinstance(trigger, dict) or not trigger.get("type"):
         return "Trigger needs a type: time | file | phrase | usb."
-    if not tool:
+    clean_steps: list[dict] = []
+    if isinstance(steps, list):
+        for st in steps:
+            if isinstance(st, dict) and st.get("tool"):
+                clean_steps.append({"tool": str(st["tool"]),
+                                    "args": dict(st.get("args") or {})})
+    if not clean_steps and not tool:
         return "A rule must name a tool to run."
     rule = {
         "id": "",
-        "label": (label or tool)[:80],
+        "label": (label or tool or
+                  (clean_steps[0]["tool"] if clean_steps else "scene"))[:80],
         "trigger": trigger,
-        "tool": tool,
+        "tool": tool or (clean_steps[0]["tool"] if clean_steps else ""),
         "args": dict(args or {}),
         "enabled": True,
         "created": time.strftime("%Y-%m-%d %H:%M"),
     }
+    if clean_steps:
+        rule["steps"] = clean_steps
     rule["id"] = f"{_mk_id(rule)}#{int(time.time()*1000) % 100000}"
     with _LOCK:
         _RULES.append(rule)
         _save()
-    return f"Rule added: WHEN {trigger.get('type')} {trigger.get('value') or trigger.get('path','')} → {tool}."
+    kind = f"scene({len(clean_steps)} steps)" if clean_steps else tool
+    return (f"Rule added: WHEN {trigger.get('type')} "
+            f"{trigger.get('value') or trigger.get('path','')} → {kind}.")
 
 
 def remove_rule(which: str) -> str:
@@ -133,21 +146,60 @@ def list_rules() -> str:
     for i, r in enumerate(rules, 1):
         t = r.get("trigger", {})
         state = "" if r.get("enabled", True) else " [off]"
+        steps = r.get("steps")
+        if isinstance(steps, list) and steps:
+            then = (f"scene({len(steps)} steps): " +
+                    " → ".join(str(s.get("tool")) for s in steps))
+        else:
+            then = f"{r.get('tool')} {r.get('args', {})}"
         lines.append(f"{i}. {r.get('label')}{state} — "
                      f"WHEN {t.get('type')} {t.get('value') or t.get('path','')} "
-                     f"→ {r.get('tool')} {r.get('args', {})}")
+                     f"→ {then}")
     return "Automation rules:\n" + "\n".join(lines)
 
 
 # ── trigger evaluation ───────────────────────────────────────────────────────
 
 def _run_rule(r: dict, why: str) -> str:
-    """Execute a rule's tool via the injected runner. Returns '' if no runner."""
+    """Execute a rule's tool (or every step of a scene) via the injected
+    runner. Returns '' if no runner. A scene runs its steps in order and
+    stops at the first failure — same contract as the task orchestrator."""
     if _RUNNER is None:
         print(f"[Rules] fired ({why}) but no runner wired — "
               f"{r.get('tool')} not executed.")
         return ""
     try:
+        steps = r.get("steps")
+        if isinstance(steps, list) and steps:
+            outs, done = [], 0
+            for st in steps:
+                if not isinstance(st, dict):
+                    continue
+                tool = str(st.get("tool") or "")
+                if not tool:
+                    continue
+                try:
+                    o = _RUNNER(tool, dict(st.get("args") or {}))
+                except Exception as se:
+                    msg = (f"Scene '{r.get('label')}' failed at step "
+                           f"{done + 1} ({tool}): {se}")
+                    if _NOTIFY:
+                        try:
+                            _NOTIFY(msg)
+                        except Exception:
+                            pass
+                    return msg
+                done += 1
+                if o:
+                    outs.append(str(o))
+            msg = (f"Scene '{r.get('label')}' fired ({why}): "
+                   f"{done}/{len(steps)} steps done.")
+            if _NOTIFY:
+                try:
+                    _NOTIFY(msg)
+                except Exception:
+                    pass
+            return " | ".join(outs + [msg])
         out = _RUNNER(r.get("tool", ""), dict(r.get("args") or {}))
         msg = f"Rule '{r.get('label')}' fired ({why})."
         if _NOTIFY:
@@ -288,8 +340,15 @@ def manage_rules(parameters: dict = None, player=None, session_memory=None) -> s
                 args = json.loads(args)
             except ValueError:
                 args = {}
+        steps = params.get("steps")
+        if isinstance(steps, str):
+            try:
+                steps = json.loads(steps)
+            except ValueError:
+                steps = None
         result = add_rule(trigger if isinstance(trigger, dict) else {},
-                          tool, args, str(params.get("label", "")))
+                          tool, args, str(params.get("label", "")),
+                          steps=steps if isinstance(steps, list) else None)
     elif action == "remove":
         result = remove_rule(str(params.get("which", "")))
     elif action == "tick":
@@ -311,10 +370,12 @@ TOOL = {
     "description": (
         "When/then automation rules that run tools on triggers. Actions: "
         "list (default), add (trigger_type: time HH:MM | file path + value "
-        "appears/removed/changed | phrase keyword; plus tool + tool_args), "
+        "appears/removed/changed | phrase keyword; plus tool + tool_args — "
+        "OR steps: JSON list of {tool, args} to run in order as a scene), "
         "remove (by number or match), tick (evaluate now). Use when the user "
         "wants 'every morning at 8 do X', 'when a file appears in Downloads "
-        "do Y', 'when I say Z do W'."
+        "do Y', 'when I say Z do W', or a multi-action routine like "
+        "'movie mode' (open player, dim lights, silence notifications)."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -326,6 +387,9 @@ TOOL = {
             "path": {"type": "STRING", "description": "Folder/file path for file trigger"},
             "tool": {"type": "STRING", "description": "Tool to run when triggered"},
             "tool_args": {"type": "STRING", "description": "JSON args for the tool"},
+            "steps": {"type": "STRING",
+                      "description": "JSON list of {tool, args} — ordered scene steps; "
+                                    "runs instead of tool/tool_args when present"},
             "label": {"type": "STRING", "description": "Human name for the rule"},
             "which": {"type": "STRING", "description": "Rule number or text for remove"},
         },
