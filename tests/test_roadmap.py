@@ -100,7 +100,9 @@ class TestPrivacy:
         """Wiring: the gate must be checked before params are even read —
         assert it sits at the top of each cloud-bound handler source."""
         for path in ("actions/research.py", "actions/scrape.py",
-                     "actions/web_search.py", "actions/phone_vision.py"):
+                     "actions/web_search.py", "actions/phone_vision.py",
+                     "actions/file_processor.py", "actions/flight_finder.py",
+                     "actions/background_monitor.py"):
             src = Path(path).read_text(encoding="utf-8")
             # gate call exists and precedes any network import in handler
             assert '_privacy.gate(' in src, path
@@ -2528,3 +2530,79 @@ class TestMultiAgentPipeline:
         assert "task" in ma.TOOL["parameters"]["required"]
         assert "apply" in ma.TOOL["parameters"]["properties"]
         assert ma.TOOL["handler"] is ma.multi_agent
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 3 — privacy gates: file_processor / background_monitor / flight_finder
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestPrivacyGateCoverage:
+    """The three CLOUD_TOOLS that had no gate() call now gate honestly,
+    and file_processor keeps its genuinely-local operations working —
+    same contract as region_ocr's tesseract branch."""
+
+    @pytest.fixture(autouse=True)
+    def _privacy_on(self):
+        import core.privacy as cp
+        cp.set(True)
+        yield
+        cp.set(False)
+
+    def test_flight_finder_refuses_before_params(self):
+        import actions.flight_finder as ff
+        out = ff.flight_finder({"origin": "DEL", "destination": "BOM",
+                                "date": "2026-11-01"})
+        assert "Privacy mode is ON" in out
+
+    def test_background_monitor_skips_cloud_checks(self, monkeypatch):
+        import actions.background_monitor as bm
+        import actions.web_search as ws
+        calls = []
+
+        def _record(topic, max_results=5):
+            calls.append(topic)
+            return []
+        monkeypatch.setattr(ws, "_ddg_news", _record)
+        monkeypatch.setattr(bm, "_load", lambda: {
+            "ai-news": {"topic": "AI news", "last_check": "2000-01-01"}})
+        out = bm.check_all()
+        assert out == []                      # no alerts, no errors
+        assert calls == []                    # NOT ONE cloud search
+        # topics stay unmarked → monitoring self-resumes when privacy off
+        assert bm._load()["ai-news"]["last_check"] == "2000-01-01"
+
+    def test_file_processor_refuses_model_branch(self, tmp_path):
+        import actions.file_processor as fp
+        p = tmp_path / "data.json"
+        p.write_text('{"a": 1}', encoding="utf-8")
+        out = fp.file_processor({"file_path": str(p), "action": "analyze"})
+        assert "Privacy mode is ON" in out
+
+    def test_file_processor_local_json_ops_still_work(self, tmp_path):
+        import actions.file_processor as fp
+        p = tmp_path / "data.json"
+        p.write_text('{"a": 1}', encoding="utf-8")
+        out = fp.file_processor({"file_path": str(p), "action": "validate"})
+        assert "Privacy mode is ON" not in out
+        assert "Valid JSON" in out
+        # formatting is pure local I/O too
+        out = fp.file_processor({"file_path": str(p), "action": "format"})
+        assert "Formatted JSON saved" in out
+
+    def test_file_processor_default_action_is_gated(self, tmp_path):
+        # omitted action on JSON defaults to 'analyze' → model → refused
+        import actions.file_processor as fp
+        p = tmp_path / "data.json"
+        p.write_text('{"a": 1}', encoding="utf-8")
+        out = fp.file_processor({"file_path": str(p)})
+        assert "Privacy mode is ON" in out
+
+    def test_file_processor_text_word_count_local(self, tmp_path):
+        import actions.file_processor as fp
+        p = tmp_path / "notes.txt"
+        p.write_text("one two three", encoding="utf-8")
+        out = fp.file_processor({"file_path": str(p), "action": "word_count"})
+        assert "Word count: 3 words" in out
+        # …but summarize would go to the cloud
+        out = fp.file_processor({"file_path": str(p), "action": "summarize"})
+        assert "Privacy mode is ON" in out

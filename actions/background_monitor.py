@@ -103,6 +103,15 @@ def check_all() -> list[str]:
     Run all pending topic checks (once per day per topic).
     Returns a list of [MONITOR_ALERT] strings — empty if nothing new.
     """
+    from core import privacy as _privacy
+    blocked = _privacy.gate("background_monitor")
+    if blocked:
+        # Monitoring searches are cloud-bound; skip the whole run without
+        # marking topics checked, so monitoring resumes by itself the
+        # moment privacy mode goes off.
+        print(f"[Monitor] {blocked}")
+        return []
+
     from actions.web_search import _ddg_news
 
     monitors = _load()

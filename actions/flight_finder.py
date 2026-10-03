@@ -293,6 +293,12 @@ def _save_to_desktop(content: str, origin: str, destination: str) -> str:
 
 
 def flight_finder(parameters: dict, player=None, speak=None) -> str:
+    # Privacy gate FIRST: flight search always leaves the machine.
+    from core import privacy as _privacy
+    blocked = _privacy.gate("flight_finder")
+    if blocked:
+        return blocked
+
     params = parameters or {}
 
     origin      = params.get("origin",      "").strip()
