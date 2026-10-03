@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import threading
@@ -12,13 +14,26 @@ import webbrowser
 from pathlib import Path
 from typing import Optional
 
-from playwright.async_api import (
-    async_playwright,
-    BrowserContext,
-    Page,
-    Playwright,
-    TimeoutError as PlaywrightTimeout,
-)
+# Playwright is only needed for INTERACTIVE actions (click/type/…). Native
+# go_to/search use the user's own browser and keep working without it, and
+# the agentic loop's core (parse/format/verify/driver) stays importable in
+# minimal environments (CI, headless test venvs) so it can be unit-tested.
+try:
+    from playwright.async_api import (
+        async_playwright,
+        BrowserContext,
+        Page,
+        Playwright,
+        TimeoutError as PlaywrightTimeout,
+    )
+    _HAS_PLAYWRIGHT = True
+except ImportError:                      # pragma: no cover - env without playwright
+    _HAS_PLAYWRIGHT = False
+    async_playwright = None              # type: ignore[assignment]
+    BrowserContext = Page = Playwright = object  # type: ignore[assignment,misc]
+
+    class PlaywrightTimeout(Exception):  # type: ignore[no-redef]
+        """Placeholder so except-clauses keep working without playwright."""
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
 def _normalize_url(url: str) -> str:
@@ -460,6 +475,8 @@ class _BrowserSession:
         self._page:    Page           | None = None
 
     def start(self):
+        if not _HAS_PLAYWRIGHT:
+            return          # run() reports the real reason on first use
         if self._thread and self._thread.is_alive():
             return
         self._thread = threading.Thread(
@@ -482,6 +499,15 @@ class _BrowserSession:
 
     def run(self, coro, timeout: int = 60) -> str:
         if not self._loop:
+            try:
+                coro.close()      # never-awaited coroutines must not warn
+            except Exception:
+                pass
+            if not _HAS_PLAYWRIGHT:
+                raise RuntimeError(
+                    "playwright is not installed — run: pip install playwright "
+                    "&& playwright install chromium (go_to/search still work "
+                    "without it).")
             raise RuntimeError(f"Session for '{self.browser_name}' not started.")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
@@ -723,6 +749,39 @@ class _BrowserSession:
     async def get_url(self) -> str:
         page = await self._get_page()
         return page.url
+
+    async def snapshot(self) -> dict:
+        """EXTRACT stage: current URL + numbered interactive elements.
+
+        Stamps data-jarvis-idx on the live DOM (see _SNAPSHOT_JS) so a
+        later agent_act() addresses the exact element the reasoner chose.
+        """
+        page = await self._get_page()
+        elements = await page.evaluate(_SNAPSHOT_JS)
+        return {"url": page.url, "elements": list(elements or [])}
+
+    async def agent_act(self, decision: dict) -> str:
+        """ACT stage: execute one parsed decision against the stamped DOM."""
+        page = await self._get_page()
+        action = decision.get("action")
+        if action == "scroll":
+            dy = -600 if decision.get("direction") == "up" else 600
+            await page.evaluate(f"window.scrollBy(0, {dy})")
+            return f"scrolled {decision.get('direction', 'down')}"
+        idx  = decision.get("index")
+        sel  = f'[data-jarvis-idx="{idx}"]'
+        el   = page.locator(sel).first
+        if await el.count() == 0:
+            # DOM moved between snapshot and act — re-stamp is the caller's
+            # job (next EXTRACT); here we just report honestly.
+            raise RuntimeError(f"element [{idx}] no longer on the page")
+        if action == "click":
+            await el.click(timeout=4000)
+            return f"clicked [{idx}]"
+        if action == "type":
+            await el.fill(str(decision.get("text") or ""), timeout=4000)
+            return f"typed into [{idx}]: {decision.get('text', '')!r}"
+        raise RuntimeError(f"agent cannot act on {action!r}")
 
     async def fill_form(self, fields: dict) -> str:
         page    = await self._get_page()
@@ -1041,6 +1100,8 @@ def browser_control(
             result = sess.run(sess.forward())
         elif action == "reload":
             result = sess.run(sess.reload())
+        elif action == "agent":
+            result = _run_agent(sess, params, player)
         else:
             result = f"Unknown browser action: '{action}'"
 
@@ -1060,6 +1121,264 @@ def _log(player, text: str):
         player.write_log(f"[browser] {short[:60]}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Agentic browser loop — EXTRACT → REASON → ACT → VERIFY
+#
+# The session methods below need playwright; everything else (snapshot
+# formatting, decision parsing, verification, the driver itself) is pure
+# Python so the LOOP can be unit-tested with scripted fakes — the loop is
+# where tasks actually succeed or fail, it must be proven without a
+# browser.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Walks interactive elements, HIDES nothing that is off-screen (scrollable
+# counts as reachable), skips invisible ones, stamps each with
+# data-jarvis-idx so ACT can address the SAME element the reasoner saw,
+# and caps at 80 so a DOM-soup page cannot blow the LLM context.
+_SNAPSHOT_JS = """
+() => {
+  const sel = 'a,button,input,select,textarea,summary,' +
+    '[role=button],[role=link],[role=tab],[role=menuitem],' +
+    '[role=checkbox],[role=radio],[role=textbox],[role=searchbox],' +
+    '[onclick],[contenteditable="true"]';
+  const out = [];
+  let n = 0;
+  for (const el of document.querySelectorAll(sel)) {
+    if (n >= 80) break;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    const st = getComputedStyle(el);
+    if (st.visibility === 'hidden' || st.display === 'none') continue;
+    if (el.disabled) continue;
+    const role = el.getAttribute('role') ||
+      (el.tagName === 'A' ? 'link' :
+       el.tagName === 'BUTTON' ? 'button' : el.tagName.toLowerCase());
+    const name = (el.getAttribute('aria-label') || el.innerText ||
+                  el.getAttribute('placeholder') || el.getAttribute('name') ||
+                  '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+    el.setAttribute('data-jarvis-idx', String(n));
+    out.push({i: n, role: role, name: name, tag: el.tagName.toLowerCase()});
+    n += 1;
+  }
+  return out;
+}
+"""
+
+
+def _format_snapshot(state: dict) -> str:
+    """Numbered accessibility-style lines the reasoner picks from.
+
+        [0] link "Home"
+        [12] button "Add to cart"
+    """
+    url = str(state.get("url") or "?")
+    lines = [f"URL: {url}"]
+    els = state.get("elements") or []
+    if not els:
+        lines.append("(no interactive elements found)")
+    for e in els:
+        name = str(e.get("name") or "").strip() or "(no label)"
+        lines.append(f'[{e.get("i")}] {e.get("role", "?")} "{name}"')
+    return "\n".join(lines)
+
+
+_ALLOWED_ACTIONS = ("click", "type", "scroll", "done", "fail")
+
+
+def _parse_decision(raw: str) -> dict:
+    """LLM reply → validated decision dict. Raises ValueError if unusable.
+
+    Tolerates markdown fences and prose around the JSON (local models
+    love both), requires the fields each action needs — a click with no
+    index is a bug, not a decision.
+    """
+    m = re.search(r"\{.*\}", str(raw or ""), re.S)
+    if not m:
+        raise ValueError("no JSON object in reply")
+    try:
+        d = json.loads(m.group(0))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"invalid JSON: {e}") from e
+    if not isinstance(d, dict):
+        raise ValueError("decision is not an object")
+    action = str(d.get("action") or "").lower().strip()
+    if action not in _ALLOWED_ACTIONS:
+        raise ValueError(f"action must be one of {_ALLOWED_ACTIONS}, got {action!r}")
+    out: dict = {"action": action,
+                 "reason": str(d.get("reason") or d.get("summary") or "")[:300]}
+    if action in ("click", "type"):
+        idx = d.get("index", d.get("id", d.get("i")))
+        try:
+            out["index"] = int(idx)
+        except (TypeError, ValueError):
+            raise ValueError(f"{action} needs a numeric index, got {idx!r}") from None
+        if out["index"] < 0:
+            raise ValueError("index must be >= 0")
+    if action == "type":
+        out["text"] = str(d.get("text") or "")
+        if not out["text"]:
+            raise ValueError("type needs non-empty text")
+    if action == "scroll":
+        dirn = str(d.get("direction") or d.get("dir") or "down").lower().strip()
+        out["direction"] = "up" if dirn == "up" else "down"
+    return out
+
+
+def _verify(before: dict, after: dict, decision: dict, act_note: str) -> str:
+    """VERIFY stage: what did the action actually change?
+
+    Pure — compares the pre/post snapshots and the action's own result
+    into an honest one-line note the next REASON step sees.
+    """
+    if not act_note:
+        act_note = "ok"
+    b_url, a_url = str(before.get("url") or ""), str(after.get("url") or "")
+    if a_url and a_url != b_url:
+        return f"navigated: {b_url} -> {a_url}"
+    if decision.get("action") == "click":
+        idx = decision.get("index")
+        after_ids = {e.get("i") for e in (after.get("elements") or [])}
+        if idx not in after_ids:
+            return "clicked element is gone (page updated)"
+    b_ids = {e.get("i") for e in (before.get("elements") or [])}
+    a_ids = {e.get("i") for e in (after.get("elements") or [])}
+    if b_ids != a_ids:
+        return "page controls changed"
+    return f"no visible change yet ({act_note})"
+
+
+def agent_loop(goal: str, extract, reason, act, *, max_steps: int = 8,
+               log=None) -> str:
+    """EXTRACT → REASON → ACT → VERIFY, repeated until done/fail/budget.
+
+    All four stages are injected callables so the driver is fully
+    testable:
+      extract()               -> state dict {url, elements:[{i,role,name}]}
+      reason(goal, state, history) -> decision dict (see _parse_decision)
+      act(decision)           -> note str (raises on failure)
+    History accumulates ACT + VERIFY notes so the reasoner sees the
+    consequences of its own actions instead of repeating them.
+    """
+    history: list[str] = []
+    act_fails = 0
+    for step in range(1, max(1, int(max_steps)) + 1):
+        # ── EXTRACT ──
+        try:
+            state = extract()
+        except Exception as e:
+            return (f"AGENT stopped at step {step}: extract failed — {e}")
+
+        # ── REASON ──
+        try:
+            decision = reason(goal, state, history)
+        except Exception as e:
+            return (f"AGENT stopped at step {step}: reasoner failed — {e}")
+        if not isinstance(decision, dict) or decision.get("action") not in _ALLOWED_ACTIONS:
+            return (f"AGENT stopped at step {step}: reasoner returned "
+                    f"unusable decision {decision!r}")
+
+        action = decision["action"]
+        if action == "done":
+            summary = decision.get("reason") or "goal complete"
+            url = str(state.get("url") or "")
+            return f"AGENT DONE at step {step}/{max_steps}: {summary} ({url})"
+        if action == "fail":
+            why = decision.get("reason") or "goal not achievable on this page"
+            return f"AGENT FAILED at step {step}/{max_steps}: {why}"
+
+        # ── ACT ──
+        try:
+            note = act(decision)
+            act_fails = 0
+        except Exception as e:
+            act_fails += 1
+            note = f"action error: {e}"
+            history.append(f"step {step}: {json.dumps(decision, ensure_ascii=False)}"
+                           f" -> {note}")
+            if act_fails >= 3:
+                return (f"AGENT stopped at step {step}: {act_fails} consecutive "
+                        f"action failures (last: {note})")
+            if log:
+                log(f"step {step}: {note}")
+            continue
+
+        # ── VERIFY ──
+        before_state = state
+        try:
+            after = extract()
+        except Exception:
+            after = dict(before_state)     # unverifiable ≠ pretend success
+        vnote = _verify(state, after, decision, note)
+        history.append(f"step {step}: {json.dumps(decision, ensure_ascii=False)}"
+                       f" -> {note}; verify: {vnote}")
+        if log:
+            log(f"step {step}: {note} [{vnote}]")
+
+    last = history[-1] if history else "no steps taken"
+    return (f"AGENT: budget of {max_steps} steps exhausted without finishing. "
+            f"Last: {last}")
+
+
+def _make_llm_reason(timeout: int = 90):
+    """REASON stage backed by the local LLM (Ollama default).
+
+    One retry on unparseable output (local models fence JSON), then the
+    ValueError propagates — the loop reports it honestly instead of
+    guessing. Located here (not module import) so environments without
+    core.llm_client still import.
+    """
+    def reason(goal: str, state: dict, history: list[str]) -> dict:
+        from core.llm_client import call_llm_text
+        snap = _format_snapshot(state)
+        steps = "\n".join(history[-6:]) or "(none yet)"
+        prompt = (
+            "You are driving a web browser to complete ONE goal.\n"
+            f"GOAL: {goal}\n\n"
+            f"CURRENT PAGE (interactive elements, numbered):\n{snap}\n\n"
+            f"STEPS ALREADY TAKEN:\n{steps}\n\n"
+            "Reply with ONLY one JSON object, no prose:\n"
+            '{"action": "click"|"type"|"scroll"|"done"|"fail", '
+            '"index": <number from [n]>, "text": "<for type>", '
+            '"direction": "down"|"up" (for scroll), '
+            '"reason": "<one short sentence>"}\n'
+            "Rules: click/type index MUST come from the numbered list; "
+            'say {"action": "done", "reason": "<what you found>"} as soon as '
+            "the goal is achieved; say fail only if it is impossible here."
+        )
+        sys_p = ("Browser automation agent. Output exactly one JSON object "
+                 "and nothing else.")
+        last_err = None
+        for _attempt in range(2):
+            raw = call_llm_text(prompt, system=sys_p, timeout=timeout)
+            try:
+                return _parse_decision(raw)
+            except ValueError as e:
+                last_err = e
+        raise ValueError(f"unusable LLM decision after retry: {last_err}")
+    return reason
+
+
+def _run_agent(sess, params: dict, player=None) -> str:
+    """Handler glue for action=agent: wires the real session into the loop."""
+    goal = str(params.get("goal") or params.get("query") or "").strip()
+    if not goal:
+        return ("Give the agent a goal — e.g. "
+                "action=agent, goal='find the cheapest 1TB SSD and open it'.")
+    try:
+        max_steps = max(1, min(25, int(params.get("max_steps") or 8)))
+    except (TypeError, ValueError):
+        max_steps = 8
+    reason = _make_llm_reason()
+    return agent_loop(
+        goal,
+        extract=lambda: sess.run(sess.snapshot(), timeout=30),
+        reason=reason,
+        act=lambda d: sess.run(sess.agent_act(d), timeout=30),
+        max_steps=max_steps,
+        log=lambda m: _log(player, f"agent {m}"),
+    )
+
+
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "browser_control",
@@ -1069,7 +1388,7 @@ TOOL = {
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
+                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | agent | switch | list_browsers | close | close_all"
             },
             "browser": {
                 "type": "STRING",
@@ -1122,6 +1441,14 @@ TOOL = {
             "clear_first": {
                 "type": "BOOLEAN",
                 "description": "Clear field before typing (default: true)"
+            },
+            "goal": {
+                "type": "STRING",
+                "description": "What the agentic loop should achieve on the page (action=agent), e.g. 'find the cheapest 1TB SSD and open its product page'."
+            },
+            "max_steps": {
+                "type": "INTEGER",
+                "description": "Agent loop budget: EXTRACT→REASON→ACT→VERIFY iterations before it stops (default 8, max 25)."
             }
         },
         "required": [

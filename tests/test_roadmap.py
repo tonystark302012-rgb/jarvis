@@ -1987,3 +1987,307 @@ class TestDashboardTabs:
         s = Path("main.py").read_text(encoding="utf-8")
         i = s.index("def _on_show_content")
         assert "broadcast(msg, history=True)" in s[i:i + 1300]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 3 — agentic browser loop EXTRACT→REASON→ACT→VERIFY
+# (playwright is optional now — the loop core imports and is tested here)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBrowserDecisionParse:
+    """_parse_decision — LLM reply → validated decision."""
+
+    def test_click_parses(self):
+        from actions.browser_control import _parse_decision
+        d = _parse_decision('{"action": "click", "index": 12, "reason": "add"}')
+        assert d == {"action": "click", "index": 12, "reason": "add"}
+
+    def test_type_requires_text(self):
+        from actions.browser_control import _parse_decision
+        d = _parse_decision('{"action":"type","index":3,"text":"hello"}')
+        assert d["text"] == "hello" and d["index"] == 3
+        with pytest.raises(ValueError, match="non-empty text"):
+            _parse_decision('{"action":"type","index":3,"text":""}')
+
+    def test_click_requires_numeric_index(self):
+        from actions.browser_control import _parse_decision
+        for bad in ('{"action":"click","reason":"x"}',
+                    '{"action":"click","index":"abc"}',
+                    '{"action":"click","index":-1}'):
+            with pytest.raises(ValueError):
+                _parse_decision(bad)
+
+    def test_done_and_fail(self):
+        from actions.browser_control import _parse_decision
+        assert _parse_decision('{"action":"done","reason":"found price 42"}')["action"] == "done"
+        assert _parse_decision('{"action":"fail","reason":"captcha wall"}')["action"] == "fail"
+
+    def test_scroll_direction_normalises(self):
+        from actions.browser_control import _parse_decision
+        assert _parse_decision('{"action":"scroll","direction":"sideways"}')["direction"] == "down"
+        assert _parse_decision('{"action":"scroll","direction":"up"}')["direction"] == "up"
+
+    def test_fenced_json_and_prose_tolerated(self):
+        from actions.browser_control import _parse_decision
+        raw = 'Sure! Here is my decision:\n```json\n{"action":"click","index":5}\n```\nHope that helps.'
+        assert _parse_decision(raw)["index"] == 5
+        # prose BEFORE a valid object
+        assert _parse_decision('thinking... {"action":"done","reason":"ok"}')["action"] == "done"
+
+    def test_garbage_raises(self):
+        from actions.browser_control import _parse_decision
+        for bad in ("", "click the button", "{not json}", "[1,2]", "42"):
+            with pytest.raises(ValueError):
+                _parse_decision(bad)
+
+    def test_unknown_action_raises(self):
+        from actions.browser_control import _parse_decision
+        with pytest.raises(ValueError, match="action must be"):
+            _parse_decision('{"action":"dance","index":1}')
+
+
+class TestBrowserSnapshotFormat:
+    def test_numbered_lines(self):
+        from actions.browser_control import _format_snapshot
+        s = _format_snapshot({"url": "https://x.dev",
+                              "elements": [
+                                  {"i": 0, "role": "link", "name": "Home"},
+                                  {"i": 12, "role": "button", "name": "Add to cart"}]})
+        assert "URL: https://x.dev" in s
+        assert '[0] link "Home"' in s
+        assert '[12] button "Add to cart"' in s
+
+    def test_empty_state(self):
+        from actions.browser_control import _format_snapshot
+        s = _format_snapshot({"url": "about:blank", "elements": []})
+        assert "(no interactive elements found)" in s
+
+    def test_unlabelled_element_gets_placeholder(self):
+        from actions.browser_control import _format_snapshot
+        s = _format_snapshot({"url": "u", "elements": [{"i": 3, "role": "button", "name": ""}]})
+        assert '[3] button "(no label)"' in s
+
+
+class TestBrowserVerify:
+    def _st(self, url, ids):
+        return {"url": url, "elements": [{"i": i, "role": "x", "name": "n"}
+                                         for i in ids]}
+
+    def test_navigation_detected(self):
+        from actions.browser_control import _verify
+        note = _verify(self._st("a", [0]), self._st("b", [0]),
+                       {"action": "click", "index": 0}, "clicked [0]")
+        assert note.startswith("navigated: a -> b")
+
+    def test_clicked_element_gone_means_page_updated(self):
+        from actions.browser_control import _verify
+        note = _verify(self._st("u", [0, 1]), self._st("u", [0]),
+                       {"action": "click", "index": 1}, "clicked [1]")
+        assert "page updated" in note
+
+    def test_no_change_reported_honestly(self):
+        from actions.browser_control import _verify
+        note = _verify(self._st("u", [0, 1]), self._st("u", [0, 1]),
+                       {"action": "type", "index": 0}, "typed")
+        assert "no visible change" in note
+
+    def test_controls_changed(self):
+        from actions.browser_control import _verify
+        note = _verify(self._st("u", [0]), self._st("u", [0, 7]),
+                       {"action": "click", "index": 0}, "clicked [0]")
+        assert note == "page controls changed"
+
+
+class TestBrowserAgentLoop:
+    """The driver itself — scripted stages, no browser."""
+
+    def _state(self, url="https://shop.test", ids=(0, 1)):
+        return {"url": url,
+                "elements": [{"i": i, "role": "button", "name": f"b{i}"}
+                             for i in ids]}
+
+    def test_happy_path_done(self):
+        from actions.browser_control import agent_loop
+        decisions = [
+            {"action": "click", "index": 1, "reason": "open list"},
+            {"action": "done", "reason": "found 3 results"},
+        ]
+        calls = {"extract": 0, "act": 0}
+
+        def extract():
+            calls["extract"] += 1
+            return self._state(ids=(0, 1))
+
+        def reason(goal, state, history):
+            return decisions.pop(0)
+
+        def act(d):
+            calls["act"] += 1
+            return f"clicked [{d['index']}]"
+
+        out = agent_loop("find results", extract, reason, act, max_steps=5)
+        assert out.startswith("AGENT DONE at step 2/5")
+        assert "found 3 results" in out
+        assert calls == {"extract": 3, "act": 1}   # extract also runs for VERIFY
+
+    def test_fail_decision_reported(self):
+        from actions.browser_control import agent_loop
+        out = agent_loop("impossible",
+                         extract=lambda: self._state(),
+                         reason=lambda g, s, h: {"action": "fail",
+                                                 "reason": "captcha wall"},
+                         act=lambda d: "unused", max_steps=3)
+        assert out.startswith("AGENT FAILED at step 1/3")
+        assert "captcha wall" in out
+
+    def test_budget_exhaustion_mentions_history(self):
+        from actions.browser_control import agent_loop
+        out = agent_loop("endless",
+                         extract=lambda: self._state(),
+                         reason=lambda g, s, h: {"action": "scroll",
+                                                 "direction": "down"},
+                         act=lambda d: "scrolled down", max_steps=4)
+        assert "budget of 4 steps exhausted" in out
+        assert "verify" in out                       # history carried through
+
+    def test_three_consecutive_act_failures_stop(self):
+        from actions.browser_control import agent_loop
+        out = agent_loop("x",
+                         extract=lambda: self._state(),
+                         reason=lambda g, s, h: {"action": "click", "index": 9},
+                         act=lambda d: (_ for _ in ()).throw(RuntimeError("gone")),
+                         max_steps=10)
+        assert "3 consecutive action failures" in out
+
+    def test_act_failure_then_success_resets_counter(self):
+        from actions.browser_control import agent_loop
+        seq = [RuntimeError("flaky"), RuntimeError("flaky"), None]
+        done = {"n": 0}
+
+        def act(d):
+            err = seq[min(done["n"], 2)]
+            done["n"] += 1
+            if err:
+                raise err
+            return "clicked"
+
+        def reason(g, s, h):
+            if done["n"] >= 3:
+                return {"action": "done", "reason": "recovered"}
+            return {"action": "click", "index": 1}
+
+        out = agent_loop("x", lambda: self._state(), reason, act, max_steps=9)
+        assert out.startswith("AGENT DONE")
+
+    def test_extract_failure_stops_honestly(self):
+        from actions.browser_control import agent_loop
+        def boom():
+            raise RuntimeError("browser closed")
+        out = agent_loop("x", boom, lambda g, s, h: {"action": "done"},
+                         lambda d: "", max_steps=3)
+        assert "extract failed" in out and "browser closed" in out
+
+    def test_reasoner_failure_stops_honestly(self):
+        from actions.browser_control import agent_loop
+        def bad_reason(g, s, h):
+            raise RuntimeError("ollama down")
+        out = agent_loop("x", lambda: self._state(), bad_reason,
+                         lambda d: "", max_steps=3)
+        assert "reasoner failed" in out and "ollama down" in out
+
+    def test_unusable_decision_stops(self):
+        from actions.browser_control import agent_loop
+        out = agent_loop("x", lambda: self._state(),
+                         lambda g, s, h: "click [3]", lambda d: "",
+                         max_steps=3)
+        assert "unusable decision" in out
+
+    def test_history_visible_to_reasoner(self):
+        from actions.browser_control import agent_loop
+        seen = []
+
+        def reason(g, s, h):
+            seen.append(list(h))
+            if len(h) >= 1:
+                return {"action": "done", "reason": "saw history"}
+            return {"action": "click", "index": 1}
+
+        agent_loop("x", lambda: self._state(), reason,
+                   lambda d: "clicked [1]", max_steps=4)
+        # second call sees first step's ACT+VERIFY note
+        assert len(seen) == 2
+        assert any("verify:" in line for line in seen[1])
+
+
+class TestBrowserAgentReasonAndWiring:
+    def test_llm_reason_retries_then_raises(self, monkeypatch):
+        import core.llm_client as llm
+        import actions.browser_control as bc
+        replies = ["not json at all", '{"action":"done","reason":"ok"}']
+        monkeypatch.setattr(llm, "call_llm_text",
+                            lambda *a, **k: replies.pop(0))
+        reason = bc._make_llm_reason(timeout=5)
+        d = reason("g", {"url": "u", "elements": []}, [])
+        assert d["action"] == "done"
+
+    def test_llm_reason_raises_after_two_bad_replies(self, monkeypatch):
+        import core.llm_client as llm
+        import actions.browser_control as bc
+        monkeypatch.setattr(llm, "call_llm_text", lambda *a, **k: "garbage")
+        reason = bc._make_llm_reason(timeout=5)
+        with pytest.raises(ValueError, match="unusable LLM decision"):
+            reason("g", {"url": "u", "elements": []}, [])
+
+    def test_run_agent_requires_goal(self):
+        from actions.browser_control import _run_agent
+        out = _run_agent(None, {})
+        assert "Give the agent a goal" in out
+
+    def test_run_agent_clamps_max_steps(self, monkeypatch):
+        import actions.browser_control as bc
+        captured = {}
+
+        def fake_loop(goal, extract, reason, act, *, max_steps=8, log=None):
+            captured["steps"] = max_steps
+            return "ok"
+        monkeypatch.setattr(bc, "agent_loop", fake_loop)
+        out = bc._run_agent(object(), {"goal": "g", "max_steps": "9999"})
+        assert out == "ok" and captured["steps"] == 25
+
+    def test_handler_dispatches_agent_action(self):
+        src = Path("actions/browser_control.py").read_text(encoding="utf-8")
+        assert 'action == "agent"' in src
+        assert "_run_agent(sess, params, player)" in src
+
+    def test_session_has_snapshot_and_act(self):
+        src = Path("actions/browser_control.py").read_text(encoding="utf-8")
+        assert "async def snapshot(self)" in src
+        assert "async def agent_act(self, decision: dict)" in src
+        assert 'data-jarvis-idx' in src
+        # element addressing uses the SAME stamp the snapshot wrote
+        assert 'f\'[data-jarvis-idx="{idx}\"]\'' in src or \
+               '[data-jarvis-idx="' in src
+
+    def test_snapshot_js_stamps_and_caps(self):
+        from actions.browser_control import _SNAPSHOT_JS
+        assert "data-jarvis-idx" in _SNAPSHOT_JS
+        assert "n >= 80" in _SNAPSHOT_JS
+        assert "visibility" in _SNAPSHOT_JS
+
+    def test_playwright_is_optional_and_importable(self):
+        # module must import without playwright and say so honestly
+        import actions.browser_control as bc
+        assert hasattr(bc, "_HAS_PLAYWRIGHT")
+        if not bc._HAS_PLAYWRIGHT:
+            class FakeCoro:
+                def close(self):
+                    pass
+            sess = bc._BrowserSession("chrome")
+            with pytest.raises(RuntimeError, match="pip install playwright"):
+                sess.run(FakeCoro())
+
+    def test_tool_schema_documents_agent(self):
+        import actions.browser_control as bc
+        props = bc.TOOL["parameters"]["properties"]
+        assert "agent" in props["action"]["description"]
+        assert "goal" in props and "max_steps" in props
