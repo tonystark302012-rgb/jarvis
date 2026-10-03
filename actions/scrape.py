@@ -150,6 +150,19 @@ def scrape(parameters: dict = None, player=None, session_memory=None) -> str:
     except Exception as e:
         return f"Could not fetch {parsed.netloc}: {e}"
 
+    if mode == "structured":
+        # Roadmap: structured web extraction — JSON-LD (schema.org),
+        # OpenGraph, Twitter cards + trafilatura main-content when the
+        # lib is installed. Falls back to raw text if nothing parses.
+        result = _structured_extract(html, url, max_chars=max_chars)
+        if player is not None:
+            try:
+                player.show_content(f"STRUCTURED — {parsed.netloc}"[:48],
+                                    result[:4000])
+            except Exception:
+                pass
+        return result
+
     title, text = clean_html(html, url, max_chars=max_chars)
 
     if mode == "links":
@@ -170,6 +183,152 @@ def scrape(parameters: dict = None, player=None, session_memory=None) -> str:
         except Exception:
             pass
     return result
+
+
+def _structured_extract(html: str, url: str, max_chars: int = 8000) -> str:
+    """JSON-LD + OpenGraph + Twitter-card extraction (free, stdlib) with
+    an optional trafilatura main-content pass when that lib is present.
+
+    Returns a speakable markdown block: metadata table, then the clean
+    article body. Never raises — partial metadata still beats none."""
+    import json as _json
+    from html.parser import HTMLParser
+
+    meta: dict[str, str] = {}
+    ld_objects: list[dict] = []
+
+    class _HeadParser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self._in_ld = False
+            self._ld_buf: list[str] = []
+            self._is_title = False
+            self._title_buf: list[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag == "meta":
+                key = (a.get("property") or a.get("name") or "").lower()
+                val = (a.get("content") or "").strip()
+                if key.startswith(("og:", "twitter:", "article:",
+                                   "description", "author",
+                                   "keywords", "date")) and val:
+                    # first writer wins — og: beats bare description only
+                    # when the bare key isn't set yet
+                    meta.setdefault(key, val)
+            elif tag == "script" and \
+                    (a.get("type") or "").lower() == "application/ld+json":
+                self._in_ld = True
+                self._ld_buf = []
+            elif tag == "title":
+                self._is_title = True
+                self._title_buf = []
+
+        def handle_endtag(self, tag):
+            if tag == "script" and self._in_ld:
+                self._in_ld = False
+                raw = "".join(self._ld_buf)
+                try:
+                    data = _json.loads(raw)
+                    if isinstance(data, dict):
+                        ld_objects.append(data)
+                    elif isinstance(data, list):
+                        ld_objects.extend(x for x in data
+                                          if isinstance(x, dict))
+                except ValueError:
+                    pass          # malformed LD is common — skip, don't die
+            elif tag == "title":
+                self._is_title = False
+                title_txt = "".join(self._title_buf).strip()
+                if title_txt:
+                    meta.setdefault("title", title_txt)
+
+        def handle_data(self, data):
+            if self._in_ld:
+                self._ld_buf.append(data)
+            elif self._is_title:
+                self._title_buf.append(data)
+
+    try:
+        p = _HeadParser()
+        p.feed(html)
+    except Exception:
+        pass
+
+    # Flatten JSON-LD: prefer schema.org Article/Product/Event types.
+    ld_best: dict = {}
+    for obj in ld_objects:
+        t = obj.get("@type") or obj.get("type") or ""
+        if isinstance(t, list):
+            t = " ".join(str(x) for x in t)
+        t_low = str(t).lower()
+        if any(k in t_low for k in ("article", "news", "blog", "product",
+                                    "event", "recipe", "howto", "video")):
+            ld_best = obj
+            break
+    if not ld_best and ld_objects:
+        ld_best = ld_objects[0]
+
+    def _ld_get(*keys):
+        for k in keys:
+            v = ld_best.get(k)
+            if v:
+                if isinstance(v, list):
+                    v = v[0] if v else ""
+                if isinstance(v, dict):
+                    v = v.get("name") or v.get("@id") or ""
+                return str(v).strip()
+        return ""
+
+    merged = {
+        "title": meta.get("og:title") or _ld_get("headline", "name")
+                 or meta.get("title", ""),
+        "description": meta.get("og:description")
+                       or meta.get("twitter:description")
+                       or _ld_get("description")
+                       or meta.get("description", ""),
+        "author": _ld_get("author", "creator") or meta.get("author", ""),
+        "site": meta.get("og:site_name", ""),
+        "type": meta.get("og:type") or _ld_get("@type"),
+        "published": meta.get("article:published_time")
+                     or meta.get("date") or _ld_get("datePublished"),
+        "image": meta.get("og:image", ""),
+        "canonical": meta.get("og:url", ""),
+    }
+
+    # Optional trafilatura pass — the roadmap's "structured extraction"
+    # lib; only used for the BODY, metadata above stays stdlib.
+    body = ""
+    engine = "stdlib json-ld/og"
+    try:
+        import trafilatura
+        got = trafilatura.extract(html, include_comments=False,
+                                  include_tables=True,
+                                  favor_precision=True)
+        if got and len(got.strip()) > 80:
+            body = got.strip()
+            engine = "trafilatura"
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    if not body:
+        _, body = clean_html(html, url, max_chars=max_chars)
+
+    lines = [f"# {merged['title'] or '(untitled)'}",
+             f"({url}) — extracted via {engine}"]
+    facts = [(k, v) for k, v in (("Type", merged["type"]),
+                                 ("Author", merged["author"]),
+                                 ("Site", merged["site"]),
+                                 ("Published", merged["published"]),
+                                 ("Description", merged["description"]),
+                                 ("Image", merged["image"])) if v]
+    if facts:
+        lines.append("")
+        lines.extend(f"- **{k}**: {v[:300]}" for k, v in facts)
+    lines.append("")
+    lines.append(body[:max_chars] or "(no readable body found)")
+    return "\n".join(lines)
 
 
 def _top_links(html: str, base_host: str, limit: int = 40) -> list[tuple[str, str]]:
@@ -206,7 +365,9 @@ TOOL = {
         "Fetches a web page and returns its clean readable text (chrome, "
         "scripts and menus stripped). Use for: 'read this page', 'what does "
         "this article say', gathering source material for research. Modes: "
-        "text (default, article body), links (list of page links), title. "
+        "text (default, article body), links (list of page links), title, "
+        "structured (JSON-LD/OpenGraph metadata + main content — products, "
+        "articles, events with author/date). "
         "Read-only GET; never submits forms."
     ),
     "parameters": {
@@ -214,7 +375,7 @@ TOOL = {
         "properties": {
             "url": {"type": "STRING", "description": "Page URL to fetch."},
             "mode": {"type": "STRING",
-                     "description": "text | links | title. Default text."},
+                     "description": "text | links | title | structured. Default text."},
             "max_chars": {"type": "STRING",
                           "description": "Truncate text at N chars (500-40000). Default 8000."},
         },

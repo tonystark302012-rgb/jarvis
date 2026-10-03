@@ -29,8 +29,18 @@ _LOADED = False
 _RUNNER: Callable[[str, dict], str] | None = None
 _NOTIFY: Callable[[str], str] | None = None
 _LAST_FIRE: dict[str, float] = {}          # rule-id -> epoch (debounce)
-_STATE: dict[str, set] = {}                # rule-id -> file snapshot
-_DAY_KEYS: dict[str, str] = {}             # rule-id -> YYYY-MM-DD (daily cap)
+_STATE: dict[str, set] = {}               # rule-id -> file snapshot
+_DAY_KEYS: dict[str, str] = {}            # rule-id -> YYYY-MM-DD (daily cap)
+
+# ── self-healing (roadmap: "scheduled NL automations + self-healing retries")
+# A rule whose EXECUTION failed gets up to _MAX_HEAL extra attempts with
+# exponential backoff, scheduled against the tick clock (tests control `now`).
+# On success the incident clears; after _MAX_HEAL failures the rule stops
+# retrying but stays visible in `rules action=health` until it next fires
+# successfully on its own. Bounded: one entry per rule id.
+_MAX_HEAL = 3
+_BACKOFF = (30, 120, 600)                 # seconds before attempt 1, 2, 3
+_HEALTH: dict[str, dict] = {}             # rule-id -> {fails, retry_at, err, why}
 
 
 def _path() -> Path:
@@ -160,14 +170,17 @@ def list_rules() -> str:
 
 # ── trigger evaluation ───────────────────────────────────────────────────────
 
-def _run_rule(r: dict, why: str) -> str:
+def _exec_rule(r: dict, why: str) -> tuple[bool, str]:
     """Execute a rule's tool (or every step of a scene) via the injected
-    runner. Returns '' if no runner. A scene runs its steps in order and
-    stops at the first failure — same contract as the task orchestrator."""
+    runner. Returns (ok, message). ok=False means an EXECUTION failure
+    (exception/refusal) — eligible for the self-heal retry. A missing
+    runner returns (False, '') but callers skip health for it (nothing
+    ran, nothing to heal). A scene stops at the first failing step —
+    same contract as the task orchestrator."""
     if _RUNNER is None:
         print(f"[Rules] fired ({why}) but no runner wired — "
               f"{r.get('tool')} not executed.")
-        return ""
+        return False, ""
     try:
         steps = r.get("steps")
         if isinstance(steps, list) and steps:
@@ -188,7 +201,7 @@ def _run_rule(r: dict, why: str) -> str:
                             _NOTIFY(msg)
                         except Exception:
                             pass
-                    return msg
+                    return False, msg
                 done += 1
                 if o:
                     outs.append(str(o))
@@ -199,7 +212,7 @@ def _run_rule(r: dict, why: str) -> str:
                     _NOTIFY(msg)
                 except Exception:
                     pass
-            return " | ".join(outs + [msg])
+            return True, " | ".join(outs + [msg])
         out = _RUNNER(r.get("tool", ""), dict(r.get("args") or {}))
         msg = f"Rule '{r.get('label')}' fired ({why})."
         if _NOTIFY:
@@ -207,9 +220,57 @@ def _run_rule(r: dict, why: str) -> str:
                 _NOTIFY(msg)
             except Exception:
                 pass
-        return str(out or "")
+        return True, str(out or "")
     except Exception as e:
-        return f"Rule '{r.get('label')}' failed: {e}"
+        return False, f"Rule '{r.get('label')}' failed: {e}"
+
+
+def _run_rule(r: dict, why: str) -> str:
+    """Back-compat wrapper: message only (phrase path + external callers)."""
+    return _exec_rule(r, why)[1]
+
+
+def _note_health(r: dict, ok: bool, err: str, now: float) -> None:
+    """Record a failure (schedule a heal) or clear an incident on success.
+    Must be called WITHOUT holding _LOCK (touches _HEALTH only — dict
+    ops are atomic enough under the GIL, and tick is single-threaded)."""
+    rid = r.get("id") or ""
+    if not rid:
+        return
+    if ok:
+        _HEALTH.pop(rid, None)
+        return
+    h = _HEALTH.get(rid) or {"fails": 0, "retry_at": None,
+                             "err": "", "why": ""}
+    h["fails"] += 1
+    h["err"] = str(err or "")[:200]
+    h["why"] = str(r.get("label") or r.get("tool") or rid)[:80]
+    if h["fails"] <= _MAX_HEAL:
+        h["retry_at"] = now + _BACKOFF[min(h["fails"] - 1,
+                                           len(_BACKOFF) - 1)]
+    else:
+        h["retry_at"] = None              # give up retrying; stay visible
+    _HEALTH[rid] = h
+
+
+def health_report() -> str:
+    """Human summary for `rules action=health` — failing rules + when the
+    next self-heal attempt runs."""
+    if not _HEALTH:
+        return "All automation rules healthy — no failures pending."
+    lines = []
+    for rid, h in sorted(_HEALTH.items(),
+                         key=lambda kv: -kv[1]["fails"]):
+        if h.get("retry_at"):
+            when = time.strftime("%H:%M:%S",
+                                 time.localtime(h["retry_at"]))
+            state = f"heal retry at {when}"
+        else:
+            state = (f"gave up after {h['fails']} attempts "
+                     f"— will retry on next natural trigger")
+        lines.append(f"• {h.get('why', rid)} — {h['fails']} failure(s), "
+                     f"{state}. Last error: {h.get('err', '?')[:120]}")
+    return "Automation health:\n" + "\n".join(lines)
 
 
 def _due_time(r: dict, now: float, today: str) -> bool:
@@ -292,20 +353,50 @@ def fire_phrase(text: str) -> list[str]:
     for r in rules:
         key = str(r.get("trigger", {}).get("value", "")).lower().strip()
         if key and key in text_l:
-            out = _run_rule(r, f"phrase '{key}'")
+            ok, out = _exec_rule(r, f"phrase '{key}'")
+            if _RUNNER is not None:
+                _note_health(r, ok, out if ok else out, time.time())
             fired.append(out or r.get("label", "rule"))
     return fired
 
 
 def tick(now: float | None = None) -> list[str]:
-    """Evaluate all triggers. Called every ~30s by the app; safe to call
-    from tests with a controlled `now`."""
+    """Evaluate all triggers + self-heal pending retries. Called every
+    ~30s by the app; safe to call from tests with a controlled `now`."""
     _load()
     now = now if now is not None else time.time()
     today = time.strftime("%Y-%m-%d", time.localtime(now))
     results: list[str] = []
     with _LOCK:
         rules = [r for r in _RULES if r.get("enabled", True)]
+        by_id = {r.get("id"): r for r in rules}
+
+    # ── self-heal pass: retry failures whose backoff has elapsed ────────
+    # Rule deleted mid-incident? Drop its health entry regardless of
+    # retry_at — cleanup must not depend on a pending retry existing.
+    for rid in list(_HEALTH):
+        if rid not in by_id:
+            _HEALTH.pop(rid, None)
+    for rid, h in list(_HEALTH.items()):
+        if not h.get("retry_at") or now < h["retry_at"]:
+            continue
+        r = by_id.get(rid)
+        if r is None:
+            _HEALTH.pop(rid, None)         # rule deleted mid-incident
+            continue
+        h["retry_at"] = None               # one attempt per due window
+        if h["fails"] > _MAX_HEAL:
+            _HEALTH.pop(rid, None)
+            continue
+        ok, out = _exec_rule(r, f"self-heal {h['fails']}/{_MAX_HEAL}")
+        if _RUNNER is None:
+            continue                       # nothing ran — don't count
+        _note_health(r, ok, out, now)
+        results.append(out if out else
+                       f"self-heal {'ok' if ok else 'failed'}: "
+                       f"{h.get('why', rid)}")
+
+    # ── natural trigger pass ────────────────────────────────────────────
     for r in rules:
         t = str(r.get("trigger", {}).get("type", ""))
         fn = _DUE.get(t)
@@ -313,7 +404,9 @@ def tick(now: float | None = None) -> list[str]:
             continue
         try:
             if fn(r, now, today) if t == "time" else fn(r):
-                out = _run_rule(r, t)
+                ok, out = _exec_rule(r, t)
+                if _RUNNER is not None:
+                    _note_health(r, ok, out, now)
                 if out:
                     results.append(out)
         except Exception as e:
@@ -354,6 +447,8 @@ def manage_rules(parameters: dict = None, player=None, session_memory=None) -> s
     elif action == "tick":
         fired = tick()
         result = "\n".join(fired) if fired else "No rules due."
+    elif action == "health":
+        result = health_report()
     else:
         result = list_rules()
 
@@ -372,7 +467,9 @@ TOOL = {
         "list (default), add (trigger_type: time HH:MM | file path + value "
         "appears/removed/changed | phrase keyword; plus tool + tool_args — "
         "OR steps: JSON list of {tool, args} to run in order as a scene), "
-        "remove (by number or match), tick (evaluate now). Use when the user "
+        "remove (by number or match), tick (evaluate now), health (rules "
+        "that recently failed — self-heal retries them automatically with "
+        "backoff). Use when the user "
         "wants 'every morning at 8 do X', 'when a file appears in Downloads "
         "do Y', 'when I say Z do W', or a multi-action routine like "
         "'movie mode' (open player, dim lights, silence notifications)."
@@ -380,7 +477,8 @@ TOOL = {
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "action": {"type": "STRING", "description": "list | add | remove | tick"},
+            "action": {"type": "STRING",
+                       "description": "list | add | remove | tick | health"},
             "trigger_type": {"type": "STRING", "description": "time | file | phrase"},
             "value": {"type": "STRING",
                       "description": "HH:MM for time, keyword for phrase, appears/removed for file"},

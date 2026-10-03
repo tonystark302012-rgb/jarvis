@@ -20,6 +20,8 @@ vosk (offline STT), Gemini (optional summary — degrades to raw transcript).
 """
 from __future__ import annotations
 
+import json
+import re
 import threading
 import time
 import wave
@@ -184,6 +186,85 @@ def _summarize(transcript: str, which: str) -> str:
 
 # ── handler ──────────────────────────────────────────────────────────────────
 
+def _extract_action_items(summary: str) -> list[dict]:
+    """Summary markdown → [{task, date, time}] with CONCRETE dates.
+
+    Seamed for tests. Returns [] without a key — the caller then just
+    reports that nothing was pushed (honest, no fake scheduling)."""
+    from core import gemini
+    if not gemini.api_key():
+        return []
+    from datetime import datetime as _dt
+    today = _dt.now().strftime("%Y-%m-%d")
+    resp = gemini.call(
+        ["Extract action items with deadlines from this meeting summary. "
+         "Return ONLY a JSON array, no prose, no fences. Each element: "
+         '{"task": str, "date": "YYYY-MM-DD", "time": "HH:MM"}. '
+         f"Use today={today} to resolve words like 'tomorrow', 'Friday'. "
+         "When no deadline is stated, use date=\"\" and time=\"\". "
+         "Max 8 items. Items without deadlines are fine — keep them.\n\n"
+         f"SUMMARY:\n{summary[:6000]}"],
+        tier=gemini.FAST, timeout_ms=30_000)
+    if resp is None:
+        return []
+    try:
+        raw = "".join(p.text for p in resp.candidates[0].content.parts
+                      if getattr(p, "text", None)).strip()
+        raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
+        data = json.loads(raw)
+        out = []
+        for it in (data if isinstance(data, list) else [])[:8]:
+            if isinstance(it, dict) and str(it.get("task", "")).strip():
+                out.append({"task": str(it["task"]).strip()[:200],
+                            "date": str(it.get("date") or "").strip(),
+                            "time": str(it.get("time") or "").strip()})
+        return out
+    except Exception as e:
+        print(f"[Meeting] action-item parse failed: {e}")
+        return []
+
+
+def _push_action_items(summary: str) -> str:
+    """Create reminders for dated action items; undated ones come back as
+    a checklist. Never raises — a scheduling failure is reported, not
+    swallowed silently."""
+    items = _extract_action_items(summary)
+    if not items:
+        return ("Push: no action items extracted (no Gemini key or nothing "
+                "found) — nothing was scheduled.")
+    from actions import reminder as _rem
+    scheduled: list[str] = []
+    unscheduled: list[str] = []
+    failed: list[str] = []
+    for it in items:
+        if it["date"] and it["time"]:
+            try:
+                out = _rem.reminder({"date": it["date"],
+                                     "time": it["time"],
+                                     "message": f"Meeting follow-up: "
+                                                f"{it['task']}"})
+            except Exception as e:
+                failed.append(f"{it['task']} ({e})")
+                continue
+            if out and "Reminder set" in out:
+                scheduled.append(f"{it['task']} — {it['date']} "
+                                 f"{it['time']}")
+            else:
+                failed.append(f"{it['task']} ({str(out)[:80]})")
+        else:
+            unscheduled.append(it["task"])
+    lines = [f"Pushed {len(scheduled)} reminder(s) from the meeting."]
+    if scheduled:
+        lines.append("Scheduled:\n" + "\n".join(f"  ✓ {s}" for s in scheduled))
+    if unscheduled:
+        lines.append("No deadline stated (say when and I'll schedule):\n"
+                     + "\n".join(f"  • {t}" for t in unscheduled))
+    if failed:
+        lines.append("Could not schedule:\n"
+                     + "\n".join(f"  ✗ {f}" for f in failed))
+    return "\n".join(lines)
+
+
 def _latest_transcript() -> Path | None:
     files = sorted(_meetings_dir().glob("*.txt"),
                    key=lambda p: p.stat().st_mtime, reverse=True)
@@ -274,7 +355,14 @@ def meeting(parameters: dict = None, player=None, session_memory=None) -> str:
         if not summary:
             return (f"No Gemini key — here is the raw transcript "
                     f"({path.name}):\n{transcript[:700]}")
-        return f"Summary of {path.name}:\n{summary}"
+        reply = f"Summary of {path.name}:\n{summary}"
+        # Roadmap: meeting → reminder auto-push. opt-in so a summary
+        # never schedules things behind the user's back.
+        push = str(params.get("push") or "").lower() in ("1", "true", "yes",
+                                                         "reminders")
+        if push:
+            reply += "\n\n" + _push_action_items(summary)
+        return reply
 
     return f"Unknown meeting action {action!r} — use start|stop|status|list|summary."
 
@@ -296,6 +384,10 @@ TOOL = {
                        "description": "start | stop | status | list | summary"},
             "which": {"type": "STRING",
                       "description": "Transcript number for summary — default latest"},
+            "push": {"type": "STRING",
+                     "description": "yes — after summary, create reminders "
+                                    "for dated action items (undated ones "
+                                    "are listed, not guessed)"},
         },
         "required": [],
     },

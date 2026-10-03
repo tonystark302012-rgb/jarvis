@@ -1030,3 +1030,457 @@ class TestRoadmapMainWiring:
             ("actions/phone_vision.py", '_privacy.gate("phone_vision")'),
         ]:
             assert needle in Path(path).read_text(encoding="utf-8"), path
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 2 — task persistence + resume
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestTaskPersistence:
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        import core.taskstore as ts
+        monkeypatch.setattr(ts, "_db_path", lambda: tmp_path / "tasks.db")
+        monkeypatch.setattr(ts, "_CONN", None)
+        yield
+        monkeypatch.setattr(ts, "_CONN", None)
+
+    def test_create_get_update_cycle(self):
+        from core import taskstore as ts
+        rid = ts.create("clean downloads", [
+            {"tool": "scan", "args": {"what": "dl"}, "why": ""}])
+        run = ts.get(rid)
+        assert run["goal"] == "clean downloads"
+        assert run["status"] == "running"
+        assert len(run["plan"]) == 1
+        ts.update(rid, "done", [{"index": 0, "tool": "scan", "ok": True,
+                                 "result": "ok"}])
+        run = ts.get(rid)
+        assert run["status"] == "done" and run["results"][0]["ok"]
+
+    def test_bad_status_rejected(self):
+        from core import taskstore as ts
+        rid = ts.create("g", [])
+        with pytest.raises(ValueError):
+            ts.update(rid, "weird", [])
+
+    def test_resumable_finds_partial(self):
+        from core import taskstore as ts
+        rid = ts.create("partial goal", [
+            {"tool": "a", "args": {}, "why": ""},
+            {"tool": "b", "args": {}, "why": ""}])
+        ts.update(rid, "partial", [{"index": 0, "tool": "a", "ok": True,
+                                    "result": "fine"}])
+        pend = ts._pending_indices(ts.get(rid))
+        assert pend == [1]
+        res = ts.resumable()
+        assert any(r["id"] == rid for r in res)
+
+    def test_done_not_resumable(self):
+        from core import taskstore as ts
+        rid = ts.create("g", [{"tool": "a", "args": {}, "why": ""}])
+        ts.update(rid, "done", [{"index": 0, "tool": "a", "ok": True,
+                                 "result": "x"}])
+        assert ts.resumable() == []
+
+    def test_prune_caps_retained_runs(self):
+        from core import taskstore as ts
+        for i in range(ts.MAX_RETAINED + 15):
+            rid = ts.create(f"goal {i}", [])
+            ts.update(rid, "done", [])
+        with ts._LOCK:
+            n = ts._conn().execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+        assert n <= ts.MAX_RETAINED
+
+    def test_list_order_newest_first(self):
+        from core import taskstore as ts
+        a = ts.create("first", [])
+        b = ts.create("second", [])
+        runs = ts.list_runs()
+        assert [r["id"] for r in runs][:2] == [b, a]
+
+
+class TestTaskAgentPersistence:
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        import core.taskstore as ts
+        from actions import task_agent as ta
+        monkeypatch.setattr(ts, "_db_path", lambda: tmp_path / "tasks.db")
+        monkeypatch.setattr(ts, "_CONN", None)
+        yield
+        ts._CONN = None
+        ta.set_runner(None)
+        ta.set_runner_names([])
+
+    def test_run_is_persisted_and_history_lists_it(self, monkeypatch):
+        from actions import task_agent as ta
+        from core.orchestrator import Step
+        monkeypatch.setattr(ta, "_plan_with_llm",
+                            lambda g, n: [Step("scan", {"what": "system"})])
+        ta.set_runner(lambda t, a: "ok")
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"description": "health check"})
+        assert "1/1 steps completed" in out
+        hist = ta.task_agent({"action": "history"})
+        assert "health check" in hist and "✓" in hist
+
+    def test_failed_run_persisted_with_resume_hint(self, monkeypatch):
+        from actions import task_agent as ta
+        from core.orchestrator import Step
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: [
+            Step("scan", {"what": "system"}),
+            Step("scan", {"what": "ports"})])
+        def runner(t, a):
+            if a.get("what") == "ports":
+                raise RuntimeError("boom")
+            return "ok"
+        ta.set_runner(runner)
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"description": "check"})
+        assert "resume task" in out
+        hist = ta.task_agent({"action": "history"})
+        assert "1 step(s) left" in hist
+
+    def test_resume_runs_only_pending_steps(self, monkeypatch):
+        from actions import task_agent as ta
+        from core.orchestrator import Step
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: [
+            Step("scan", {"what": "system"}),
+            Step("scan", {"what": "ports"})])
+        calls = []
+        def flaky(t, a):
+            calls.append(a.get("what"))
+            if a.get("what") == "ports" and len(calls) < 3:
+                raise RuntimeError("flaky")
+            return "ok"
+        ta.set_runner(flaky)
+        ta.set_runner_names(["scan"])
+        ta.task_agent({"description": "check"})
+        calls_before = len(calls)
+        out = ta.task_agent({"action": "resume"})
+        assert "Resumed task" in out
+        # 'system' step ran in the INITIAL run but must NOT re-run on resume
+        assert calls.count("system") == 1, calls
+        # resume adds only 'ports' attempts
+        assert len(calls) > calls_before
+        assert all(c == "ports" for c in calls[calls_before:]), calls
+        hist = ta.task_agent({"action": "history"})
+        assert "✓" in hist and "step(s) left" not in hist
+
+    def test_resume_nothing_available(self):
+        from actions import task_agent as ta
+        ta.set_runner(lambda t, a: "ok")
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"action": "resume"})
+        assert "Nothing to resume" in out
+
+    def test_resume_unwired_runner(self):
+        from actions import task_agent as ta
+        ta.set_runner(None)
+        out = ta.task_agent({"action": "resume"})
+        assert "not wired" in out
+
+    def test_resume_missing_tool_reported(self, monkeypatch):
+        from actions import task_agent as ta
+        from core.orchestrator import Step
+        monkeypatch.setattr(ta, "_plan_with_llm",
+                            lambda g, n: [Step("scan", {"what": "x"})])
+        ta.set_runner(lambda t, a: (_ for _ in ()).throw(RuntimeError("x")))
+        ta.set_runner_names(["scan"])
+        ta.task_agent({"description": "fail plz"})
+        # tool list changes — 'scan' no longer available
+        ta.set_runner_names(["weather_report"])
+        out = ta.task_agent({"action": "resume"})
+        assert "no longer exist" in out
+
+    def test_empty_history(self):
+        from actions import task_agent as ta
+        ta.set_runner(lambda t, a: "ok")
+        ta.set_runner_names(["scan"])
+        assert "No task runs" in ta.task_agent({"action": "history"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 2 — structured web extraction
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestStructuredExtraction:
+    HTML = '''<!doctype html><html><head>
+    <title>Fallback Title</title>
+    <meta property="og:title" content="Rent Agreement Guide 2026">
+    <meta property="og:description" content="Everything about notice periods.">
+    <meta property="og:site_name" content="Housing Times">
+    <meta property="og:type" content="article">
+    <meta property="article:published_time" content="2026-09-01">
+    <meta name="author" content="Priya Sharma">
+    <meta property="og:image" content="https://x/y.jpg">
+    <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"Article",
+     "headline":"Rent Agreement Guide 2026",
+     "author":{"@type":"Person","name":"Priya Sharma"},
+     "datePublished":"2026-09-01"}
+    </script></head><body>
+    <nav>skip this navigation menu noise</nav>
+    <article><p>The notice period in a rental agreement is usually two
+    months, and the security deposit ranges from two to six months of
+    rent depending on the city.</p></article>
+    <footer>copyright noise</footer></body></html>'''
+
+    def test_metadata_and_body(self):
+        from actions.scrape import _structured_extract
+        out = _structured_extract(self.HTML, "https://example.com/g")
+        assert "Rent Agreement Guide 2026" in out
+        assert "Priya Sharma" in out
+        assert "article" in out.lower()
+        assert "2026-09-01" in out
+        assert "notice period" in out.lower()
+        assert "skip this navigation" not in out.lower()
+
+    def test_malformed_json_ld_tolerated(self):
+        from actions.scrape import _structured_extract
+        bad = self.HTML.replace('{"@context"', '{broken@"context"')
+        out = _structured_extract(bad, "https://example.com/b")
+        # og: metadata still extracted even though LD failed to parse
+        assert "Rent Agreement Guide 2026" in out
+
+    def test_empty_html(self):
+        from actions.scrape import _structured_extract
+        out = _structured_extract("", "https://e.com")
+        assert "(untitled)" in out
+
+    def test_product_ld_only(self):
+        from actions.scrape import _structured_extract
+        ld = ('<html><head><script type="application/ld+json">'
+              '{"@type":"Product","name":"Widget Pro",'
+              '"offers":{"price":"999","priceCurrency":"INR"}}'
+              '</script></head><body><p>Buy the widget. It is a good '
+              'widget with many features for daily use.</p></body></html>')
+        out = _structured_extract(ld, "https://shop/w")
+        assert "Widget Pro" in out
+        assert "Product" in out
+
+    def test_scrape_structured_mode_wired(self, monkeypatch):
+        from actions import scrape as sc
+        monkeypatch.setattr(sc, "_fetch", lambda u, timeout=20: self.HTML)
+        out = sc.scrape({"url": "https://example.com/g",
+                         "mode": "structured"})
+        assert "Rent Agreement Guide 2026" in out
+
+    def test_tool_schema_mentions_structured(self):
+        from actions.scrape import TOOL
+        assert "structured" in TOOL["parameters"]["properties"]["mode"]["description"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 2 — meeting action items → reminders
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMeetingAutoPush:
+    @pytest.fixture(autouse=True)
+    def _seams(self, monkeypatch):
+        import actions.meeting as m
+        self.meeting = m
+        self.pushed = []
+        import actions.reminder as rem
+        self._orig_reminder = rem.reminder
+        def fake_reminder(params, *a, **k):
+            self.pushed.append(params)
+            if str(params.get("date", "")).startswith("20"):
+                return "Reminder set for that time."
+            return "I couldn't parse that date or time."
+        monkeypatch.setattr(rem, "reminder", fake_reminder)
+        yield
+        monkeypatch.setattr(rem, "reminder", self._orig_reminder)
+
+    def test_dated_items_scheduled_undated_listed(self):
+        self.meeting._extract_action_items = lambda s: [
+            {"task": "send deck", "date": "2026-10-05", "time": "10:00"},
+            {"task": "review contract", "date": "", "time": ""}]
+        out = self.meeting._push_action_items("summary")
+        assert "Pushed 1 reminder(s)" in out
+        assert "send deck" in out and "2026-10-05" in out
+        assert "No deadline" in out and "review contract" in out
+        assert len(self.pushed) == 1
+        assert self.pushed[0]["message"].startswith("Meeting follow-up:")
+
+    def test_undated_items_never_guessed(self):
+        self.meeting._extract_action_items = lambda s: [
+            {"task": "ping team", "date": "", "time": ""}]
+        out = self.meeting._push_action_items("s")
+        assert self.pushed == []
+        assert "No deadline" in out
+
+    def test_scheduler_failure_surfaced(self):
+        self.meeting._extract_action_items = lambda s: [
+            {"task": "x", "date": "garbage", "time": "zz"}]
+        out = self.meeting._push_action_items("s")
+        assert "Could not schedule" in out
+
+    def test_no_extraction_honest(self):
+        self.meeting._extract_action_items = lambda s: []
+        out = self.meeting._push_action_items("s")
+        assert "nothing was scheduled" in out
+
+    def test_push_param_in_tool_schema(self):
+        assert "push" in self.meeting.TOOL["parameters"]["properties"]
+
+    def test_summary_push_param_flows(self, monkeypatch, tmp_path):
+        # summary path with push=yes calls the seam
+        import time as _t
+        tr = tmp_path / "meetings"
+        tr.mkdir()
+        (tr / "001.txt").write_text("hello team, lets sync", encoding="utf-8")
+        monkeypatch.setattr(self.meeting, "_meetings_dir", lambda: tr)
+        monkeypatch.setattr(self.meeting, "_latest_transcript",
+                            lambda: tr / "001.txt")
+        monkeypatch.setattr(self.meeting, "_summarize",
+                            lambda t, w: "Actions: send deck by Oct 5.")
+        pushed_s = []
+        monkeypatch.setattr(self.meeting, "_push_action_items",
+                            lambda s: pushed_s.append(s) or "PUSHED")
+        out = self.meeting.meeting({"action": "summary", "push": "yes"})
+        assert "PUSHED" in out and pushed_s
+        # without push → seam not called
+        pushed_s.clear()
+        out = self.meeting.meeting({"action": "summary"})
+        assert "PUSHED" not in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 2 — rules self-healing retries
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestRulesSelfHeal:
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        import actions.rules as r
+        monkeypatch.setattr(r, "_path", lambda: tmp_path / "rules.json")
+        r._RULES.clear()
+        r._LOADED = False
+        r._HEALTH.clear()
+        r._DAY_KEYS.clear()
+        r._LAST_FIRE.clear()
+        r._STATE.clear()
+        r.set_runner(None)
+        r.set_notifier(None)
+        yield
+        r.set_runner(None)
+        r._HEALTH.clear()
+
+    def test_failure_schedules_backoff(self):
+        import actions.rules as r
+        def bad(tool, args):
+            raise RuntimeError("service down")
+        r.set_runner(bad)
+        r.add_rule({"type": "time", "value": "08:00"}, "scan", {})
+        rule = r._RULES[0]
+        now = 1_000_000.0
+        ok, out = r._exec_rule(rule, "time")
+        assert not ok and "failed" in out
+        r._note_health(rule, ok, out, now)
+        h = r._HEALTH[rule["id"]]
+        assert h["fails"] == 1
+        assert h["retry_at"] == now + 30
+
+    def test_success_clears_incident(self):
+        import actions.rules as r
+        r.set_runner(lambda t, a: "ok")
+        r.add_rule({"type": "time", "value": "08:00"}, "scan", {})
+        rule = r._RULES[0]
+        now = 1_000_000.0
+        ok, out = r._exec_rule(rule, "time")
+        r._note_health(rule, ok, out, now)
+        assert rule["id"] not in r._HEALTH
+        # prior failure then success
+        r._HEALTH[rule["id"]] = {"fails": 2, "retry_at": now + 10,
+                                 "err": "x", "why": "scan"}
+        r._note_health(rule, True, "ok", now)
+        assert rule["id"] not in r._HEALTH
+
+    def test_heal_retries_then_recovers(self):
+        import actions.rules as r
+        state = {"ok": False}
+        def runner(t, a):
+            if not state["ok"]:
+                raise RuntimeError("down")
+            return "recovered!"
+        r.set_runner(runner)
+        r.add_rule({"type": "time", "value": "08:00"}, "scan", {})
+        rule = r._RULES[0]
+        now = 1_000_000.0
+        r._LOADED = True
+        # initial failure
+        ok, out = r._exec_rule(rule, "t")
+        r._note_health(rule, ok, out, now)
+        # tick before backoff → no attempt
+        assert r.tick(now=now + 10) == []
+        # heal 1 (still down) → fails=2, backoff 120
+        r.tick(now=now + 31)
+        assert r._HEALTH[rule["id"]]["fails"] == 2
+        # heal 2 (still down) → fails=3, backoff 600
+        r.tick(now=now + 31 + 121)
+        assert r._HEALTH[rule["id"]]["fails"] == 3
+        # service back → heal 3 succeeds, health cleared
+        state["ok"] = True
+        outs = r.tick(now=now + 31 + 121 + 601)
+        assert any("recovered" in o for o in outs)
+        assert rule["id"] not in r._HEALTH
+
+    def test_gives_up_but_stays_visible(self):
+        import actions.rules as r
+        r.set_runner(lambda t, a: (_ for _ in ()).throw(RuntimeError("x")))
+        r.add_rule({"type": "time", "value": "08:00"}, "scan", {})
+        rule = r._RULES[0]
+        now = 1_000_000.0
+        for _ in range(5):
+            ok, out = r._exec_rule(rule, "t")
+            r._note_health(rule, ok, out, now)
+        h = r._HEALTH[rule["id"]]
+        assert h["fails"] == 5 and h["retry_at"] is None
+        rep = r.health_report()
+        assert "gave up" in rep and "scan" in rep
+
+    def test_health_clean_message(self):
+        import actions.rules as r
+        assert "healthy" in r.health_report()
+
+    def test_deleted_rule_health_cleaned_on_tick(self):
+        import actions.rules as r
+        r.set_runner(lambda t, a: "ok")
+        r.add_rule({"type": "time", "value": "08:00"}, "scan", {})
+        rule = r._RULES[0]
+        r._HEALTH[rule["id"]] = {"fails": 5, "retry_at": None,
+                                 "err": "x", "why": "scan"}
+        r._RULES.clear()
+        r._LOADED = True
+        r.tick(now=2_000_000.0)
+        assert rule["id"] not in r._HEALTH
+
+    def test_missing_runner_not_counted_as_failure(self):
+        import actions.rules as r
+        r.set_runner(None)
+        r.add_rule({"type": "time", "value": "08:00"}, "scan", {})
+        r._LOADED = True
+        r.tick(now=1_000_000.0)   # time not due anyway; ensure no health
+        assert r._HEALTH == {}
+
+    def test_health_action_in_manage_rules(self):
+        import actions.rules as r
+        out = r.manage_rules({"action": "health"})
+        assert "healthy" in out
+
+    def test_scene_step_failure_marks_health(self):
+        import actions.rules as r
+        def runner(t, a):
+            if t == "procman":
+                raise RuntimeError("refused")
+            return "ok"
+        r.set_runner(runner)
+        r.add_rule({"type": "time", "value": "08:00"}, "scan", {},
+                   steps=[{"tool": "scan", "args": {}},
+                          {"tool": "procman", "args": {}}])
+        rule = r._RULES[0]
+        ok, out = r._exec_rule(rule, "t")
+        assert not ok and "failed at step 2" in out
+        r._note_health(rule, ok, out, 1_000_000.0)
+        assert rule["id"] in r._HEALTH
