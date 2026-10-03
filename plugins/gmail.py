@@ -156,7 +156,9 @@ class _Conn:
     """IMAP connection helper — one place for select/search/fetch."""
 
     def __init__(self):
-        self.imap = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        # timeout is mandatory: the default (blocking forever) meant a dead
+        # network hung setup/list indefinitely instead of failing in seconds.
+        self.imap = imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=30)
 
     def __enter__(self):
         addr, pw = _creds()

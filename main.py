@@ -640,16 +640,34 @@ class JarvisLive:
 
         # ── Agentic task agent + automation rules ──────────────────────────
         # Both dispatch through the SAME registry the model talks to, so a
-        # planned step can never reach a tool the session doesn't have, and
-        # every step lands in the Mission Control timeline like any tool call.
+        # planned step can never reach a tool the session doesn't have.
+        # Each step is wrapped in an activity event here (registry.run does
+        # not do it — only _execute_tool does) so orchestrator steps and rule
+        # firings land in the Mission Control timeline like any tool call.
         try:
             from actions import task_agent as _task_agent
             from actions import rules as _rules_mod
+            from core import activity as _act_mod
 
             def _agent_runner(tool: str, tool_args: dict) -> str:
                 ctx = {"player": self.ui, "speak": self.speak,
                        "response": None, "session_memory": None}
-                out = self._action_registry.run(tool, tool_args, ctx)
+                ev = _act_mod.begin("tool", tool, tool_args)
+                try:
+                    out = self._action_registry.run(tool, tool_args, ctx)
+                except Exception as _e:
+                    _act_mod.fail(ev, _e)
+                    raise
+                # registry.run never raises — it returns error STRINGS. The
+                # two shapes it uses for failure are how the timeline knows.
+                text = out if isinstance(out, str) else ""
+                ok = not (
+                    ("not available" in text[:80]) or
+                    ("failed:" in text[:70]) or
+                    text.startswith("Action '") or
+                    text.startswith("Tool '")
+                )
+                _act_mod.finish(ev, ok, out)
                 return out or "Done."
 
             _task_agent.set_runner(_agent_runner)
@@ -660,24 +678,34 @@ class JarvisLive:
             print(f"[JARVIS] ⚠ Task/rules wiring failed: {e}")
 
         # Mission Control: mirror every activity event to the dashboard feed.
+        # Listener may fire from ANY thread — rules tick (to_thread), focus
+        # timers, agent runner (run_in_executor) — so the loop is never
+        # looked up with get_running_loop() (RuntimeError off-loop → event
+        # silently dropped, which is how focus/rule events vanished from the
+        # phone). call_soon_threadsafe on the STORED loop is thread-safe.
         try:
             from core import activity as _activity
 
             def _activity_to_dash(ev) -> None:
                 if self._dashboard is None:
                     return
+                loop = self._loop
+                if loop is None or loop.is_closed():
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        return                     # pre-main: nothing to do yet
                 try:
-                    loop = asyncio.get_running_loop()
+                    loop.call_soon_threadsafe(lambda: asyncio.ensure_future(
+                        self._dashboard.broadcast({
+                            "type": "activity",
+                            "kind": ev.kind, "name": ev.name, "when": ev.when(),
+                            "ok": ev.ok, "running": ev.running,
+                            "args": ev.summary(), "preview": ev.preview[:160],
+                            "duration": round(ev.duration, 2) if not ev.running else None,
+                        })))
                 except RuntimeError:
-                    return
-                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(
-                    self._dashboard.broadcast({
-                        "type": "activity",
-                        "kind": ev.kind, "name": ev.name, "when": ev.when(),
-                        "ok": ev.ok, "running": ev.running,
-                        "args": ev.summary(), "preview": ev.preview[:160],
-                        "duration": round(ev.duration, 2) if not ev.running else None,
-                    })))
+                    pass                          # loop closed mid-shutdown
             _activity.add_listener(_activity_to_dash)
         except Exception as e:
             print(f"[JARVIS] ⚠ Activity mirror failed: {e}")
@@ -881,6 +909,22 @@ class JarvisLive:
         manual = self._dashboard.get_manual_url()
         return url, key, f"{url}/auto-login?key={key}", manual
 
+    def _fire_phrase_rules(self, text: str) -> list[str]:
+        """Phrase-triggered automation ('when I say X do Y') for ANY input
+        source — HUD text box, phone command box, or the live voice
+        transcript. Returns the rule outputs; never raises. Thread-safe
+        (ui.write_log is a Qt signal emit)."""
+        try:
+            from actions import rules as _rules_mod
+            fired = _rules_mod.fire_phrase(text)
+            for out in fired:
+                if out:
+                    self.ui.write_log(f"RULE: {str(out)[:160]}")
+            return fired
+        except Exception as e:
+            print(f"[Rules] phrase fire error: {e}")
+            return []
+
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
@@ -892,13 +936,7 @@ class JarvisLive:
             return
         # Phrase-triggered automation rules: 'when I say X do Y'. Runs before
         # the utterance goes to the model so the action happens even mid-outage.
-        try:
-            from actions import rules as _rules_mod
-            for out in _rules_mod.fire_phrase(text):
-                if out:
-                    self.ui.write_log(f"RULE: {str(out)[:160]}")
-        except Exception:
-            pass
+        self._fire_phrase_rules(text)
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -1698,6 +1736,9 @@ class JarvisLive:
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
+                                # Phrase rules must fire for SPOKEN input too —
+                                # 'when I say movie mode' is a voice feature.
+                                self._fire_phrase_rules(full_in)
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "user",
@@ -2207,6 +2248,9 @@ class JarvisLive:
                         break
                     await asyncio.sleep(0.1)
                 if self.session:
+                    # Phone-typed commands get phrase rules as well — the
+                    # remote box is a first-class input, not a side door.
+                    self._fire_phrase_rules(text)
                     # A remote command is deliberate control and the phone user
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
                     if self._wake_enabled and not self._awake:

@@ -870,29 +870,8 @@ class TestDashboardMirror:
 # wiring guards — main.py must keep the hooks (can't import PyQt here)
 # ────────────────────────────────────────────────────────────────────────────
 
-class TestMainWiring:
-    SRC = Path(__file__).resolve().parent.parent.joinpath("main.py").read_text(
-        encoding="utf-8")
-
-    def test_task_agent_runner_wired(self):
-        assert "task_agent.set_runner" in self.SRC
-        assert "set_runner_names" in self.SRC
-
-    def test_activity_begin_finish_around_tools(self):
-        assert '_activity.begin("tool", name, args)' in self.SRC
-        assert "_activity.finish(_act_ev, True, result)" in self.SRC
-        assert "_activity.fail(_act_ev, e)" in self.SRC
-
-    def test_rules_tick_and_phrase_hooks(self):
-        assert "_run_rules_tick" in self.SRC
-        assert "fire_phrase" in self.SRC
-
-    def test_focus_gates_proactive(self):
-        assert "_focus_muted" in self.SRC
-
-    def test_activity_listener_to_dashboard(self):
-        assert "add_listener" in self.SRC
-
+# Replaced by the deeper TestMainWiring below (audit-driven: phrase rules on
+# all input paths, agent-runner activity wrap, stored-loop listener).
 
 # ────────────────────────────────────────────────────────────────────────────
 # Feature upgrades: weather hourly, reminder list/cancel, dev_agent snapshots
@@ -1311,7 +1290,36 @@ class TestGmailPlugin:
     def _cfg(self, tmp_path, monkeypatch):
         import plugins.gmail as g
         monkeypatch.setattr(g, "_cfg_path", lambda: tmp_path / "api_keys.json")
+
+        # Offline guarantee: setup verifies credentials over real IMAP to
+        # imap.gmail.com — in CI (which HAS network) that would be a live
+        # call to Google with fake creds. Replace _Conn with a controllable
+        # fake: login succeeds by default, tests can flip it to fail.
+        class _FakeIMAP:
+            def select(self, *a, **k):
+                return "OK", [b"1"]
+            def login(self, *a, **k):
+                return "OK", [b"logged in"]
+            def logout(self):
+                return "BYE", [b""]
+            def search(self, *a, **k):
+                return "OK", [b""]
+
+        class _FakeConn:
+            fail_login = False
+            def __init__(self):
+                if _FakeConn.fail_login:
+                    raise RuntimeError("offline fake: IMAP unreachable")
+                self.imap = _FakeIMAP()
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(g, "_Conn", _FakeConn)
         self.g = g
+        self.fake_conn = _FakeConn
+        self.fake_conn.fail_login = False
 
     def test_setup_needs_both_fields(self):
         assert "Setup needs" in self.g.run({"action": "setup"})
@@ -1653,3 +1661,78 @@ class TestCameraFrameEndpoint:
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {self.token}"})
         assert resp.status_code == 400
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# main.py wiring guards — main.py imports PyQt6 (not installed in CI), so
+# these assert on the SOURCE. They exist because the audit found real
+# disconnects: phrase rules fired only on typed input, agent-runner steps
+# bypassed the activity timeline, and the dashboard listener dropped events
+# raised off the event loop. Each guard fails if that wiring is removed.
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestMainWiring:
+    SRC = Path("main.py").read_text(encoding="utf-8")
+
+    def test_fire_phrase_helper_exists(self):
+        assert "def _fire_phrase_rules(self, text: str) -> list[str]:" in self.SRC
+
+    def test_fire_phrase_on_all_three_input_paths(self):
+        # 1. HUD text box
+        on_text = self.SRC[self.SRC.index("def _on_text_command"):self.SRC.index("def _on_text_command") + 3000]
+        assert "self._fire_phrase_rules(text)" in on_text
+        # 2. live voice transcript (the full_in block)
+        full_in = self.SRC[self.SRC.index('full_in = " ".join(in_buf)'):]
+        full_in = full_in[:full_in.index("full_out")]
+        assert "self._fire_phrase_rules(full_in)" in full_in
+        # 3. phone/dashboard command queue
+        drain = self.SRC[self.SRC.index("async def _process_dashboard_commands"):]
+        nxt = drain.find("async def ", 10)          # skip the header itself
+        drain = drain[:nxt] if nxt != -1 else drain[:6000]
+        assert "self._fire_phrase_rules(text)" in drain
+
+    def test_agent_runner_wraps_activity(self):
+        # task/rules steps must land in Mission Control — the runner has to
+        # begin/finish an event around registry.run (registry itself doesn't)
+        runner = self.SRC[self.SRC.index("def _agent_runner"):self.SRC.index("_task_agent.set_runner")]
+        assert "_act_mod.begin(" in runner
+        assert "_act_mod.finish(" in runner
+        assert "_act_mod.fail(" in runner
+        assert "_action_registry.run(tool, tool_args, ctx)" in runner
+
+    def test_activity_listener_uses_stored_loop(self):
+        # get_running_loop() raises off-loop (rules tick, focus timers,
+        # executor threads) → event silently dropped. The listener must
+        # prefer the STORED self._loop and call_soon_threadsafe.
+        listener = self.SRC[self.SRC.index("def _activity_to_dash"):]
+        listener = listener[:listener.index("_activity.add_listener")]
+        assert "self._loop" in listener
+        assert "call_soon_threadsafe" in listener
+        assert "get_running_loop" in listener          # fallback still present
+
+    def test_rules_tick_task_created(self):
+        assert "asyncio.create_task(self._run_rules_tick())" in self.SRC
+
+    def test_focus_callbacks_and_mute_gate_wired(self):
+        assert "set_callbacks(on_phase=_focus_phase, on_mute=_focus_mute)" in self.SRC
+        assert "if self._focus_muted:" in self.SRC
+        mute_block = self.SRC[self.SRC.index("def _focus_mute"):]
+        mute_block = mute_block[:mute_block.index("set_callbacks")]
+        assert "self._focus_muted = bool(on)" in mute_block
+
+    def test_execute_tool_has_single_begin_and_total_close(self):
+        # exactly ONE begin in _execute_tool; every return path is covered
+        # (the 2 returns each sit after a finish, plus except→fail / else→finish)
+        body = self.SRC[self.SRC.index("async def _execute_tool"):]
+        body = body[:body.index("async def _send_realtime")]
+        assert body.count("_activity.begin(") == 1
+        assert body.count("_activity.finish(") >= 2
+        assert "_activity.fail(" in body
+        # save_memory early-return closes its event BEFORE returning
+        early = body[:body.index("recall_memory")]
+        assert early.index("_activity.finish") < early.index("return types.FunctionResponse")
+
+    def test_dashboard_commands_wake_before_send(self):
+        # remote commands must wake an asleep JARVIS (no WAKE button on phone)
+        drain = self.SRC[self.SRC.index("async def _process_dashboard_commands"):]
+        assert 'wake(reason="remote command")' in drain[:4000]
