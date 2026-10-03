@@ -21,3 +21,6 @@ httpx2>=0.1                     # starlette TestClient — dashboard WS/login te
 numpy>=1.24,<3                  # meeting recorder tests build fake audio buffers
 trafilatura>=1.8,<2             # scrape structured mode (optional at runtime —
                                 # tests exercise the stdlib fallback when absent)
+tree-sitter>=0.23,<1            # code_outline — CI runs the real AST tier
+tree-sitter-python>=0.23,<1     # code_outline — Python grammar pack
+paho-mqtt>=1.6,<3               # smart_home — import path + optional-guard test

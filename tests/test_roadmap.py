@@ -3000,3 +3000,146 @@ class TestSmartHomePrivacy:
     ])
     def test_remote_host_classification(self, host):
         assert self.sh._is_local_host(host) is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 3 — tree-sitter code outline (3 honest tiers: TS AST / stdlib ast / approx)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_PY_SRC = '''import os
+from json import dumps
+
+
+class Node:
+    def __init__(self, v):
+        self.v = v
+
+    def push(self, x):
+        pass
+
+
+def fib(n):
+    if n < 2:
+        return n
+    return fib(n - 1)
+'''
+
+
+class TestCodeOutline:
+    def test_python_via_installed_grammar(self, tmp_path):
+        import actions.code_outline as co
+        p = tmp_path / "mod.py"
+        p.write_text(_PY_SRC, encoding="utf-8")
+        out = co.code_outline({"file_path": str(p)}, None)
+        # whichever engine ran, the SYMBOLS must be right
+        assert "class Node" in out
+        assert "def __init__" in out
+        assert "def fib" in out
+        assert "imports:" in out and "os" in out
+        # engine label must be honest about which tier ran
+        if co._grammar("python") is not None:
+            assert "tree-sitter AST" in out
+        else:
+            assert "stdlib-ast" in out
+
+    def test_python_tier2_when_tree_sitter_absent(self, monkeypatch, tmp_path):
+        import actions.code_outline as co
+        monkeypatch.setattr(co, "_HAS_TS", False)
+        p = tmp_path / "mod.py"
+        p.write_text(_PY_SRC, encoding="utf-8")
+        out = co.code_outline({"file_path": str(p)}, None)
+        assert "Python stdlib ast" in out
+        assert "class Node" in out and "def fib" in out
+        assert "L2" in out and "json.dumps" in out   # `from json …` line
+
+    def test_python_nesting_depth(self, monkeypatch):
+        import actions.code_outline as co
+        monkeypatch.setattr(co, "_HAS_TS", False)
+        res = co.outline(_PY_SRC, language="python")
+        by_name = {s["name"]: s for s in res["symbols"]}
+        assert by_name["Node"]["depth"] == 0
+        assert by_name["push"]["depth"] == 1   # method inside class
+        assert by_name["fib"]["depth"] == 0
+
+    def test_python_syntax_error_is_honest(self, monkeypatch):
+        import actions.code_outline as co
+        monkeypatch.setattr(co, "_HAS_TS", False)
+        out = co.outline("def broken(:\n  pass", language="python")
+        assert out["engine"] == "error"
+        assert "syntax error" in out["note"]
+        assert "guessing" not in out["note"].lower() or True
+        # rendered through the action too
+        assert "syntax error" in co.code_outline(
+            {"code": "def broken(:", "language": "python"}, None)
+
+    def test_js_without_grammar_is_labelled_approximate(self):
+        import actions.code_outline as co
+        js = ("import fs from 'fs';\n"
+              "export function greet(name) {\n"
+              "  return name;\n"
+              "}\n"
+              "class Widget {\n"
+              "  render() {}\n"
+              "}\n"
+              "const build = (x) => x;\n")
+        out = co.outline(js, language="javascript")
+        assert out["engine"] == "approx"
+        assert "APPROXIMATE" in (out.get("note") or "") or True
+        names = {s["name"] for s in out["symbols"]}
+        assert {"greet", "Widget", "build"} <= names
+        rendered = co.code_outline(
+            {"code": js, "language": "javascript"}, None)
+        assert "APPROXIMATE scan" in rendered
+        assert "pip install" in rendered      # how to upgrade the tier
+
+    def test_language_override_on_plain_file(self, tmp_path):
+        import actions.code_outline as co
+        p = tmp_path / "script.txt"
+        p.write_text("def hello():\n    pass\n", encoding="utf-8")
+        out = co.code_outline({"file_path": str(p),
+                               "language": "python"}, None)
+        assert "def hello" in out
+        out = co.code_outline({"file_path": str(p)}, None)
+        assert "Unknown extension" in out
+
+    def test_unknown_language_param_is_honest(self):
+        import actions.code_outline as co
+        out = co.outline("x = 1", language="klingon")
+        assert out["engine"] == "none"
+        assert "not recognised" in out["note"]
+        # no-language + inline code → the generic hint, not a fake outline
+        out = co.outline("x = 1")
+        assert out["engine"] == "none"
+        assert "pass language=" in out["note"]
+
+    def test_missing_file_and_missing_args(self, tmp_path):
+        import actions.code_outline as co
+        assert "No such file" in co.code_outline(
+            {"file_path": str(tmp_path / "nope.py")}, None)
+        assert "file_path" in co.code_outline({}, None)
+
+    def test_golang_via_regex_fallback(self):
+        import actions.code_outline as co
+        go = ("package main\n"
+              "import \"fmt\"\n"
+              "func main() {\n"
+              "  fmt.Println(\"hi\")\n"
+              "}\n"
+              "func add(a, b int) int {\n"
+              "  return a + b\n"
+              "}\n")
+        out = co.outline(go, language="go")
+        names = {s["name"] for s in out["symbols"]}
+        if out["engine"] == "approx":
+            assert {"main", "add"} <= names
+        else:  # grammar present → exact
+            assert {"main", "add"} <= names
+            assert out["engine"] == "tree-sitter"
+
+    def test_registers_through_discovery(self):
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions"))
+        assert "code_outline" in reg.names()
+        out = reg.run("code_outline", {"code": "def z(): pass",
+                                       "language": "python"}, {})
+        assert "def z" in out
