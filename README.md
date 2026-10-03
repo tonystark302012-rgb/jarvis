@@ -282,7 +282,27 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 | 📧 **Gmail** | Bundled plugin over IMAP/SMTP with an app password (stdlib only) — unread/list/read/send/search + guided setup with a live login check |
 | 📅 **Calendar** | Bundled plugin reading any ICS feed (Google Calendar's secret iCal URL) — upcoming/today/explicit date, RFC 5545 unfold + daily/weekly/monthly recurrence, bounded expansion |
 | 📷 **Phone → Vision** | The phone dashboard's 📷 button streams rear-camera JPEG frames to `/api/camera-frame`; `phone_vision` then answers *'what's on my desk'*, OCRs the frame or describes it — with a 5-minute freshness gate |
-| 🎙 **Meeting Recorder** | `meeting start/stop` records the mic to WAV, transcribes offline (faster-whisper), saves a `.txt` next to it and can summarise decisions/action items; 60-minute auto-cap |
+| 🎙 **Meeting Recorder** | `meeting start/stop` records the mic to WAV, transcribes offline (faster-whisper), saves a `.txt` next to it and can summarise decisions/action items; 60-minute auto-cap; decisions auto-push to calendar events and reminders |
+| 🔒 **Privacy Mode** | `privacy on` — cloud-facing tools (search, research, scrape, vision, translate, file analysis, monitors, flights) refuse with an honest message instead of transmitting; memory, history, RAG, automation and LAN MQTT keep working |
+| 🕵️ **History Search** | Local sqlite FTS5 over past conversations — survives restarts; *“what did I say about that laptop”* answers from the actual exchange |
+| 📚 **Local RAG** | `rag index path=…` then ask — your text/markdown/code/CSV files (PDF/DOCX via file_processor), offline, no API |
+| 🔌 **MCP Client** | `mcp list/call` — tools from any Model Context Protocol server (filesystem, GitHub, Slack, Notion, …) over stdio |
+| 🦜 **Live Translate** | `translate live from=en to=hi` — offline Argos pair first, Gemini when online, honest refusal when neither can |
+| 🧩 **Event-Driven Rules** | File-appears, USB-plug, phrase and time events reach the rules engine through a shared event bus — not just polling |
+| 💾 **Task Persistence** | Agentic runs live in sqlite — `task_agent` lists them and *“resume task N”* skips completed steps (idempotent) |
+| 📊 **DuckDB SQL** | `data file=report.csv query=SELECT …` — SQL over CSV/Parquet/JSON locally, schema on demand, LIMIT auto-applied |
+| 🔐 **Password Vault** | AES-256-GCM behind one master passphrase — unlock/set/get/list, locks itself after idle |
+| 🖥 **Sandboxed Terminal & Git** | Allowlisted tools only (python, pytest, ruff, npm, git, …) as argv — no shell operators, repo-confined, timeout-capped |
+| 🧊 **3D Models** | `make_3d spec='box 40 20 8; cylinder 6 12'` → STL/OBJ mesh, previewed on the 3D surface |
+| 🔁 **Auto Barge-In** | EchoGuard: sustained-evidence gate over `interrupt()` — you can talk over a reply; the echo tail or room noise can't |
+| 🎥 **Motion Detect** | The phone-camera pipe doubles as a security cam — motion alerts stream to the dashboard |
+| 🗂 **Render Surfaces** | Everything routed: CHAT · DISPLAY · SCAN · 3D · WEB tabs on the dashboard, classified from the content title |
+| 🌐 **Agentic Browser** | `browser_control action=agent goal=…` — EXTRACT → REASON → ACT → VERIFY with live page snapshots until the goal is met |
+| 👥 **Multi-Agent Dry Run** | `multi_agent task=…` — planner → coder → tester emit per-file diffs and verdicts; nothing is written until `apply=true` |
+| 🙋 **Presence Detection** | Input-idle + native OS idle probe → present/away with hysteresis; proactive speech stays quiet in an empty room |
+| 🏠 **Smart Home (MQTT)** | `smart_home pub/sub/status` against Home Assistant, zigbee2mqtt, Tasmota, ESPHome — internet brokers blocked under privacy |
+| 🌲 **Code Outline** | `code_outline file=…` — tree-sitter AST symbols with line numbers and nesting; stdlib `ast` for .py, labelled approximate scan elsewhere |
+| 🤖 **Local LLM by Default** | Ollama + llama3.2 on localhost:11434 out of the box; LM Studio / LocalAI / Jan aliases normalize to the OpenAI-compatible path |
 
 ### The guarantees behind it
 
@@ -363,6 +383,7 @@ jarvis/
 ├── .github/workflows/ci.yml  # CI: ruff + compileall + pytest on Python 3.11/3.12/3.13
 ├── .gitignore                # Keeps your API key, TLS key and memories out of the repository
 ├── tests/
+│   ├── test_roadmap.py       # Biggest suite — every roadmap batch: tools, privacy, presence, agents
 │   ├── test_upgrades.py      # Offline suite — security invariants, memory recall, dispatch, dashboard
 │   └── test_new_features.py  # Mission Control, orchestrator, rules, mirror, layouts, lifecycles
 ├── plugins/
@@ -400,7 +421,19 @@ jarvis/
 │   ├── youtube_video.py      # YouTube transcript & playback helpers
 │   ├── code_helper.py        # Screen + file code explanation and fixing
 │   ├── dev_agent.py          # Multi-file project builder (allowlisted runner)
-│   └── game_updater.py       # Game/platform update helpers
+│   ├── game_updater.py       # Game/platform update helpers
+│   ├── terminal.py           # Sandboxed terminal + git assistant (argv-only, repo-confined)
+│   ├── vault.py              # AES-256-GCM password vault (master passphrase)
+│   ├── rag.py                # Local RAG — index folders, ask offline (sqlite FTS5)
+│   ├── history_search.py     # Conversation history search (local FTS5, survives restarts)
+│   ├── mcp.py                # MCP client — tools from any stdio MCP server
+│   ├── data_query.py         # DuckDB SQL over CSV/Parquet/JSON (offline)
+│   ├── make_3d.py            # Spec → STL/OBJ mesh, preview on the 3D surface
+│   ├── privacy.py            # Privacy mode — hard gate for cloud-facing tools
+│   ├── multi_agent.py        # Planner→coder→tester dry-run pipeline (diffs before apply)
+│   ├── presence.py           # Present/away detection — gates proactive speech
+│   ├── smart_home.py         # MQTT pub/sub — HA / zigbee2mqtt / Tasmota / ESPHome
+│   └── code_outline.py       # tree-sitter symbol outline (AST / stdlib / approximate)
 ├── dashboard/
 │   ├── server.py             # Phone remote — FastAPI, PIN login, AES-256 command channel
 │   └── static/               # login.html, app.html, vendored crypto-js
@@ -411,7 +444,7 @@ jarvis/
 │   └── long_term.json        # Persistent store — created on first run
 ├── core/
 │   ├── gemini.py             # One place for every one-shot Gemini call — model ladder, timeouts, cooldowns
-│   ├── llm_client.py         # Optional local LLM (Ollama / OpenAI-compatible) fallback
+│   ├── llm_client.py         # Local LLM stack — Ollama is the DEFAULT (llama3.2); OpenAI-compatible aliases included
 │   ├── prompt.txt            # All prompt wording — {tokens} are filled from the live system at startup
 │   ├── avatar.py             # Avatar renderer — lighting, pose, expression, mouth (QPainter)
 │   ├── avatar_mesh.py        # Head geometry — loads the face, generates skull/neck/rigs
@@ -425,6 +458,12 @@ jarvis/
 │   ├── display.py            # Qt-free content panel renderer (unit-tested)
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
+│   ├── orchestrator.py       # Agent loop — plan → execute with stop-on-failure + report
+│   ├── activity.py           # Mission Control timeline — every tool call, live
+│   ├── events.py             # Event bus — file/time/USB/phrase events drive rules + proactive
+│   ├── taskstore.py          # sqlite persistence for agentic runs (resume after restart)
+│   ├── privacy.py            # Privacy mode — hard gate for cloud-facing tools
+│   ├── presence.py           # Present/away tracker — gates proactive speech
 │   └── wake_word.py          # Local "Hey Jarvis" detector — own thread, offline, opt-in
 └── config/
     ├── api_keys.json         # API key, name, voice, colour, toggles — created on first launch (git-ignored)
