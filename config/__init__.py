@@ -1,5 +1,6 @@
 # config/__init__.py
-import json, os, platform
+import json
+import platform
 from pathlib import Path
 
 _CONFIG_PATH = Path(__file__).parent / "api_keys.json"

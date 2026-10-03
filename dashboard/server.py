@@ -1,8 +1,14 @@
 """
 dashboard/server.py — JARVIS Local HTTP Dashboard
 
-Plain HTTP on port 8000 (no SSL warnings, no firewall issues).
-Security at the application layer: AES-256-CBC with session-key-derived key.
+TLS first: config/certs holds a locally generated self-signed pair (created on
+first run — nothing private ships in the repo) and BOTH ports serve HTTPS with
+it. Plain HTTP on port 8000 is only the fallback when `cryptography` is not
+installed, and it says so loudly — the PIN login then crosses the LAN in the
+clear, so the fallback warns before it binds 0.0.0.0.
+
+Security at the application layer: AES-256-CBC with a session-key-derived key
+(the PIN never becomes key material), one-time login keys, per-IP lockout.
 CryptoJS is auto-downloaded once and served locally — no CDN needed after that.
 
 Install deps:  pip install fastapi "uvicorn[standard]" cryptography
@@ -117,11 +123,16 @@ def _ensure_network_access(port: int) -> None:
     macOS   : osascript admin dialog if the Application Firewall is on.
     Linux   : pkexec GUI → sudo -n → prints manual command as fallback.
     """
-    import sys, subprocess, os, tempfile, threading
+    import sys
+    import subprocess
+    import os
+    import tempfile
+    import threading
 
     # ── Windows ──────────────────────────────────────────────────────────────
     if sys.platform == "win32":
-        import ctypes, time
+        import ctypes
+        import time
 
         port_rule = f"JARVIS Dashboard Port {port}"
         prog_rule  = "JARVIS Dashboard Python"
@@ -328,7 +339,7 @@ def _ensure_crypto_js() -> None:
         print("[Dashboard] CryptoJS cached — will serve locally from now on.")
     except Exception as e:
         print(f"[Dashboard] CryptoJS download failed: {e}")
-        print(f"[Dashboard] Encryption will fall back to CDN load on client.")
+        print("[Dashboard] Encryption will fall back to CDN load on client.")
 
 
 _ensure_crypto_js()
@@ -552,7 +563,11 @@ class DashboardServer:
         return self._aes_cache[session_key]
 
     def _decrypt(self, token: str, enc_b64: str) -> str | None:
-        sk = self._token_keys.get(token)
+        # Key material is the per-token random `enc` (see _new_enc_key), NOT the
+        # PIN in _token_keys. The client encrypts with SHA256(enc‖salt) — using
+        # the PIN here made every encrypted command fail to decrypt (the phone
+        # dashboard could never deliver a command while ENC was on).
+        sk = self._token_enckey.get(token)
         if not sk:
             return None
         try:
@@ -909,7 +924,7 @@ class DashboardServer:
         User types IP:8001 → Chrome tries https → self-signed cert warning → accept once → done."""
         ssl_key  = BASE_DIR / "config" / "certs" / "jarvis.key"
         ssl_cert = BASE_DIR / "config" / "certs" / "jarvis.crt"
-        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, PORT + 1)
+        asyncio.get_running_loop().run_in_executor(None, _ensure_network_access, PORT + 1)
         cfg = uvicorn.Config(
             self.app, host="0.0.0.0", port=PORT + 1, log_level="warning",
             ssl_keyfile=str(ssl_key), ssl_certfile=str(ssl_cert),
@@ -925,7 +940,7 @@ class DashboardServer:
 
         # Firewall setup runs in a thread — uvicorn starts immediately,
         # no waiting for UAC dialogs or subprocess timeouts.
-        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, PORT)
+        asyncio.get_running_loop().run_in_executor(None, _ensure_network_access, PORT)
 
         # Generate the TLS pair on first run so no private key ships in the repo.
         _ensure_certs()
@@ -936,6 +951,10 @@ class DashboardServer:
 
         if use_ssl:
             asyncio.create_task(self._serve_alias())
+        else:
+            print("[Dashboard] ⚠️  No TLS — serving PLAIN HTTP on the LAN.")
+            print("[Dashboard]    The login PIN will be visible to anyone on")
+            print("[Dashboard]    this network. For HTTPS: pip install cryptography")
 
         cfg = uvicorn.Config(
             self.app, host="0.0.0.0", port=PORT, log_level="warning",

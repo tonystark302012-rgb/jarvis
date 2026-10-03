@@ -12,8 +12,7 @@ panel, not a crashed assistant.
 from __future__ import annotations
 
 try:
-    from PyQt6.QtCore import Qt, QTimer
-    from PyQt6.QtGui import QAction
+    from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QTextBrowser, QPushButton, QLabel,
     )

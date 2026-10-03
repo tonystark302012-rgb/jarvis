@@ -9,12 +9,6 @@ import platform
 from pathlib import Path
 from datetime import datetime
 
-try:
-    import pyautogui
-    _PYAUTOGUI = True
-except ImportError:
-    _PYAUTOGUI = False
-
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 

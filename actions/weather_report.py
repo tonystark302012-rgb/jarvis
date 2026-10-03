@@ -24,7 +24,6 @@ sentence the assistant can say out loud, never a traceback.
 
 from __future__ import annotations
 
-import time
 
 try:
     import requests

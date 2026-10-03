@@ -1,15 +1,19 @@
+import os
+import re
 import time
 import subprocess
 import platform
 import shutil
 
-try:
-    import psutil
-    _PSUTIL = True
-except ImportError:
-    _PSUTIL = False
-
 _SYSTEM = platform.system()
+
+# Characters that must never reach a shell or a command line. `app_name` comes
+# from the model, so it is treated as hostile: `chrome & calc`, `x|rm -rf ~`,
+# backticks, newlines — all rejected before any launcher sees them.
+# Backslash is ALLOWED (Windows paths like C:\Program Files\App), dots, spaces,
+# parentheses, colons and URI schemes like `ms-settings:` all pass. This is
+# defence in depth: today no code path here invokes a shell at all.
+_UNSAFE_RE = re.compile(r'[&|;<>`$\n\r"*?{}]')
 
 _APP_ALIASES: dict[str, dict[str, str]] = {
 
@@ -79,11 +83,18 @@ def _normalize(raw: str) -> str:
 
 def _launch_windows(app_name: str) -> bool:
 
-    if shutil.which(app_name) or shutil.which(app_name.split(".")[0]):
+    # Resolve first, then launch the resolved path as a list — never through a
+    # shell. shutil.which() already proved the target is a real executable.
+    # CreateProcess cannot run .cmd/.bat directly (code.cmd on PATH is the
+    # normal shape for VS Code), so those go through cmd.exe /c explicitly.
+    found = shutil.which(app_name) or shutil.which(app_name.split(".")[0])
+    if found:
         try:
+            argv = [found]
+            if found.lower().endswith((".cmd", ".bat")):
+                argv = [os.environ.get("COMSPEC", "cmd.exe"), "/c", found]
             subprocess.Popen(
-                app_name,
-                shell=True,
+                argv,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -93,8 +104,10 @@ def _launch_windows(app_name: str) -> bool:
             print(f"[open_app] subprocess failed: {e}")
 
     if ":" in app_name:
+        # URI schemes (ms-settings:, https:) — os.startfile is the documented
+        # Windows API for ShellExecute; no cmd.exe, no `start`, no metacharacters.
         try:
-            subprocess.Popen(f"start {app_name}", shell=True)
+            os.startfile(app_name)  # noqa: S606 — validated input, native API
             time.sleep(1.0)
             return True
         except Exception:
@@ -247,6 +260,16 @@ def open_app(
 
     if not app_name:
         return "No application name provided."
+
+    # Model-supplied input: reject shell metacharacters before any launcher,
+    # pyautogui keystroke dump, or URI handler sees it.
+    if _UNSAFE_RE.search(app_name) or not app_name.isprintable():
+        msg = (
+            f"Refused '{app_name[:60]}': application names may not contain "
+            "shell operators (& | ; < > ` $ quotes). Give a plain app name."
+        )
+        print(f"[open_app] {msg}")
+        return msg
 
     launcher = _OS_LAUNCHERS.get(_SYSTEM)
     if launcher is None:

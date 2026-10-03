@@ -1,7 +1,10 @@
+import os
+import re
+import shlex
+import shutil
 import subprocess
 import sys
 import json
-import re
 import time
 from pathlib import Path
 
@@ -227,7 +230,11 @@ Code for {file_path}:"""
         response = model.generate_content(prompt)
         code = _strip_fences(response.text)
 
-        full_path = project_dir / file_path
+        full_path = _validate_project_path(project_dir, file_path)
+        if full_path is None:
+            raise ValueError(
+                f"Planner proposed a path outside the project directory: {file_path!r}"
+            )
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -239,13 +246,33 @@ Code for {file_path}:"""
             raise RateLimitError(str(e))
         raise
 
+# A dependency string must be a plain PyPI requirement: name, optional extras,
+# optional version specifier. Anything starting with `-` would make pip treat
+# it as a FLAG (`--index-url http://evil` = supply-chain hijack), so it is
+# rejected before pip ever sees it.
+_DEP_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*"          # name
+    r"(?:\[[A-Za-z0-9,._-]+\])?"             # optional extras
+    r"(?:\s*(?:==|!=|<=|>=|<|>|~=)\s*[\w.*+!-]+"   # version specifier
+    r"(?:\s*,\s*(?:==|!=|<=|>=|<|>|~=)\s*[\w.*+!-]+)*)?$"   # …and more (PEP 440 ranges)
+)
+
+
+def _is_safe_dependency(dep: str) -> bool:
+    return bool(_DEP_RE.match((dep or "").strip()))
+
+
 def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
     if not dependencies:
         return "No external dependencies."
 
     to_install = []
+    refused = []
     for dep in dependencies:
-        pkg_name = re.split(r"[>=<!]", dep)[0].strip()
+        if not _is_safe_dependency(dep):
+            refused.append(str(dep)[:60])
+            continue
+        pkg_name = re.split(r"[>=<!~]", dep)[0].strip()
         result = subprocess.run(
             [sys.executable, "-m", "pip", "show", pkg_name],
             capture_output=True, text=True
@@ -255,8 +282,13 @@ def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
         else:
             print(f"[DevAgent] ✓ Already installed: {pkg_name}")
 
+    if refused:
+        print(f"[DevAgent] ⚠️ Refused unsafe dependency specs: {refused}")
     if not to_install:
-        return f"All dependencies already installed: {', '.join(dependencies)}"
+        return (
+            f"All dependencies already installed: {', '.join(dependencies)}"
+            + (f" (refused {refused})" if refused else "")
+        )
 
     print(f"[DevAgent] 📦 Installing: {to_install}")
     try:
@@ -281,10 +313,18 @@ def _open_vscode(project_dir: Path) -> bool:
         r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
     ]
     for cmd in vscode_candidates:
+        # Resolve like open_app does: find the real executable, launch it as a
+        # list with no shell. `code.cmd` needs cmd.exe on Windows, so wrap it
+        # explicitly instead of handing the path to a shell.
+        resolved = shutil.which(cmd) or (cmd if Path(cmd).is_file() else None)
+        if not resolved:
+            continue
         try:
+            argv = [resolved, str(project_dir)]
+            if resolved.lower().endswith((".cmd", ".bat")):
+                argv = [os.environ.get("COMSPEC", "cmd.exe"), "/c", resolved, str(project_dir)]
             subprocess.Popen(
-                [cmd, str(project_dir)],
-                shell=True,
+                argv,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -295,11 +335,67 @@ def _open_vscode(project_dir: Path) -> bool:
             continue
     return False
 
-def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
-    print(f"[DevAgent] 🚀 Running: {run_command}")
+
+# Interpreters/runners the model's "run_command" is allowed to name. Anything
+# else (rm, curl, sudo, cmd.exe, powershell…) is refused: the dev agent runs
+# generated PROJECTS, not arbitrary shell commands.
+_RUN_ALLOWED = frozenset({
+    "python", "python3", "pythonw", "py",
+    "node", "npm", "npx", "yarn", "pnpm", "bun", "deno",
+    "ruby", "php", "java", "javac", "go", "cargo", "rustc",
+    "make", "dotnet", "gcc", "g++", "clang", "tsc",
+})
+
+
+def _validate_run_command(run_command: str) -> list[str] | None:
+    """Split the model's run command into argv, or None if it is not safe.
+
+    Safety rules (all enforced, no shell anywhere):
+      * no shell metacharacters — this runs as argv, but reject them anyway
+        so a future refactor to a shell cannot silently reintroduce RCE;
+      * the first token must be a known interpreter/runner from _RUN_ALLOWED;
+      * tokens stay tokens — shlex handles quoting without invoking a shell.
+    """
+    if not run_command or not run_command.strip():
+        return None
+    if re.search(r'[&|;<>`$\\\n\r]', run_command):
+        return None
     try:
-        parts = run_command.split()
-        if parts[0].lower() == "python":
+        parts = shlex.split(run_command, posix=(os.name != "nt"))
+    except ValueError:                     # unbalanced quotes
+        return None
+    if not parts:
+        return None
+    head = Path(parts[0]).name.lower()
+    if head.endswith(".exe"):
+        head = head[:-4]
+    if head not in _RUN_ALLOWED:
+        return None
+    return parts
+
+
+def _validate_project_path(project_dir: Path, rel_path: str) -> Path | None:
+    """Resolve rel_path inside project_dir, or None if it tries to escape."""
+    if not rel_path or rel_path.startswith(("~", "/", "\\")) or re.match(r"^[A-Za-z]:", rel_path):
+        return None
+    target = (project_dir / rel_path).resolve()
+    try:
+        target.relative_to(project_dir.resolve())
+    except ValueError:
+        return None
+    return target
+
+
+def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
+    parts = _validate_run_command(run_command)
+    if parts is None:
+        return (
+            f"Refused to run {run_command!r} — only known interpreters/runners "
+            f"({', '.join(sorted(_RUN_ALLOWED)[:8])}, …) with no shell operators."
+        )
+    print(f"[DevAgent] 🚀 Running: {' '.join(parts)}")
+    try:
+        if Path(parts[0]).name.lower().startswith("python"):
             parts[0] = sys.executable
 
         result = subprocess.run(
@@ -338,6 +434,9 @@ def _try_auto_install(error_output: str, project_dir: Path) -> bool:
         return False
 
     pkg = match.group(1).replace("_", "-").split(".")[0]
+    if not _is_safe_dependency(pkg):
+        print(f"[DevAgent] ⚠️ Refusing to auto-install unsafe name: {pkg!r}")
+        return False
     print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg}")
     try:
         result = subprocess.run(
@@ -425,7 +524,10 @@ Fixed code for {fix_path}:"""
             response = model.generate_content(prompt)
             fixed = _strip_fences(response.text)
 
-            full_path = project_dir / fix_path
+            full_path = _validate_project_path(project_dir, fix_path)
+            if full_path is None:
+                print(f"[DevAgent] ⚠️ Refused out-of-project fix path: {fix_path!r}")
+                continue
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 
@@ -474,6 +576,15 @@ def _build_project(
     entry_point  = plan.get("entry_point", "main.py")
     run_command  = plan.get("run_command", f"python {entry_point}")
     dependencies = plan.get("dependencies", [])
+
+    # The planner is a model too: its run_command gets the same allowlist as
+    # everything else. A command that names a shell or a random binary is
+    # replaced with the default interpreter invocation rather than trusted.
+    if _validate_run_command(run_command) is None:
+        print(f"[DevAgent] ⚠️ Planner run_command not allowed: {run_command!r}")
+        run_command = f"python {entry_point}"
+        if _validate_run_command(run_command) is None:
+            run_command = "python main.py"
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
 

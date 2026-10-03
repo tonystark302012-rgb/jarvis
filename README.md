@@ -138,7 +138,7 @@ That middle row is where the time was going. Only quota and 404 used to be coole
 #### 🧩 Everything bundled drives the computer
 The bundled skill list had grown to seventeen, and some of it was nobody's business but its author's. **Not everyone updates games; everyone opens applications.**
 
-Mark LV trims it to **twelve**, and every one of them does the same kind of thing: drive this machine. Applications, the browser, files, the desktop, the screen, the clock, the weather, the display. The rule is written into the project tree, so the next skill lands in the right folder without anyone having to ask.
+Mark LV ships **eighteen** self-describing skills (every `actions/*.py` that declares a `TOOL` dict — counted by CI), and all of them fall into two honest groups: driving this machine — applications, the browser, files, the desktop, the screen — and fetching for it — search, weather, flights, video. The rule is written into the project tree, so the next skill lands in the right folder without anyone having to ask.
 
 This is not only tidiness. Every bundled skill is declared to the model on **every** connection, whether you ever use it or not. The declarations sent at startup dropped from **16,827 characters to 12,907** — roughly a thousand tokens off every session, and five fewer wrong tools for the model to reach for.
 
@@ -274,8 +274,8 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 ## ⚡ Quick Start
 
 ```bash
-git clone https://github.com/FatihMakes/Mark-LV.git
-cd Mark-LV
+git clone https://github.com/tonystark302012-rgb/jarvis.git
+cd jarvis
 python setup.py        # installs deps for YOUR OS + the browser automation engine
 python main.py
 ```
@@ -285,6 +285,16 @@ python main.py
 > ⚠️ **Installation Note:** If you hit a `ModuleNotFoundError` for an OS-specific package, install it with `pip install <module_name>`. The optional **wake word** engine is *not* installed here — grab it in one click from **⚙ → WAKE WORD** inside the app.
 
 ---
+
+## 🛠️ Development
+
+```bash
+pip install -r requirements-dev.txt   # pytest + ruff + test deps (fast, no PyQt needed)
+ruff check .                          # lint — pyflakes + statement errors, must be clean
+python -m pytest tests/ -q            # full suite — offline, no mic/display/API key
+```
+
+CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`). The suite covers the security invariants: no `shell=True` in `open_app`/`dev_agent`, the run-command allowlist, project-path containment, pip-flag injection, the dashboard AES round-trip, brute-force lockout, memory recall and parallel tool dispatch.
 
 ## 📋 Requirements
 
@@ -304,16 +314,20 @@ python main.py
 ## 🗂️ Project Structure
 
 ```
-Mark LV/
+jarvis/
 ├── main.py                   # Core loop — Gemini Live session, audio I/O, viseme extraction, tool dispatch
 ├── ui.py                     # PyQt6 HUD — avatar canvas, waveform, log panel, settings drawer, camera feed
 ├── setup.py                  # OS-aware installer (skips wrong-OS dependencies, checks your Python)
+├── pyproject.toml            # ruff + pytest configuration (lint must stay clean in CI)
+├── requirements.txt          # Runtime dependencies (OS markers filter per platform)
+├── requirements-dev.txt      # Test/lint dependencies — pip install -r requirements-dev.txt
+├── .github/workflows/ci.yml  # CI: ruff + compileall + pytest on Python 3.11/3.12/3.13
 ├── .gitignore                # Keeps your API key, TLS key and memories out of the repository
+├── tests/
+│   └── test_upgrades.py      # Offline suite — security invariants, memory recall, dispatch, dashboard
 ├── plugins/
 │   └── _template.py          # Copy this to write a new skill — one file, drop in, done
 ├── actions/                  # Bundled skills — each self-describes via a TOOL dict + handler
-│                             #   Everything here drives the COMPUTER, which is what decides
-│                             #   whether a new skill belongs in this folder at all.
 │   ├── web_search.py         # Gemini + DDG parallel search (news, research, price, compare)
 │   ├── screen_processor.py   # Screen & webcam capture for vision
 │   ├── background_monitor.py # User-configured topic watching — daily DDG check
@@ -322,20 +336,31 @@ Mark LV/
 │   ├── system_monitor.py     # CPU / RAM / GPU / temperature telemetry
 │   ├── computer_settings.py  # Volume, brightness, WiFi, power (per-OS)
 │   ├── computer_control.py   # Keyboard shortcuts, mouse, window management
-│   ├── open_app.py           # Application launcher (per-OS name map)
+│   ├── open_app.py           # Application launcher (validated names, no shell)
 │   ├── browser_control.py    # Web browser control
-│   ├── file_controller.py    # File system operations
+│   ├── file_controller.py    # File system operations (undo journal)
 │   ├── file_processor.py     # Document reading and summarization
 │   ├── send_message.py       # Messaging integration
-│   ├── weather_report.py     # Live weather data
+│   ├── weather_report.py     # Live weather data (Open-Meteo, no key)
 │   ├── video_player.py       # Plays video on the HUD, where the avatar normally is
-│   └── desktop.py            # Desktop and taskbar control
+│   ├── desktop.py            # Desktop and taskbar control (no code generation)
+│   ├── scanner.py            # System / network / port / file inspection (read-only)
+│   ├── flight_finder.py      # Flight search and extraction
+│   ├── youtube_video.py      # YouTube transcript & playback helpers
+│   ├── code_helper.py        # Screen + file code explanation and fixing
+│   ├── dev_agent.py          # Multi-file project builder (allowlisted runner)
+│   └── game_updater.py       # Game/platform update helpers
+├── dashboard/
+│   ├── server.py             # Phone remote — FastAPI, PIN login, AES-256 command channel
+│   └── static/               # login.html, app.html, vendored crypto-js
 ├── memory/
 │   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
+│   ├── semantic_recall.py    # Hybrid ranker for recall_memory (trigram + lexical)
 │   ├── config_manager.py     # api_keys.json access — key, OS, name, voice, colour, toggles
 │   └── long_term.json        # Persistent store — created on first run
 ├── core/
 │   ├── gemini.py             # One place for every one-shot Gemini call — model ladder, timeouts, cooldowns
+│   ├── llm_client.py         # Optional local LLM (Ollama / OpenAI-compatible) fallback
 │   ├── prompt.txt            # All prompt wording — {tokens} are filled from the live system at startup
 │   ├── avatar.py             # Avatar renderer — lighting, pose, expression, mouth (QPainter)
 │   ├── avatar_mesh.py        # Head geometry — loads the face, generates skull/neck/rigs
@@ -346,6 +371,7 @@ Mark LV/
 │   ├── undo.py               # One shared undo stack — actions register how to reverse themselves
 │   ├── confirm.py            # Irreversible-action gate — the token is issued by the UI, not the model
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name
+│   ├── display.py            # Qt-free content panel renderer (unit-tested)
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
 │   └── wake_word.py          # Local "Hey Jarvis" detector — own thread, offline, opt-in

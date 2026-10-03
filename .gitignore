@@ -51,3 +51,11 @@ desktop.ini
 logs/
 downloads/
 screenshots/
+
+# ── Archives — never commit source zips (Mark-LV-main.zip was 450 KB of the
+# repo's own tree sitting in the repo) ────────────────────────────────────────
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
