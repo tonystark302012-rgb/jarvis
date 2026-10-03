@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from config import is_windows, is_mac, is_linux
+from config import is_windows, is_mac
 
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -148,7 +148,6 @@ def _parse_flights_with_gemini(
     destination: str,
     date:        str,
 ) -> list[dict]:
-    from google import genai as _genai
     from google.genai import types
 
     prompt  = (
@@ -294,6 +293,12 @@ def _save_to_desktop(content: str, origin: str, destination: str) -> str:
 
 
 def flight_finder(parameters: dict, player=None, speak=None) -> str:
+    # Privacy gate FIRST: flight search always leaves the machine.
+    from core import privacy as _privacy
+    blocked = _privacy.gate("flight_finder")
+    if blocked:
+        return blocked
+
     params = parameters or {}
 
     origin      = params.get("origin",      "").strip()

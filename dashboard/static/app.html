@@ -55,6 +55,38 @@
     main { flex: 1; overflow-y: auto; padding: 14px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
     main::-webkit-scrollbar { width: 3px; }
     main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ── RENDER SURFACE TABS (CHAT | DISPLAY | SCAN | 3D | WEB) ── */
+    #tabs {
+      flex-shrink: 0; display: flex; gap: 4px; padding: 7px 12px 0;
+      border-bottom: 1px solid var(--border); background: rgba(7,9,15,0.95);
+    }
+    #tabs .tab {
+      flex: 1; padding: 7px 4px; font-size: 10px; font-weight: 700;
+      letter-spacing: 1.5px; text-transform: uppercase; text-align: center;
+      color: var(--muted); background: transparent; cursor: pointer;
+      border: 1px solid transparent; border-bottom: none;
+      border-radius: 7px 7px 0 0; position: relative;
+    }
+    #tabs .tab.on { color: var(--accent); background: var(--surface); border-color: var(--border); }
+    #tabs .tab .t-dot {
+      position: absolute; top: 5px; right: 7px; width: 5px; height: 5px;
+      border-radius: 50%; background: var(--accent); display: none;
+    }
+    #tabs .tab.has-new .t-dot { display: block; }
+    #surface { display: none; flex: 1; overflow-y: auto; padding: 16px; }
+    #surface::-webkit-scrollbar { width: 3px; }
+    #surface::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    #surface .sf-title {
+      font-size: 11px; font-weight: 700; letter-spacing: 2px;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 10px;
+    }
+    #surface .sf-body {
+      white-space: pre-wrap; word-break: break-word;
+      font-size: 13.5px; line-height: 1.6; color: var(--text);
+      font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    }
+    #surface .sf-empty { color: var(--muted); font-size: 12px; font-style: italic; }
     .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.55; animation: pop 0.18s ease; }
     @keyframes pop { from { opacity:0; transform:translateY(4px); } }
     .msg-j   { align-self:flex-start; background:var(--adim);   border:1px solid rgba(99,102,241,0.18); border-bottom-left-radius:4px; }
@@ -121,6 +153,29 @@
     #mic-btn.unsupported { opacity: 0.3; cursor: not-allowed; }
     @keyframes mic-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.65;transform:scale(0.97)} }
 
+    /* ── SCREEN MIRROR ── */
+    #mirror-view {
+      position:fixed; top:56px; right:8px; width:min(46vw,420px); z-index:40;
+      border:1px solid var(--border); border-radius:10px; overflow:hidden;
+      background:#000; box-shadow:0 8px 30px rgba(0,0,0,0.5);
+    }
+    #mirror-view img { width:100%; display:block; min-height:80px; }
+    #mirror-btn.on { border-color: var(--accent); color: var(--accent); opacity:1; }
+
+    /* ── PHONE CAMERA (→ PC vision) ── */
+    #cam-view {
+      position:fixed; top:56px; left:8px; width:min(30vw,180px); z-index:40;
+      border:1px solid var(--border); border-radius:10px; overflow:hidden;
+      background:#000; box-shadow:0 8px 30px rgba(0,0,0,0.5);
+      display:none;
+    }
+    #cam-view video { width:100%; display:block; transform:scaleX(-1); }
+    #cam-view .cam-tag {
+      position:absolute; bottom:4px; left:6px; font-size:9px; font-weight:700;
+      color:var(--accent); text-shadow:0 1px 3px #000;
+    }
+    #cam-btn.on { border-color: var(--accent); color: var(--accent); opacity:1; }
+
     /* ── TOAST ── */
     #toast {
       position:fixed; top:66px; left:50%; transform:translateX(-50%) translateY(-8px);
@@ -142,15 +197,30 @@
     <div class="spacer"></div>
     <div class="url">__IP__:__PORT__</div>
   </header>
+  <nav id="tabs">
+    <button class="tab on" data-tab="chat">💬 Chat</button>
+    <button class="tab" data-tab="display">🖥️ Display<span class="t-dot"></span></button>
+    <button class="tab" data-tab="scan">🔍 Scan<span class="t-dot"></span></button>
+    <button class="tab" data-tab="3d">🧊 3D<span class="t-dot"></span></button>
+    <button class="tab" data-tab="web">🌐 Web<span class="t-dot"></span></button>
+  </nav>
   <main id="feed"></main>
+  <main id="surface"><div class="sf-empty">Nothing rendered on this surface yet — charts, diagrams and reports land on DISPLAY, OCR on SCAN, models on 3D, scraped pages on WEB.</div></main>
   <footer>
     <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
     <label class="btn-attach" for="file-inp" title="Send file">📎</label>
     <input type="file" id="file-inp" multiple accept="*/*" style="display:none">
     <button id="mic-btn" onclick="doMic()" title="Voice command">🎤</button>
+    <button class="btn btn-wake" id="mirror-btn" onclick="doMirror()" title="Screen mirror">🖥️</button>
+    <button class="btn btn-wake" id="cam-btn" onclick="doCamera()" title="Stream phone camera to JARVIS (PC vision)">📷</button>
     <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
     <button class="btn btn-send" onclick="doSend()">SEND</button>
   </footer>
+  <div id="mirror-view" style="display:none"><img id="mirror-img" alt="PC screen"></div>
+  <div id="cam-view">
+    <video id="cam-video" autoplay playsinline muted></video>
+    <span class="cam-tag" id="cam-tag">LIVE</span>
+  </div>
 
   <script>
     // ── Auth — bearer token ───────────────────────────────────────────────────
@@ -220,7 +290,104 @@
       if (m.type === 'wake')          sys('Wake word detected — connecting…');
       if (m.type === 'sys')           sys(m.text);
       if (m.type === 'file_received') _onFileReceived(m);
+      if (m.type === 'activity')      _onActivity(m);
+      if (m.type === 'frame')         _onFrame(m);
+      if (m.type === 'motion')        _onMotion(m);
+      if (m.type === 'content')       _onContent(m);
     };
+
+    // ── Screen mirror (PC → phone) ────────────────────────────────────────────
+    let _mirrorOn = false;
+    function doMirror() {
+      _mirrorOn = !_mirrorOn;
+      const v = document.getElementById('mirror-view');
+      v.style.display = _mirrorOn ? 'block' : 'none';
+      document.getElementById('mirror-btn').style.opacity = _mirrorOn ? '1' : '';
+      if (ws.readyState === 1) ws.send(JSON.stringify({type: 'mirror', on: _mirrorOn}));
+      toast(_mirrorOn ? 'Screen mirror on' : 'Screen mirror off');
+    }
+    function _onFrame(m) {
+      if (!_mirrorOn) return;
+      document.getElementById('mirror-img').src = 'data:image/jpeg;base64,' + m.data;
+    }
+
+    // ── Phone camera → PC vision ─────────────────────────────────────────────
+    // Toggle: getUserMedia (rear cam) → a hidden <video> → a canvas grabs
+    // 640px JPEG frames every ~1.5s → POST /api/camera-frame. The PC's
+    // phone_vision action reads the latest one. Turning off stops every
+    // track, so the camera indicator light really goes out.
+    let _camOn = false, _camStream = null, _camTimer = null;
+    const _camCanvas = document.createElement('canvas');
+    async function doCamera() {
+      if (_camOn) { _camStop(); return; }
+      try {
+        _camStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1280 } },
+          audio: false,
+        });
+      } catch (err) {
+        toast('Camera denied: ' + (err && err.name ? err.name : 'error'));
+        return;
+      }
+      _camOn = true;
+      const v = document.getElementById('cam-video');
+      v.srcObject = _camStream;
+      await v.play().catch(() => {});
+      document.getElementById('cam-view').style.display = 'block';
+      document.getElementById('cam-btn').classList.add('on');
+      toast('Camera streaming to JARVIS');
+      _camTimer = setInterval(_camShot, 1500);
+      _camShot();
+    }
+    function _camStop() {
+      _camOn = false;
+      clearInterval(_camTimer); _camTimer = null;
+      if (_camStream) { _camStream.getTracks().forEach(t => t.stop()); _camStream = null; }
+      document.getElementById('cam-view').style.display = 'none';
+      document.getElementById('cam-btn').classList.remove('on');
+      toast('Camera off');
+    }
+    function _camShot() {
+      const v = document.getElementById('cam-video');
+      if (!_camOn || !v.videoWidth) return;
+      const scale = Math.min(1, 640 / v.videoWidth);
+      _camCanvas.width  = Math.round(v.videoWidth  * scale);
+      _camCanvas.height = Math.round(v.videoHeight * scale);
+      _camCanvas.getContext('2d').drawImage(v, 0, 0,
+        _camCanvas.width, _camCanvas.height);
+      let data;
+      try { data = _camCanvas.toDataURL('image/jpeg', 0.7); }
+      catch { return; }
+      _authFetch('/api/camera-frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ frame: data, ts: Date.now() / 1000 }),
+      }).then(r => r.json()).then(j => {
+        const tag = document.getElementById('cam-tag');
+        if (j && j.ok) tag.textContent = 'SENT ' + (j.size > 999
+          ? (j.size / 1024).toFixed(0) + 'KB' : j.size + 'B');
+        else if (j && j.error) tag.textContent = 'ERR';
+      }).catch(() => {
+        document.getElementById('cam-tag').textContent = 'OFFLINE';
+      });
+    }
+
+    // ── Mission Control feed (tool activity from the PC) ──────────────────────
+    const _ACT_MAX = 60;
+    function _onActivity(a) {
+      const d = document.createElement('div');
+      const mark = a.running ? '…' : (a.ok ? '✓' : '✗');
+      const dur  = (a.duration != null && !a.running) ? ` ${a.duration}s` : '';
+      const args = a.args ? ` (${esc(a.args)})` : '';
+      d.className = 'msg ' + (a.running ? 'msg-sys' : (a.ok ? 'msg-j' : 'msg-u'));
+      d.innerHTML = `<div class="lbl">${esc(a.when)} · ${mark} ${esc(a.name)}${dur}</div>`
+                  + (a.args ? `<span style="opacity:.75">${args}</span>` : '')
+                  + ((a.preview && a.ok === false)
+                     ? `<div style="opacity:.75">${esc(a.preview)}</div>` : '');
+      feed.appendChild(d);
+      while (feed.children.length > _ACT_MAX * 3) feed.removeChild(feed.firstChild);
+      feed.scrollTop = feed.scrollHeight;
+    }
 
     function setStatus(s) {
       if (s === 'active') {
@@ -247,6 +414,70 @@
       const d = document.createElement('div');
       d.className = 'msg msg-sys'; d.textContent = text;
       feed.appendChild(d); feed.scrollTop = feed.scrollHeight;
+    }
+
+    // ── Camera motion alert (server-side frame diff, dashboard/motion.py) ──
+    let _motionLast = 0;
+    function _onMotion(m) {
+      // The server already rate-limits (cooldown 3 s); this second guard
+      // only covers overlapping broadcasts from reconnect replays.
+      const now = Date.now();
+      if (now - _motionLast < 1500) return;
+      _motionLast = now;
+      sys(`⚠️ Motion detected in camera view (score ${m.score})`);
+    }
+
+    // ── Universal render surface: CHAT | DISPLAY | SCAN | 3D | WEB ─────────
+    // Chat is the conversation; the other four tabs show the latest
+    // show_content() result routed to them by dashboard/surface.py.
+    let _tab = 'chat';
+    const _surfaces = {};   // surface -> {title, text}
+
+    function showTab(name) {
+      _tab = name;
+      document.querySelectorAll('#tabs .tab').forEach(b => {
+        b.classList.toggle('on', b.dataset.tab === name);
+        if (b.dataset.tab === name) b.classList.remove('has-new');
+      });
+      const chatOn = (name === 'chat');
+      const feed    = document.getElementById('feed');
+      const surface = document.getElementById('surface');
+      feed.style.display    = chatOn ? 'flex' : 'none';
+      surface.style.display = chatOn ? 'none' : 'flex';
+      if (!chatOn) _renderSurface(name);
+    }
+    document.querySelectorAll('#tabs .tab').forEach(b => {
+      b.onclick = () => showTab(b.dataset.tab);
+    });
+
+    function _renderSurface(name) {
+      const el  = document.getElementById('surface');
+      const got = _surfaces[name];
+      el.innerHTML = '';
+      if (!got) {
+        const d = document.createElement('div');
+        d.className = 'sf-empty';
+        d.textContent = `Nothing on this surface yet — its results will appear here.`;
+        el.appendChild(d);
+        return;
+      }
+      const t = document.createElement('div');
+      t.className = 'sf-title'; t.textContent = got.title || name.toUpperCase();
+      const b = document.createElement('div');
+      b.className = 'sf-body';  b.textContent = got.text || '';
+      el.appendChild(t); el.appendChild(b);
+    }
+
+    function _onContent(m) {
+      const s = String(m.surface || 'display');
+      _surfaces[s] = { title: String(m.title || ''), text: String(m.text || '') };
+      if (_tab === s) {
+        _renderSurface(s);          // live update while the tab is open
+      } else {
+        // mark the tab so the user knows something landed there
+        const btn = document.querySelector(`#tabs .tab[data-tab="${s}"]`);
+        if (btn) btn.classList.add('has-new');
+      }
     }
 
     function esc(s) {

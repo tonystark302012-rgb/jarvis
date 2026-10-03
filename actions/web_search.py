@@ -348,6 +348,11 @@ def web_search(
     player=None,
     session_memory=None,
 ) -> str:
+
+    from core import privacy as _privacy
+    _blocked = _privacy.gate("web_search")
+    if _blocked:
+        return _blocked
     params = parameters or {}
     query  = params.get("query", "").strip()
     mode   = params.get("mode",  "search").lower().strip()

@@ -1,8 +1,14 @@
 """
 dashboard/server.py — JARVIS Local HTTP Dashboard
 
-Plain HTTP on port 8000 (no SSL warnings, no firewall issues).
-Security at the application layer: AES-256-CBC with session-key-derived key.
+TLS first: config/certs holds a locally generated self-signed pair (created on
+first run — nothing private ships in the repo) and BOTH ports serve HTTPS with
+it. Plain HTTP on port 8000 is only the fallback when `cryptography` is not
+installed, and it says so loudly — the PIN login then crosses the LAN in the
+clear, so the fallback warns before it binds 0.0.0.0.
+
+Security at the application layer: AES-256-CBC with a session-key-derived key
+(the PIN never becomes key material), one-time login keys, per-IP lockout.
 CryptoJS is auto-downloaded once and served locally — no CDN needed after that.
 
 Install deps:  pip install fastapi "uvicorn[standard]" cryptography
@@ -117,11 +123,16 @@ def _ensure_network_access(port: int) -> None:
     macOS   : osascript admin dialog if the Application Firewall is on.
     Linux   : pkexec GUI → sudo -n → prints manual command as fallback.
     """
-    import sys, subprocess, os, tempfile, threading
+    import sys
+    import subprocess
+    import os
+    import tempfile
+    import threading
 
     # ── Windows ──────────────────────────────────────────────────────────────
     if sys.platform == "win32":
-        import ctypes, time
+        import ctypes
+        import time
 
         port_rule = f"JARVIS Dashboard Port {port}"
         prog_rule  = "JARVIS Dashboard Python"
@@ -328,7 +339,7 @@ def _ensure_crypto_js() -> None:
         print("[Dashboard] CryptoJS cached — will serve locally from now on.")
     except Exception as e:
         print(f"[Dashboard] CryptoJS download failed: {e}")
-        print(f"[Dashboard] Encryption will fall back to CDN load on client.")
+        print("[Dashboard] Encryption will fall back to CDN load on client.")
 
 
 _ensure_crypto_js()
@@ -484,6 +495,12 @@ class DashboardServer:
         self._login_fails: dict[str, list]   = {}   # ip -> [timestamps]
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
+        # Screen mirror: phone can ask the PC to stream downscaled frames.
+        self._mirror_on: bool                = False
+        self._mirror_task                     = None
+        # Camera motion detect — stateful frame differ (see dashboard/motion.py)
+        from dashboard.motion import MotionDetector
+        self._motion                          = MotionDetector()
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
@@ -552,7 +569,11 @@ class DashboardServer:
         return self._aes_cache[session_key]
 
     def _decrypt(self, token: str, enc_b64: str) -> str | None:
-        sk = self._token_keys.get(token)
+        # Key material is the per-token random `enc` (see _new_enc_key), NOT the
+        # PIN in _token_keys. The client encrypts with SHA256(enc‖salt) — using
+        # the PIN here made every encrypted command fail to decrypt (the phone
+        # dashboard could never deliver a command while ENC was on).
+        sk = self._token_enckey.get(token)
         if not sk:
             return None
         try:
@@ -570,10 +591,11 @@ class DashboardServer:
 
     # ── broadcast ────────────────────────────────────────────────────────
 
-    async def broadcast(self, msg: dict) -> None:
-        self._history.append(msg)
-        if len(self._history) > 300:
-            self._history = self._history[-300:]
+    async def broadcast(self, msg: dict, history: bool = True) -> None:
+        if history:
+            self._history.append(msg)
+            if len(self._history) > 300:
+                self._history = self._history[-300:]
         dead: set[WebSocket] = set()
         for ws in list(self._clients):
             try:
@@ -581,6 +603,60 @@ class DashboardServer:
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+    # ── screen mirror ────────────────────────────────────────────────────
+
+    async def mirror_set(self, on: bool) -> None:
+        """Toggle the PC→phone screen stream. Frames are low-res JPEGs sent
+        as base64; activity/mirror traffic never enters the replay history.
+        The state message goes out BEFORE the capture task starts so a
+        client's first frame of messages is deterministic."""
+        on = bool(on)
+        if on == self._mirror_on:
+            return
+        self._mirror_on = on
+        await self.broadcast({"type": "sys",
+                              "text": "Screen mirror ON." if on else
+                                      "Screen mirror OFF."})
+        if on and (self._mirror_task is None or self._mirror_task.done()):
+            self._mirror_task = asyncio.create_task(self._mirror_loop())
+
+    async def _mirror_loop(self) -> None:
+        """~3 fps while enabled. Every failure path stops the stream with a
+        message instead of silently spinning (headless/no PIL/no display)."""
+        import base64
+        import io as _io
+        import time as _t
+        try:
+            from PIL import ImageGrab
+        except Exception as e:
+            await self.broadcast({"type": "sys",
+                                  "text": f"Screen mirror unavailable ({e})."})
+            self._mirror_on = False
+            return
+        sent = 0
+        while self._mirror_on:
+            t0 = _t.monotonic()
+            try:
+                img = ImageGrab.grab()
+                w, h = img.size
+                if w > 960:
+                    img = img.resize((960, max(1, int(h * 960 / w))))
+                buf = _io.BytesIO()
+                img.save(buf, format="JPEG", quality=45)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                await self.broadcast({"type": "frame", "data": b64},
+                                     history=False)
+                sent += 1
+            except Exception as e:
+                # ImageGrab raises on headless/locked sessions — stop cleanly.
+                await self.broadcast({"type": "sys",
+                                      "text": f"Screen mirror stopped ({e})."})
+                self._mirror_on = False
+                return
+            elapsed = _t.monotonic() - t0
+            await asyncio.sleep(max(0.05, 0.33 - elapsed))
+        # loop exited because toggle went off — nothing to clean
 
     # ── FastAPI app ───────────────────────────────────────────────────────
 
@@ -755,6 +831,58 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
+        # ── Phone camera → PC vision ─────────────────────────────────────────
+        # The phone streams JPEG frames here; the latest one is kept on disk
+        # for the phone_vision action to read. One file, overwritten each time
+        # — history of what your desk looked like is not the point, the CURRENT
+        # view is. Body is JSON {"frame": "<base64 jpeg>", "ts": epoch} —
+        # no multipart, so the endpoint also works without python-multipart.
+
+        @app.post("/api/camera-frame")
+        async def camera_frame(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Bad JSON"}, status_code=400)
+            import base64 as _b64
+            import binascii
+            raw = str(body.get("frame") or "")
+            if "," in raw and raw.strip().startswith("data:"):
+                raw = raw.split(",", 1)[1]           # data:image/jpeg;base64,…
+            try:
+                data = _b64.b64decode(raw, validate=True)
+            except (binascii.Error, ValueError):
+                return JSONResponse({"error": "Bad base64"},
+                                    status_code=400)
+            if not (100 <= len(data) <= 4 * 1024 * 1024):
+                return JSONResponse(
+                    {"error": "Frame must be 100 B – 4 MB"},
+                    status_code=413)
+            cam_dir = self._uploads_dir / "camera"
+            try:
+                cam_dir.mkdir(parents=True, exist_ok=True)
+                (cam_dir / "frame.jpg").write_bytes(data)
+                (cam_dir / "frame.json").write_text(
+                    json.dumps({"ts": float(body.get("ts") or time.time()),
+                                "size": len(data)}),
+                    encoding="utf-8")
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+            asyncio.create_task(self.broadcast({
+                "type": "camera_frame",
+                "size": len(data),
+                "ts": float(body.get("ts") or time.time()),
+            }, history=False))
+            # Motion detect: frame-over-frame diff (dashboard/motion.py).
+            # feed() never raises and degrades to None without PIL.
+            motion = self._motion.feed(data, time.time())
+            if motion:
+                asyncio.create_task(self.broadcast(motion, history=False))
+            return JSONResponse({"ok": True, "size": len(data),
+                                 "motion": bool(motion)})
+
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 
         @app.websocket("/ws/phone-audio")
@@ -887,7 +1015,9 @@ class DashboardServer:
             try:
                 while True:
                     data = await websocket.receive_json()
-                    if data.get("type") == "command":
+                    if data.get("type") == "mirror":
+                        await self.mirror_set(bool(data.get("on")))
+                    elif data.get("type") == "command":
                         enc = data.get("enc", "")
                         t   = self._decrypt(tok, enc) if enc else (data.get("text") or "").strip()
                         if t:
@@ -909,7 +1039,7 @@ class DashboardServer:
         User types IP:8001 → Chrome tries https → self-signed cert warning → accept once → done."""
         ssl_key  = BASE_DIR / "config" / "certs" / "jarvis.key"
         ssl_cert = BASE_DIR / "config" / "certs" / "jarvis.crt"
-        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, PORT + 1)
+        asyncio.get_running_loop().run_in_executor(None, _ensure_network_access, PORT + 1)
         cfg = uvicorn.Config(
             self.app, host="0.0.0.0", port=PORT + 1, log_level="warning",
             ssl_keyfile=str(ssl_key), ssl_certfile=str(ssl_cert),
@@ -925,7 +1055,7 @@ class DashboardServer:
 
         # Firewall setup runs in a thread — uvicorn starts immediately,
         # no waiting for UAC dialogs or subprocess timeouts.
-        asyncio.get_event_loop().run_in_executor(None, _ensure_network_access, PORT)
+        asyncio.get_running_loop().run_in_executor(None, _ensure_network_access, PORT)
 
         # Generate the TLS pair on first run so no private key ships in the repo.
         _ensure_certs()
@@ -936,6 +1066,10 @@ class DashboardServer:
 
         if use_ssl:
             asyncio.create_task(self._serve_alias())
+        else:
+            print("[Dashboard] ⚠️  No TLS — serving PLAIN HTTP on the LAN.")
+            print("[Dashboard]    The login PIN will be visible to anyone on")
+            print("[Dashboard]    this network. For HTTPS: pip install cryptography")
 
         cfg = uvicorn.Config(
             self.app, host="0.0.0.0", port=PORT, log_level="warning",

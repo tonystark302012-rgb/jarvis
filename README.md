@@ -138,7 +138,7 @@ That middle row is where the time was going. Only quota and 404 used to be coole
 #### 🧩 Everything bundled drives the computer
 The bundled skill list had grown to seventeen, and some of it was nobody's business but its author's. **Not everyone updates games; everyone opens applications.**
 
-Mark LV trims it to **twelve**, and every one of them does the same kind of thing: drive this machine. Applications, the browser, files, the desktop, the screen, the clock, the weather, the display. The rule is written into the project tree, so the next skill lands in the right folder without anyone having to ask.
+Mark LV ships **eighteen** self-describing skills (every `actions/*.py` that declares a `TOOL` dict — counted by CI), and all of them fall into two honest groups: driving this machine — applications, the browser, files, the desktop, the screen — and fetching for it — search, weather, flights, video. The rule is written into the project tree, so the next skill lands in the right folder without anyone having to ask.
 
 This is not only tidiness. Every bundled skill is declared to the model on **every** connection, whether you ever use it or not. The declarations sent at startup dropped from **16,827 characters to 12,907** — roughly a thousand tokens off every session, and five fewer wrong tools for the model to reach for.
 
@@ -255,6 +255,65 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 
 ---
 
+## 🤖 The Agentic Update — Mark LV+
+
+### What JARVIS now does on its own
+
+| Feature | Description |
+|---|---|
+| 🕐 **Mission Control** | Every tool call the session makes — time, arguments, duration, success/failure — lands on a live timeline. Ask `mission_control` for `timeline`, `stats` or `clear`, or open the dashboard's **🎮 Activity** tab |
+| 🧠 **Agentic Task Engine** | Give a goal ("clean my downloads folder"), a planner breaks it into tool calls, the orchestrator executes each step with stop-on-failure, retry and a written report. Steps dispatch through the same registry the model uses, so an agent can never reach a tool the session doesn't have |
+| 🤖 **Rules & Automation** | `when 18:00 → system_monitor`, `when report.pdf appears in ~/Downloads → file_processor`, `when I say "movie mode" → video_player`, USB plug/unplug triggers — time, file-event, phrase and device triggers that fire real actions, with self-healing retries. This IS JARVIS's scheduled-NL-automation layer ("every day at 8 say X" = a time rule), so a separate schedule engine would duplicate it |
+| 🎬 **Macro Recorder** | Record a screen macro, replay it later. Replay is gated behind `confirm=yes` and a 400-event safety cap |
+| 🔍 **Scanner upgrades** | Five new modes: `dupes` (MD5 duplicate finder), `treemap` (folder-size bars), `speed` (Cloudflare 10 MB speed test), `drives` (partitions), `startup` (autostart audit) |
+| 🪟 **Window Layouts** | `split` / `coding` / `stack` / `left` / `right` / `center` — pure geometry with xdotool, win32 and AppleScript backends |
+| 📋 **Clipboard History** | A watcher keeps the last 100 clips — `clip_history` list / search / use / clear |
+| 🌐 **Scrape** | URL → clean text, links and title. bs4 when present, stdlib fallback when not, non-HTTP schemes rejected, same cached httpx client as everything else |
+| 🔬 **Research → Report** | Multi-query DDG fan-out → fetch top pages → Gemini-written markdown report with numbered citations (extractive fallback without a key) → saved to `research/<topic>-<ts>.md` |
+| 📊 **Charts & Diagrams** | `chart bar "CPU=42, RAM=68"` and `diagram flow "Voice → Wake word → Gemini"` — pure-SVG output, no matplotlib |
+| ⏱ **Focus Sessions** | Pomodoro rounds that mute proactive check-ins while you work |
+| 🔪 **Process Manager** | List/kill with `confirm=yes`, refuses to kill its own tree |
+| 🛣 **Screen Mirror** | Dashboard 🖥️ button streams a low-res live view of the PC to the phone |
+| ☁️ **Git Snapshots** | Every successful `dev_agent` build commits itself — argv-only git, identity env-pinned, failure never fails the build |
+| ⏰ **Reminder List/Cancel** | `reminder action=list` shows upcoming scheduled reminders, `action=cancel 2` removes one |
+| 🌡 **Hourly Weather** | "Kaisa rahega aaj ka weather *next hours*" → a 12-hour strip alongside the daily forecast |
+| 🎬 **Scenes** | Rules grew multi-step: *'movie mode'* can open the player, set volume and start a focus session in order — stop on first failure, `scene(N steps)` in the rules list |
+| 🔡 **Live Region OCR** | `region_ocr` reads the live screen region (presets or `x,y,w,h`) — tesseract offline, Gemini vision next; `repeat` watches a value and reports only changes |
+| 📧 **Gmail** | Bundled plugin over IMAP/SMTP with an app password (stdlib only) — unread/list/read/send/search + guided setup with a live login check |
+| 📅 **Calendar** | Bundled plugin reading any ICS feed (Google Calendar's secret iCal URL) — upcoming/today/explicit date, RFC 5545 unfold + daily/weekly/monthly recurrence, bounded expansion |
+| 📷 **Phone → Vision** | The phone dashboard's 📷 button streams rear-camera JPEG frames to `/api/camera-frame`; `phone_vision` then answers *'what's on my desk'*, OCRs the frame or describes it — with a 5-minute freshness gate |
+| 🎙 **Meeting Recorder** | `meeting start/stop` records the mic to WAV, transcribes offline (faster-whisper), saves a `.txt` next to it and can summarise decisions/action items; 60-minute auto-cap; decisions auto-push to calendar events and reminders |
+| 🔒 **Privacy Mode** | `privacy on` — cloud-facing tools (search, research, scrape, vision, translate, file analysis, monitors, flights) refuse with an honest message instead of transmitting; memory, history, RAG, automation and LAN MQTT keep working |
+| 🕵️ **History Search** | Local sqlite FTS5 over past conversations — survives restarts; *“what did I say about that laptop”* answers from the actual exchange |
+| 📚 **Local RAG** | `rag index path=…` then ask — your text/markdown/code/CSV files (PDF/DOCX via file_processor), offline, no API |
+| 🔌 **MCP Client** | `mcp list/call` — tools from any Model Context Protocol server (filesystem, GitHub, Slack, Notion, …) over stdio |
+| 🦜 **Live Translate** | `translate live from=en to=hi` — offline Argos pair first, Gemini when online, honest refusal when neither can |
+| 🧩 **Event-Driven Rules** | File-appears, USB-plug, phrase and time events reach the rules engine through a shared event bus — not just polling |
+| 💾 **Task Persistence** | Agentic runs live in sqlite — `task_agent` lists them and *“resume task N”* skips completed steps (idempotent) |
+| 📊 **DuckDB SQL** | `data file=report.csv query=SELECT …` — SQL over CSV/Parquet/JSON locally, schema on demand, LIMIT auto-applied |
+| 🔐 **Password Vault** | AES-256-GCM behind one master passphrase — unlock/set/get/list, locks itself after idle |
+| 🖥 **Sandboxed Terminal & Git** | Allowlisted tools only (python, pytest, ruff, npm, git, …) as argv — no shell operators, repo-confined, timeout-capped |
+| 🧊 **3D Models** | `make_3d spec='box 40 20 8; cylinder 6 12'` → STL/OBJ mesh, previewed on the 3D surface |
+| 🔁 **Auto Barge-In** | EchoGuard: sustained-evidence gate over `interrupt()` — you can talk over a reply; the echo tail or room noise can't |
+| 🎥 **Motion Detect** | The phone-camera pipe doubles as a security cam — motion alerts stream to the dashboard |
+| 🗂 **Render Surfaces** | Everything routed: CHAT · DISPLAY · SCAN · 3D · WEB tabs on the dashboard, classified from the content title |
+| 🌐 **Agentic Browser** | `browser_control action=agent goal=…` — EXTRACT → REASON → ACT → VERIFY with live page snapshots until the goal is met |
+| 👥 **Multi-Agent Dry Run** | `multi_agent task=…` — planner → coder → tester emit per-file diffs and verdicts; nothing is written until `apply=true` |
+| 🙋 **Presence Detection** | Input-idle + native OS idle probe → present/away with hysteresis; proactive speech stays quiet in an empty room |
+| 🏠 **Smart Home (MQTT)** | `smart_home pub/sub/status` against Home Assistant, zigbee2mqtt, Tasmota, ESPHome — internet brokers blocked under privacy |
+| 🌲 **Code Outline** | `code_outline file=…` — tree-sitter AST symbols with line numbers and nesting; stdlib `ast` for .py, labelled approximate scan elsewhere |
+| 🤖 **Local LLM by Default** | Ollama + llama3.2 on localhost:11434 out of the box; LM Studio / LocalAI / Jan aliases normalize to the OpenAI-compatible path |
+
+### The guarantees behind it
+
+- **Orchestrator** — destructive steps (`shutdown`, `delete`, `kill`, `macro replay`…) refuse to run unless explicitly allowed; the first failure stops the task and the report says so.
+- **Rules** — phrase triggers can't nest-loop; file triggers reset by mtime AND date; every rule fire is logged to the UI.
+- **Macro replay** — requires `confirm=yes`, capped at 400 events, aborts on mismatch, never runs without a visible safety line.
+- **Kill** — needs `confirm=yes`, never touches the assistant's own process tree.
+- **Everything is offline-tested** — 140 tests across `tests/` cover the whole layer with fake clocks, fake planners and temporary directories; CI runs them on Python 3.11/3.12/3.13.
+
+---
+
 ## 🗺️ Mark Roadmap
 
 | Mark | Focus |
@@ -274,8 +333,8 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 ## ⚡ Quick Start
 
 ```bash
-git clone https://github.com/FatihMakes/Mark-LV.git
-cd Mark-LV
+git clone https://github.com/tonystark302012-rgb/jarvis.git
+cd jarvis
 python setup.py        # installs deps for YOUR OS + the browser automation engine
 python main.py
 ```
@@ -285,6 +344,16 @@ python main.py
 > ⚠️ **Installation Note:** If you hit a `ModuleNotFoundError` for an OS-specific package, install it with `pip install <module_name>`. The optional **wake word** engine is *not* installed here — grab it in one click from **⚙ → WAKE WORD** inside the app.
 
 ---
+
+## 🛠️ Development
+
+```bash
+pip install -r requirements-dev.txt   # pytest + ruff + test deps (fast, no PyQt needed)
+ruff check .                          # lint — pyflakes + statement errors, must be clean
+python -m pytest tests/ -q            # full suite — offline, no mic/display/API key
+```
+
+CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`). The suite covers the security invariants: no `shell=True` in `open_app`/`dev_agent`, the run-command allowlist, project-path containment, pip-flag injection, the dashboard AES round-trip, brute-force lockout, memory recall and parallel tool dispatch.
 
 ## 📋 Requirements
 
@@ -304,16 +373,33 @@ python main.py
 ## 🗂️ Project Structure
 
 ```
-Mark LV/
+jarvis/
 ├── main.py                   # Core loop — Gemini Live session, audio I/O, viseme extraction, tool dispatch
 ├── ui.py                     # PyQt6 HUD — avatar canvas, waveform, log panel, settings drawer, camera feed
 ├── setup.py                  # OS-aware installer (skips wrong-OS dependencies, checks your Python)
+├── pyproject.toml            # ruff + pytest configuration (lint must stay clean in CI)
+├── requirements.txt          # Runtime dependencies (OS markers filter per platform)
+├── requirements-dev.txt      # Test/lint dependencies — pip install -r requirements-dev.txt
+├── .github/workflows/ci.yml  # CI: ruff + compileall + pytest on Python 3.11/3.12/3.13
 ├── .gitignore                # Keeps your API key, TLS key and memories out of the repository
+├── tests/
+│   ├── test_roadmap.py       # Biggest suite — every roadmap batch: tools, privacy, presence, agents
+│   ├── test_upgrades.py      # Offline suite — security invariants, memory recall, dispatch, dashboard
+│   └── test_new_features.py  # Mission Control, orchestrator, rules, mirror, layouts, lifecycles
 ├── plugins/
 │   └── _template.py          # Copy this to write a new skill — one file, drop in, done
 ├── actions/                  # Bundled skills — each self-describes via a TOOL dict + handler
-│                             #   Everything here drives the COMPUTER, which is what decides
-│                             #   whether a new skill belongs in this folder at all.
+│   ├── mission.py            # Mission Control — what the session did, live
+│   ├── task_agent.py         # Agentic multi-step tasks (plan → execute → report)
+│   ├── rules.py              # Automation rules — time/file/phrase triggers
+│   ├── macro.py              # Screen macro record/replay (confirm-gated)
+│   ├── scrape.py             # URL → text/links/title (read-only)
+│   ├── diagram.py            # Text spec → SVG flowchart/sequence/mindmap/timeline
+│   ├── charts.py             # label=value → SVG bar/line/pie (no matplotlib)
+│   ├── clip_history.py       # Clipboard history with search/use
+│   ├── procman.py            # Process list/kill (confirm-gated, no self-kill)
+│   ├── focus.py              # Pomodoro focus sessions (mutes proactive)
+│   ├── window_layout.py      # Window tiling: split/coding/stack/left/right/center
 │   ├── web_search.py         # Gemini + DDG parallel search (news, research, price, compare)
 │   ├── screen_processor.py   # Screen & webcam capture for vision
 │   ├── background_monitor.py # User-configured topic watching — daily DDG check
@@ -322,20 +408,43 @@ Mark LV/
 │   ├── system_monitor.py     # CPU / RAM / GPU / temperature telemetry
 │   ├── computer_settings.py  # Volume, brightness, WiFi, power (per-OS)
 │   ├── computer_control.py   # Keyboard shortcuts, mouse, window management
-│   ├── open_app.py           # Application launcher (per-OS name map)
+│   ├── open_app.py           # Application launcher (validated names, no shell)
 │   ├── browser_control.py    # Web browser control
-│   ├── file_controller.py    # File system operations
+│   ├── file_controller.py    # File system operations (undo journal)
 │   ├── file_processor.py     # Document reading and summarization
 │   ├── send_message.py       # Messaging integration
-│   ├── weather_report.py     # Live weather data
+│   ├── weather_report.py     # Live weather data (Open-Meteo, no key)
 │   ├── video_player.py       # Plays video on the HUD, where the avatar normally is
-│   └── desktop.py            # Desktop and taskbar control
+│   ├── desktop.py            # Desktop and taskbar control (no code generation)
+│   ├── scanner.py            # System / network / port / file inspection (read-only)
+│   ├── flight_finder.py      # Flight search and extraction
+│   ├── youtube_video.py      # YouTube transcript & playback helpers
+│   ├── code_helper.py        # Screen + file code explanation and fixing
+│   ├── dev_agent.py          # Multi-file project builder (allowlisted runner)
+│   ├── game_updater.py       # Game/platform update helpers
+│   ├── terminal.py           # Sandboxed terminal + git assistant (argv-only, repo-confined)
+│   ├── vault.py              # AES-256-GCM password vault (master passphrase)
+│   ├── rag.py                # Local RAG — index folders, ask offline (sqlite FTS5)
+│   ├── history_search.py     # Conversation history search (local FTS5, survives restarts)
+│   ├── mcp.py                # MCP client — tools from any stdio MCP server
+│   ├── data_query.py         # DuckDB SQL over CSV/Parquet/JSON (offline)
+│   ├── make_3d.py            # Spec → STL/OBJ mesh, preview on the 3D surface
+│   ├── privacy.py            # Privacy mode — hard gate for cloud-facing tools
+│   ├── multi_agent.py        # Planner→coder→tester dry-run pipeline (diffs before apply)
+│   ├── presence.py           # Present/away detection — gates proactive speech
+│   ├── smart_home.py         # MQTT pub/sub — HA / zigbee2mqtt / Tasmota / ESPHome
+│   └── code_outline.py       # tree-sitter symbol outline (AST / stdlib / approximate)
+├── dashboard/
+│   ├── server.py             # Phone remote — FastAPI, PIN login, AES-256 command channel
+│   └── static/               # login.html, app.html, vendored crypto-js
 ├── memory/
 │   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
+│   ├── semantic_recall.py    # Hybrid ranker for recall_memory (trigram + lexical)
 │   ├── config_manager.py     # api_keys.json access — key, OS, name, voice, colour, toggles
 │   └── long_term.json        # Persistent store — created on first run
 ├── core/
 │   ├── gemini.py             # One place for every one-shot Gemini call — model ladder, timeouts, cooldowns
+│   ├── llm_client.py         # Local LLM stack — Ollama is the DEFAULT (llama3.2); OpenAI-compatible aliases included
 │   ├── prompt.txt            # All prompt wording — {tokens} are filled from the live system at startup
 │   ├── avatar.py             # Avatar renderer — lighting, pose, expression, mouth (QPainter)
 │   ├── avatar_mesh.py        # Head geometry — loads the face, generates skull/neck/rigs
@@ -346,8 +455,15 @@ Mark LV/
 │   ├── undo.py               # One shared undo stack — actions register how to reverse themselves
 │   ├── confirm.py            # Irreversible-action gate — the token is issued by the UI, not the model
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name
+│   ├── display.py            # Qt-free content panel renderer (unit-tested)
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
+│   ├── orchestrator.py       # Agent loop — plan → execute with stop-on-failure + report
+│   ├── activity.py           # Mission Control timeline — every tool call, live
+│   ├── events.py             # Event bus — file/time/USB/phrase events drive rules + proactive
+│   ├── taskstore.py          # sqlite persistence for agentic runs (resume after restart)
+│   ├── privacy.py            # Privacy mode — hard gate for cloud-facing tools
+│   ├── presence.py           # Present/away tracker — gates proactive speech
 │   └── wake_word.py          # Local "Hey Jarvis" detector — own thread, offline, opt-in
 └── config/
     ├── api_keys.json         # API key, name, voice, colour, toggles — created on first launch (git-ignored)

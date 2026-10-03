@@ -1,0 +1,26 @@
+# ── Dev / CI dependencies ─────────────────────────────────────────────────────
+# Everything the TEST SUITE needs. The runtime app has its own requirements.txt;
+# this file stays minimal so CI (and contributors) can verify the code quickly:
+#
+#   pip install -r requirements-dev.txt
+#   python -m pytest tests/ -q
+#   ruff check .
+
+pytest>=8,<9
+ruff>=0.6
+
+# Tests exercise these runtime modules directly:
+fastapi>=0.110,<1               # dashboard/server.py — skipped if absent
+uvicorn>=0.27,<1                # imported alongside fastapi
+python-multipart>=0.0.9,<1      # fastapi Form routes — without it the
+                                # DashboardServer constructor raises RuntimeError
+cryptography>=42,<50            # dashboard AES round-trip test
+requests>=2.31,<3               # weather tests mock the network, not the lib
+psutil>=5.9,<8                  # scanner / system tests
+httpx2>=0.1                     # starlette TestClient — dashboard WS/login tests
+numpy>=1.24,<3                  # meeting recorder tests build fake audio buffers
+trafilatura>=1.8,<2             # scrape structured mode (optional at runtime —
+                                # tests exercise the stdlib fallback when absent)
+tree-sitter>=0.23,<1            # code_outline — CI runs the real AST tier
+tree-sitter-python>=0.23,<1     # code_outline — Python grammar pack
+paho-mqtt>=1.6,<3               # smart_home — import path + optional-guard test
