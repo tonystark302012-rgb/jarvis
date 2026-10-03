@@ -604,6 +604,10 @@ class JarvisLive:
         self._briefing_sent    = False          # morning briefing fires once per process
         self._sys_monitor      = SystemMonitor()  # persistent cooldown state
         self._proactive        = ProactiveEngine()
+        # Event-driven proactivity: battery/calendar EDGE triggers (fire
+        # once on state crossing, not on a timer).
+        from core.events import EventEngine
+        self._events           = EventEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
         self._focus_muted = False                  # focus session suppresses proactive voice
@@ -1736,6 +1740,13 @@ class JarvisLive:
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
+                                # Durable history: survives restarts (the
+                                # session log above is RAM-only).
+                                try:
+                                    from actions import history_search as _hs
+                                    _hs.record("user", full_in)
+                                except Exception:
+                                    pass
                                 # Phrase rules must fire for SPOKEN input too —
                                 # 'when I say movie mode' is a voice feature.
                                 self._fire_phrase_rules(full_in)
@@ -1758,6 +1769,11 @@ class JarvisLive:
                                 self._last_out_logged = full_out
                                 self.ui.write_log(f"{self._asst_name}: {full_out}")
                                 self._session_log.append(f"{self._asst_name}: {full_out}")
+                                try:
+                                    from actions import history_search as _hs
+                                    _hs.record(self._asst_name, full_out)
+                                except Exception:
+                                    pass
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "jarvis",
@@ -2131,6 +2147,42 @@ class JarvisLive:
                 print(f"[Rules] tick error: {e}")
             await asyncio.sleep(30)
 
+    async def _run_event_watch(self) -> None:
+        """Event-driven alerts: battery crossings + calendar lead windows.
+        core.events.Edge-engine decides *whether* anything crossed; we only
+        route new events into the live session (silenced while speaking,
+        while the user just spoke, or during a focus session)."""
+        while True:
+            await asyncio.sleep(30)       # poll cadence; triggers are edges
+            if not self.session or not self._awake or self._focus_muted:
+                continue
+            with self._speaking_lock:
+                speaking = self._is_speaking
+            if speaking or (time.monotonic() - self._last_user_speech) < 30:
+                continue
+            try:
+                events = await asyncio.to_thread(self._events.poll)
+            except Exception as e:
+                print(f"[Events] ⚠️ poll error: {e}")
+                continue
+            for ev in events:
+                msg = (
+                    f"{ev.message}\n\n"
+                    f"Announce this alert to the user naturally — one "
+                    f"short sentence, language they use, severity "
+                    f"{ev.severity} (critical = urgent tone)."
+                )
+                try:
+                    await self.session.send_client_content(
+                        turns={"role": "user",
+                               "parts": [{"text": msg}]},
+                        turn_complete=True,
+                    )
+                    print(f"[Events] 🔔 {ev.kind}: {ev.message[:60]}")
+                except Exception as e:
+                    print(f"[Events] ⚠️ send error: {e}")
+                await asyncio.sleep(4)     # gap between consecutive alerts
+
     async def _run_background_monitor(self) -> None:
         """Check user-configured topics once per day; speak alerts when new headlines appear."""
         await asyncio.sleep(300)          # wait 5 min after startup before first check
@@ -2398,6 +2450,7 @@ class JarvisLive:
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
+                    tg.create_task(self._run_event_watch())
                     tg.create_task(self._run_sleep_watch())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())

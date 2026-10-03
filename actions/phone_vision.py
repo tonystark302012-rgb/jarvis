@@ -99,6 +99,10 @@ def _ask(frame_path: Path, prompt: str, mode: str) -> str:
 
 
 def phone_vision(parameters: dict = None, player=None, session_memory=None) -> str:
+    from core import privacy as _privacy
+    blocked = _privacy.gate("phone_vision")
+    if blocked:
+        return blocked
     params = parameters or {}
     mode = str(params.get("mode") or "ask").lower().strip()
     if mode not in ("ask", "ocr", "describe"):

@@ -164,6 +164,10 @@ def _slug(topic: str) -> str:
 # ── handler ──────────────────────────────────────────────────────────────────
 
 def research(parameters: dict = None, player=None, session_memory=None) -> str:
+    from core import privacy as _privacy
+    blocked = _privacy.gate("research")
+    if blocked:
+        return blocked
     params = parameters or {}
     topic = str(params.get("topic") or params.get("query") or "").strip()
     if not topic:

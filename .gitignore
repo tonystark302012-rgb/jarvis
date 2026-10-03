@@ -70,3 +70,12 @@ screenshots/
 *.tar.gz
 *.tgz
 
+
+# make_3d output — generated meshes, not source
+models/
+# password vault — never commit
+config/vault.enc
+# event-dedup state
+memory/events_fired.json
+memory/history.db
+memory/rag.db

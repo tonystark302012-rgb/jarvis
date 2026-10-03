@@ -113,7 +113,12 @@ def _read_text(img, mode: str = "text") -> str:
     except Exception:
         pass
 
-    # 2. Gemini vision — same shape file_processor uses
+    # 2. Gemini vision — same shape file_processor uses. Gated: the image
+    # is your screen, the definition of "don't send to the cloud".
+    from core import privacy as _privacy
+    blocked = _privacy.gate("region_ocr")
+    if blocked:
+        raise RuntimeError(blocked)
     from core import gemini
     if not gemini.api_key():
         raise RuntimeError(

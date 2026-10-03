@@ -119,6 +119,10 @@ def _fetch(url: str, timeout: int = 20) -> str:
 
 
 def scrape(parameters: dict = None, player=None, session_memory=None) -> str:
+    from core import privacy as _privacy
+    blocked = _privacy.gate("scrape")
+    if blocked:
+        return blocked
     params = parameters or {}
     url = str(params.get("url", "")).strip()
     if not url:
