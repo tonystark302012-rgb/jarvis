@@ -142,6 +142,16 @@ def _base_dir() -> Path:
 
 # ── handler ──────────────────────────────────────────────────────────────────
 
+def _show(player, region: str, body: str) -> None:
+    """Render surface: successful reads land on the dashboard's SCAN tab."""
+    if player is None:
+        return
+    try:
+        player.show_content(f"SCAN — {region}"[:48], body[:4000])
+    except Exception:
+        pass
+
+
 def region_ocr(parameters: dict = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     region = str(params.get("region") or "center").strip()
@@ -180,6 +190,7 @@ def region_ocr(parameters: dict = None, player=None, session_memory=None) -> str
             return (f"No readable text in the {region} region "
                     f"(the reader saw nothing)." if not last_err else
                     f"Region read failed after capture: {last_err}")
+        _show(player, region, f"[{region}] {text}")
         return f"[{region}] {text}"
 
     # live mode: report only changes
@@ -192,7 +203,9 @@ def region_ocr(parameters: dict = None, player=None, session_memory=None) -> str
         return (f"Live read of {region}: no readable text across "
                 f"{repeat} captures.{(' Last error: ' + last_err) if last_err else ''}")
     header = f"Live read of {region}: {repeat} captures, {len(changes)} change(s)."
-    return header + "\n" + "\n".join(changes[-10:])
+    body = header + "\n" + "\n".join(changes[-10:])
+    _show(player, region, body)
+    return body
 
 
 TOOL = {

@@ -5640,6 +5640,8 @@ class JarvisUI:
         self._win = MainWindow(face_path)
         self.root = _RootShim(self._app)
         self._win.show()
+        # Set by main.py: (title, text) → dashboard render surface.
+        self._content_hook = None
 
     @property
     def muted(self) -> bool:
@@ -5801,6 +5803,16 @@ class JarvisUI:
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
+        # Universal render surface: mirror to whatever the host attached
+        # (main.py routes it to the dashboard's CHAT|DISPLAY|SCAN|3D|WEB
+        # tabs). The hook runs on the CALLER's thread — it must be
+        # thread-safe itself; failures never break the on-screen panel.
+        hook = self._content_hook
+        if hook is not None:
+            try:
+                hook(title, text)
+            except Exception:
+                pass
 
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.

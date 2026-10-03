@@ -55,6 +55,38 @@
     main { flex: 1; overflow-y: auto; padding: 14px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
     main::-webkit-scrollbar { width: 3px; }
     main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ── RENDER SURFACE TABS (CHAT | DISPLAY | SCAN | 3D | WEB) ── */
+    #tabs {
+      flex-shrink: 0; display: flex; gap: 4px; padding: 7px 12px 0;
+      border-bottom: 1px solid var(--border); background: rgba(7,9,15,0.95);
+    }
+    #tabs .tab {
+      flex: 1; padding: 7px 4px; font-size: 10px; font-weight: 700;
+      letter-spacing: 1.5px; text-transform: uppercase; text-align: center;
+      color: var(--muted); background: transparent; cursor: pointer;
+      border: 1px solid transparent; border-bottom: none;
+      border-radius: 7px 7px 0 0; position: relative;
+    }
+    #tabs .tab.on { color: var(--accent); background: var(--surface); border-color: var(--border); }
+    #tabs .tab .t-dot {
+      position: absolute; top: 5px; right: 7px; width: 5px; height: 5px;
+      border-radius: 50%; background: var(--accent); display: none;
+    }
+    #tabs .tab.has-new .t-dot { display: block; }
+    #surface { display: none; flex: 1; overflow-y: auto; padding: 16px; }
+    #surface::-webkit-scrollbar { width: 3px; }
+    #surface::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    #surface .sf-title {
+      font-size: 11px; font-weight: 700; letter-spacing: 2px;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 10px;
+    }
+    #surface .sf-body {
+      white-space: pre-wrap; word-break: break-word;
+      font-size: 13.5px; line-height: 1.6; color: var(--text);
+      font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    }
+    #surface .sf-empty { color: var(--muted); font-size: 12px; font-style: italic; }
     .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.55; animation: pop 0.18s ease; }
     @keyframes pop { from { opacity:0; transform:translateY(4px); } }
     .msg-j   { align-self:flex-start; background:var(--adim);   border:1px solid rgba(99,102,241,0.18); border-bottom-left-radius:4px; }
@@ -165,7 +197,15 @@
     <div class="spacer"></div>
     <div class="url">__IP__:__PORT__</div>
   </header>
+  <nav id="tabs">
+    <button class="tab on" data-tab="chat">💬 Chat</button>
+    <button class="tab" data-tab="display">🖥️ Display<span class="t-dot"></span></button>
+    <button class="tab" data-tab="scan">🔍 Scan<span class="t-dot"></span></button>
+    <button class="tab" data-tab="3d">🧊 3D<span class="t-dot"></span></button>
+    <button class="tab" data-tab="web">🌐 Web<span class="t-dot"></span></button>
+  </nav>
   <main id="feed"></main>
+  <main id="surface"><div class="sf-empty">Nothing rendered on this surface yet — charts, diagrams and reports land on DISPLAY, OCR on SCAN, models on 3D, scraped pages on WEB.</div></main>
   <footer>
     <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
     <label class="btn-attach" for="file-inp" title="Send file">📎</label>
@@ -253,6 +293,7 @@
       if (m.type === 'activity')      _onActivity(m);
       if (m.type === 'frame')         _onFrame(m);
       if (m.type === 'motion')        _onMotion(m);
+      if (m.type === 'content')       _onContent(m);
     };
 
     // ── Screen mirror (PC → phone) ────────────────────────────────────────────
@@ -384,6 +425,59 @@
       if (now - _motionLast < 1500) return;
       _motionLast = now;
       sys(`⚠️ Motion detected in camera view (score ${m.score})`);
+    }
+
+    // ── Universal render surface: CHAT | DISPLAY | SCAN | 3D | WEB ─────────
+    // Chat is the conversation; the other four tabs show the latest
+    // show_content() result routed to them by dashboard/surface.py.
+    let _tab = 'chat';
+    const _surfaces = {};   // surface -> {title, text}
+
+    function showTab(name) {
+      _tab = name;
+      document.querySelectorAll('#tabs .tab').forEach(b => {
+        b.classList.toggle('on', b.dataset.tab === name);
+        if (b.dataset.tab === name) b.classList.remove('has-new');
+      });
+      const chatOn = (name === 'chat');
+      const feed    = document.getElementById('feed');
+      const surface = document.getElementById('surface');
+      feed.style.display    = chatOn ? 'flex' : 'none';
+      surface.style.display = chatOn ? 'none' : 'flex';
+      if (!chatOn) _renderSurface(name);
+    }
+    document.querySelectorAll('#tabs .tab').forEach(b => {
+      b.onclick = () => showTab(b.dataset.tab);
+    });
+
+    function _renderSurface(name) {
+      const el  = document.getElementById('surface');
+      const got = _surfaces[name];
+      el.innerHTML = '';
+      if (!got) {
+        const d = document.createElement('div');
+        d.className = 'sf-empty';
+        d.textContent = `Nothing on this surface yet — its results will appear here.`;
+        el.appendChild(d);
+        return;
+      }
+      const t = document.createElement('div');
+      t.className = 'sf-title'; t.textContent = got.title || name.toUpperCase();
+      const b = document.createElement('div');
+      b.className = 'sf-body';  b.textContent = got.text || '';
+      el.appendChild(t); el.appendChild(b);
+    }
+
+    function _onContent(m) {
+      const s = String(m.surface || 'display');
+      _surfaces[s] = { title: String(m.title || ''), text: String(m.text || '') };
+      if (_tab === s) {
+        _renderSurface(s);          // live update while the tab is open
+      } else {
+        // mark the tab so the user knows something landed there
+        const btn = document.querySelector(`#tabs .tab[data-tab="${s}"]`);
+        if (btn) btn.classList.add('has-new');
+      }
     }
 
     function esc(s) {

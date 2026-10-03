@@ -319,6 +319,12 @@ def make_3d(parameters: dict = None, player=None, session_memory=None) -> str:
            f"≈{size[0]:.1f} × {size[1]:.1f} × {size[2]:.1f} units.")
     for n in notes[:2]:
         msg += f"\nNote: {n}"
+    # Render surface: the model lands on the dashboard's 3D tab.
+    if player is not None:
+        try:
+            player.show_content(f"3D — {name}"[:48], msg[:4000])
+        except Exception:
+            pass
     return msg
 
 

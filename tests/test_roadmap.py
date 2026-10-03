@@ -1812,3 +1812,178 @@ class TestMotionWiring:
         assert "m.type === 'motion'" in h
         assert "_onMotion" in h
         assert "Motion detected" in h
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 3 — universal render surface (CHAT|DISPLAY|SCAN|3D|WEB)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSurfaceClassify:
+    """dashboard/surface.py — title → tab routing (pure, no deps)."""
+
+    def test_contract(self):
+        from dashboard.surface import SURFACES, classify_surface
+        assert SURFACES == ("display", "scan", "3d", "web")
+        assert classify_surface("") == "display"
+        assert classify_surface(None) == "display"
+
+    @pytest.mark.parametrize("title,surface", [
+        ("SCRAPE — example.com", "web"),
+        ("STRUCTURED — nytimes.com", "web"),
+        ("SEARCH — jaipur weather", "web"),
+        ("NEWS — top world news today", "web"),
+        ("WIKI — AI", "web"),
+        ("FLIGHT — DEL to BOM", "web"),
+        ("OCR — center", "scan"),
+        ("SCAN — region", "scan"),
+        ("SCREEN — top half", "scan"),
+        ("REGION — left", "scan"),
+        ("3D — bracket", "3d"),
+        ("MODEL — enclosure", "3d"),
+        ("MAKE_3D — box", "3d"),
+        ("CHART — sales", "display"),
+        ("DIAGRAM — flow", "display"),
+        ("PROCESSES", "display"),
+        ("AUTOMATION RULES", "display"),
+        ("FOCUS", "display"),
+        ("WINDOW LAYOUT", "display"),
+    ])
+    def test_known_titles(self, title, surface):
+        from dashboard.surface import classify_surface
+        assert classify_surface(title) == surface
+
+    def test_case_insensitive(self):
+        from dashboard.surface import classify_surface
+        assert classify_surface("scrape — x") == "web"
+        assert classify_surface("3d — x") == "3d"
+        assert classify_surface("news — x") == "web"
+
+    def test_word_boundary_not_prefix_of_word(self):
+        from dashboard.surface import classify_surface
+        # "OCR" must not swallow a title that merely starts with those
+        # letters as part of a longer word (e.g. "OCRWORLD")
+        assert classify_surface("OCRWORLD notes") == "display"
+        assert classify_surface("3DBRACKET v2") == "display"
+
+    def test_dash_variants_reach_head(self):
+        from dashboard.surface import classify_surface
+        # ASCII hyphen and em-dash both split the head tag off
+        assert classify_surface("SCAN-center") == "scan"
+        assert classify_surface("3D — bracket") == "3d"
+
+
+class TestRenderSurfaceFunnel:
+    """show_content → hook → broadcast: the pieces must all be wired."""
+
+    def test_ui_declares_content_hook(self):
+        u = Path("ui.py").read_text(encoding="utf-8")
+        assert "self._content_hook = None" in u
+        i = u.index("def show_content")
+        block = u[i:i + 900]
+        assert "hook = self._content_hook" in block
+        assert "hook(title, text)" in block
+        # hook failure must never break the on-screen panel
+        assert "except Exception" in block
+
+    def test_main_attaches_hook_and_routes(self):
+        assert "self.ui._content_hook = self._on_show_content" in SRC
+        i = SRC.index("def _on_show_content")
+        block = SRC[i:i + 1300]
+        assert "classify_surface(title)" in block
+        assert '"type":    "content"' in block
+        assert "run_coroutine_threadsafe" in block
+        assert "broadcast(msg, history=True)" in block
+        # thread-safety: any-thread caller, silent no-op without loop
+        assert "self._loop is None or self._dashboard is None" in block
+        assert "except Exception" in block
+
+    def test_make3d_pushes_to_surface(self):
+        import actions.make_3d as m3
+
+        class FakePlayer:
+            def __init__(self):
+                self.shown = []
+
+            def show_content(self, title, text):
+                self.shown.append((title, text))
+
+        p = FakePlayer()
+        out = m3.make_3d({"spec": "box 10 10 10", "name": "demo"}, player=p)
+        assert "Model saved" in out
+        assert len(p.shown) == 1
+        title, text = p.shown[0]
+        assert title.startswith("3D —")
+        assert "Model saved" in text
+
+    def test_make3d_player_failure_is_silent(self):
+        import actions.make_3d as m3
+
+        class Broken:
+            def show_content(self, t, x):
+                raise RuntimeError("qt gone")
+
+        out = m3.make_3d({"spec": "box 5 5 5", "name": "x"}, player=Broken())
+        assert "Model saved" in out
+
+    def test_region_ocr_pushes_to_scan_tab(self, monkeypatch):
+        import actions.region_ocr as ro
+
+        class FakePlayer:
+            def __init__(self):
+                self.shown = []
+
+            def show_content(self, title, text):
+                self.shown.append((title, text))
+
+        monkeypatch.setattr(ro, "_capture", lambda r: "IMG")
+        monkeypatch.setattr(ro, "_read_text", lambda img, mode="text": "Hello")
+        p = FakePlayer()
+        out = ro.region_ocr({"region": "center"}, player=p)
+        assert out == "[center] Hello"
+        assert p.shown[0][0] == "SCAN — center"
+
+    def test_region_ocr_no_player_still_works(self, monkeypatch):
+        import actions.region_ocr as ro
+        monkeypatch.setattr(ro, "_capture", lambda r: "IMG")
+        monkeypatch.setattr(ro, "_read_text", lambda img, mode="text": "Hi")
+        assert ro.region_ocr({}) == "[center] Hi"
+
+
+class TestDashboardTabs:
+    """Source-level: app.html carries the five tabs + content routing."""
+
+    @pytest.fixture(autouse=True)
+    def _h(self):
+        self.h = Path("dashboard/static/app.html").read_text(encoding="utf-8")
+
+    def test_five_tabs_present(self):
+        for tab in ('data-tab="chat"', 'data-tab="display"',
+                    'data-tab="scan"', 'data-tab="3d"', 'data-tab="web"'):
+            assert tab in self.h, tab
+
+    def test_content_type_handled(self):
+        assert "m.type === 'content'" in self.h
+        assert "_onContent(m)" in self.h
+
+    def test_content_routed_by_surface_field(self):
+        assert "m.surface" in self.h
+        assert "_renderSurface" in self.h
+
+    def test_tab_switch_toggles_panes(self):
+        assert "function showTab" in self.h
+        assert "has-new" in self.h       # unseen-content dot
+
+    def test_surface_text_is_textcontent_not_innerhtml(self):
+        # XSS: tool output must not be parsed as HTML
+        i = self.h.index("function _renderSurface")
+        block = self.h[i:i + 900]
+        assert "textContent" in block
+        assert "innerHTML = got" not in block
+        assert "innerHTML = `${" not in block
+
+    def test_server_history_carries_content(self):
+        # content messages use history=True so a reconnecting client
+        # rebuilds the tabs it was looking at
+        s = Path("main.py").read_text(encoding="utf-8")
+        i = s.index("def _on_show_content")
+        assert "broadcast(msg, history=True)" in s[i:i + 1300]

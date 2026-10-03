@@ -538,6 +538,10 @@ def _keep_context_of(exc: BaseException) -> bool:
 class JarvisLive:
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
+        # Universal render surface: every show_content() from any tool is
+        # mirrored to the dashboard's DISPLAY|SCAN|3D|WEB tabs. Set early
+        # — the hook itself no-ops until the loop and dashboard exist.
+        self.ui._content_hook = self._on_show_content
         self._asst_name     = "JARVI    S"   # updated each session from config
         self.session              = None
         self.audio_in_queue       = None
@@ -915,6 +919,31 @@ class JarvisLive:
         url    = self._dashboard.get_url()
         manual = self._dashboard.get_manual_url()
         return url, key, f"{url}/auto-login?key={key}", manual
+
+    def _on_show_content(self, title: str, text: str) -> None:
+        """Universal render surface — mirror ui.show_content() to the
+        dashboard as {"type": "content", "surface": ...}.
+
+        Runs on the CALLER's thread (action executor, Qt, voice loop), so
+        the broadcast is scheduled onto the live loop instead of being
+        awaited. No loop / no dashboard → silent no-op (headless mode
+        keeps working); never raises into the caller.
+        """
+        try:
+            if self._loop is None or self._dashboard is None:
+                return
+            from dashboard.surface import classify_surface
+            msg = {
+                "type":    "content",
+                "surface": classify_surface(title),
+                "title":   str(title)[:80],
+                "text":    str(text)[:4000],
+                "ts":      datetime.now().isoformat(),
+            }
+            asyncio.run_coroutine_threadsafe(
+                self._dashboard.broadcast(msg, history=True), self._loop)
+        except Exception:
+            pass
 
     def _fire_phrase_rules(self, text: str) -> list[str]:
         """Phrase-triggered automation ('when I say X do Y') for ANY input
