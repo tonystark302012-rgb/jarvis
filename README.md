@@ -255,6 +255,38 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 
 ---
 
+## 🤖 The Agentic Update — Mark LV+
+
+### What JARVIS now does on its own
+
+| Feature | Description |
+|---|---|
+| 🕐 **Mission Control** | Every tool call the session makes — time, arguments, duration, success/failure — lands on a live timeline. Ask `mission_control` for `timeline`, `stats` or `clear`, or open the dashboard's **🎮 Activity** tab |
+| 🧠 **Agentic Task Engine** | Give a goal ("clean my downloads folder"), a planner breaks it into tool calls, the orchestrator executes each step with stop-on-failure, retry and a written report. Steps dispatch through the same registry the model uses, so an agent can never reach a tool the session doesn't have |
+| 🤖 **Rules & Automation** | `when 18:00 → system_monitor`, `when report.pdf appears in ~/Downloads → file_processor`, `when I say "movie mode" → video_player` — time, file-event and phrase triggers that fire real actions |
+| 🎬 **Macro Recorder** | Record a screen macro, replay it later. Replay is gated behind `confirm=yes` and a 400-event safety cap |
+| 🔍 **Scanner upgrades** | Five new modes: `dupes` (MD5 duplicate finder), `treemap` (folder-size bars), `speed` (Cloudflare 10 MB speed test), `drives` (partitions), `startup` (autostart audit) |
+| 🪟 **Window Layouts** | `split` / `coding` / `stack` / `left` / `right` / `center` — pure geometry with xdotool, win32 and AppleScript backends |
+| 📋 **Clipboard History** | A watcher keeps the last 100 clips — `clip_history` list / search / use / clear |
+| 🌐 **Scrape** | URL → clean text, links and title. bs4 when present, stdlib fallback when not, non-HTTP schemes rejected, same cached httpx client as everything else |
+| 📊 **Charts & Diagrams** | `chart bar "CPU=42, RAM=68"` and `diagram flow "Voice → Wake word → Gemini"` — pure-SVG output, no matplotlib |
+| ⏱ **Focus Sessions** | Pomodoro rounds that mute proactive check-ins while you work |
+| 🔪 **Process Manager** | List/kill with `confirm=yes`, refuses to kill its own tree |
+| 🛣 **Screen Mirror** | Dashboard 🖥️ button streams a low-res live view of the PC to the phone |
+| ☁️ **Git Snapshots** | Every successful `dev_agent` build commits itself — argv-only git, identity env-pinned, failure never fails the build |
+| ⏰ **Reminder List/Cancel** | `reminder action=list` shows upcoming scheduled reminders, `action=cancel 2` removes one |
+| 🌡 **Hourly Weather** | "Kaisa rahega aaj ka weather *next hours*" → a 12-hour strip alongside the daily forecast |
+
+### The guarantees behind it
+
+- **Orchestrator** — destructive steps (`shutdown`, `delete`, `kill`, `macro replay`…) refuse to run unless explicitly allowed; the first failure stops the task and the report says so.
+- **Rules** — phrase triggers can't nest-loop; file triggers reset by mtime AND date; every rule fire is logged to the UI.
+- **Macro replay** — requires `confirm=yes`, capped at 400 events, aborts on mismatch, never runs without a visible safety line.
+- **Kill** — needs `confirm=yes`, never touches the assistant's own process tree.
+- **Everything is offline-tested** — 140 tests across `tests/` cover the whole layer with fake clocks, fake planners and temporary directories; CI runs them on Python 3.11/3.12/3.13.
+
+---
+
 ## 🗺️ Mark Roadmap
 
 | Mark | Focus |
@@ -324,10 +356,22 @@ jarvis/
 ├── .github/workflows/ci.yml  # CI: ruff + compileall + pytest on Python 3.11/3.12/3.13
 ├── .gitignore                # Keeps your API key, TLS key and memories out of the repository
 ├── tests/
-│   └── test_upgrades.py      # Offline suite — security invariants, memory recall, dispatch, dashboard
+│   ├── test_upgrades.py      # Offline suite — security invariants, memory recall, dispatch, dashboard
+│   └── test_new_features.py  # Mission Control, orchestrator, rules, mirror, layouts, lifecycles
 ├── plugins/
 │   └── _template.py          # Copy this to write a new skill — one file, drop in, done
 ├── actions/                  # Bundled skills — each self-describes via a TOOL dict + handler
+│   ├── mission.py            # Mission Control — what the session did, live
+│   ├── task_agent.py         # Agentic multi-step tasks (plan → execute → report)
+│   ├── rules.py              # Automation rules — time/file/phrase triggers
+│   ├── macro.py              # Screen macro record/replay (confirm-gated)
+│   ├── scrape.py             # URL → text/links/title (read-only)
+│   ├── diagram.py            # Text spec → SVG flowchart/sequence/mindmap/timeline
+│   ├── charts.py             # label=value → SVG bar/line/pie (no matplotlib)
+│   ├── clip_history.py       # Clipboard history with search/use
+│   ├── procman.py            # Process list/kill (confirm-gated, no self-kill)
+│   ├── focus.py              # Pomodoro focus sessions (mutes proactive)
+│   ├── window_layout.py      # Window tiling: split/coding/stack/left/right/center
 │   ├── web_search.py         # Gemini + DDG parallel search (news, research, price, compare)
 │   ├── screen_processor.py   # Screen & webcam capture for vision
 │   ├── background_monitor.py # User-configured topic watching — daily DDG check
