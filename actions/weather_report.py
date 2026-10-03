@@ -24,6 +24,8 @@ sentence the assistant can say out loud, never a traceback.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 
 try:
     import requests
@@ -68,15 +70,20 @@ def _geocode(city: str) -> dict | None:
     return results[0] if results else None
 
 
-def _forecast(lat: float, lon: float, days: int = 3) -> dict | None:
-    r = requests.get(_FORECAST_URL, params={
+def _forecast(lat: float, lon: float, days: int = 3,
+              hourly: bool = False) -> dict | None:
+    params = {
         "latitude": lat, "longitude": lon,
         "current": "temperature_2m,apparent_temperature,relative_humidity_2m,"
                    "weather_code,wind_speed_10m,precipitation",
         "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code",
         "timezone": "auto",
         "forecast_days": days,
-    }, timeout=_TIMEOUT)
+    }
+    if hourly:
+        params["hourly"] = "temperature_2m,precipitation_probability,weather_code"
+        params["forecast_hours"] = 12
+    r = requests.get(_FORECAST_URL, params=params, timeout=_TIMEOUT)
     r.raise_for_status()
     return r.json()
 
@@ -121,7 +128,10 @@ def weather_action(parameters: dict = None, player=None, session_memory=None) ->
         admin = place.get("admin1") or place.get("country") or ""
         label = f"{name}, {admin}" if admin and admin != name else name
 
-        data = _forecast(lat, lon)
+        # 'hourly' / 'next hours' asks → pull the 12-hour strip as well.
+        want_hourly = ("hour" in when or "tonight" in when
+                       or str(params.get("hourly", "")).lower() in ("1", "true", "yes"))
+        data = _forecast(lat, lon, hourly=want_hourly)
         if not data:
             msg = f"Sir, the weather service returned nothing for {label}."
             _log(msg, player)
@@ -164,6 +174,32 @@ def weather_action(parameters: dict = None, player=None, session_memory=None) ->
                 parts.append("next up " + "; ".join(outlook))
             if pops and pops[0] is not None:
                 parts.append(f"{pops[0]}% chance of rain today")
+
+        # 12-hour strip when the user asked for it — the renderer the content
+        # panel shows underneath the spoken line.
+        if want_hourly:
+            hourly = data.get("hourly") or {}
+            h_times = hourly.get("time") or []
+            h_temps = hourly.get("temperature_2m") or []
+            h_pops  = hourly.get("precipitation_probability") or []
+            if h_times:
+                now_h = datetime.now().strftime("%Y-%m-%dT%H:00")
+                start = 0
+                for i, t in enumerate(h_times):
+                    if t >= now_h:
+                        start = i
+                        break
+                strip = []
+                for i in range(start, min(start + 12, len(h_times))):
+                    hh = h_times[i][11:16]
+                    try:
+                        strip.append(f"{hh} {h_temps[i]}°C"
+                                     + (f" ({h_pops[i]}% rain)"
+                                        if i < len(h_pops) and h_pops[i] else ""))
+                    except IndexError:
+                        break
+                if strip:
+                    parts.append("hourly: " + " · ".join(strip[:8]))
 
         msg = ", ".join(parts) + "."
         _log(msg, player)

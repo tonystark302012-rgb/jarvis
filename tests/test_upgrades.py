@@ -397,7 +397,7 @@ def test_weather_renders_a_readable_report(monkeypatch):
     w = _weather(monkeypatch)
     monkeypatch.setattr(w, "_geocode", lambda city: {
         "latitude": 26.9, "longitude": 75.8, "name": "Jaipur", "admin1": "Rajasthan"})
-    monkeypatch.setattr(w, "_forecast", lambda lat, lon, days=3: {
+    monkeypatch.setattr(w, "_forecast", lambda lat, lon, days=3, hourly=False: {
         "current": {"temperature_2m": 31.4, "apparent_temperature": 34.9,
                     "relative_humidity_2m": 38, "weather_code": 2,
                     "wind_speed_10m": 12.6},
@@ -412,7 +412,7 @@ def test_weather_renders_a_readable_report(monkeypatch):
 def test_weather_never_prints_the_word_none(monkeypatch):
     w = _weather(monkeypatch)
     monkeypatch.setattr(w, "_geocode", lambda c: {"latitude": 1, "longitude": 2, "name": "X"})
-    monkeypatch.setattr(w, "_forecast", lambda la, lo, days=3: {"current": None, "daily": None})
+    monkeypatch.setattr(w, "_forecast", lambda la, lo, days=3, hourly=False: {"current": None, "daily": None})
     assert "None" not in w.weather_action({"city": "X"})
 
 

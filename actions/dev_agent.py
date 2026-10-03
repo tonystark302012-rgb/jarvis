@@ -541,6 +541,39 @@ Fixed code for {fix_path}:"""
 
     return updated_codes
 
+def _git_snapshot(project_dir: Path, message: str) -> str:
+    """Version snapshot after a successful build — the undo story for code.
+
+    git is invoked exactly like this repo's own history was made: argv lists,
+    never a shell. Failure to snapshot must not fail the build, so every path
+    returns text instead of raising.
+    """
+    if not shutil.which("git"):
+        return ""
+    try:
+        def _git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["git", *args], cwd=str(project_dir),
+                capture_output=True, text=True, timeout=20,
+                env={**os.environ, "GIT_AUTHOR_NAME": "JARVIS DevAgent",
+                     "GIT_AUTHOR_EMAIL": "devagent@localhost",
+                     "GIT_COMMITTER_NAME": "JARVIS DevAgent",
+                     "GIT_COMMITTER_EMAIL": "devagent@localhost"},
+            )
+
+        if not (project_dir / ".git").exists():
+            if _git("init", "-q").returncode != 0:
+                return ""
+        _git("add", "-A")
+        res = _git("commit", "-q", "-m", message[:80], "--allow-empty-message")
+        if res.returncode != 0 and "nothing to commit" not in (res.stdout + res.stderr):
+            return ""
+        sha = _git("rev-parse", "--short", "HEAD").stdout.strip()
+        return f" Git snapshot: {sha}" if sha else ""
+    except Exception:
+        return ""
+
+
 def _build_project(
     description: str,
     language: str,
@@ -644,10 +677,11 @@ def _build_project(
         log(f"Output preview: {last_output[:150]}")
 
         if not _has_error(last_output, run_command):
+            snap = _git_snapshot(project_dir, f"working build: {description[:60]}")
             msg = (
                 f"Project '{proj_name}' is working, sir. "
                 f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
-                f"Saved to: {project_dir}"
+                f"Saved to: {project_dir}.{snap}"
             )
             if speak: speak(msg)
             return f"{msg}\n\nOutput:\n{last_output}"

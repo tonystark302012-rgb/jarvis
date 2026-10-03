@@ -256,11 +256,195 @@ def scan_files(target: str = "", top: int = 12) -> str:
 
 # ── dispatcher ────────────────────────────────────────────────────────────────
 
+def scan_dupes(target: str = "", top: int = 12) -> str:
+    """Duplicate files by content hash. Read-only, size-first pruning."""
+    root = Path(target).expanduser() if target else Path.home()
+    if not root.is_dir():
+        return f"Not a folder: {root}"
+
+    import hashlib
+    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                 ".cache", ".local", "Library", "AppData"}
+    by_size: dict[int, list[Path]] = {}
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+            for fn in filenames:
+                p = Path(dirpath) / fn
+                try:
+                    sz = p.stat().st_size
+                except Exception:
+                    continue
+                if sz > 0:
+                    by_size.setdefault(sz, []).append(p)
+    except Exception as e:
+        return f"Walk stopped early: {e}"
+
+    groups: list[list[Path]] = []
+    wasted = 0
+    for sz, paths in by_size.items():
+        if len(paths) < 2:
+            continue
+        by_hash: dict[str, list[Path]] = {}
+        for p in paths[:40]:                     # cap hashing per size bucket
+            try:
+                h = hashlib.md5()
+                with p.open("rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 16), b""):
+                        h.update(chunk)
+                by_hash.setdefault(h.hexdigest(), []).append(p)
+            except Exception:
+                continue
+        for bucket in by_hash.values():
+            if len(bucket) > 1:
+                groups.append(bucket)
+                wasted += sz * (len(bucket) - 1)
+
+    if not groups:
+        return f"No duplicate files found under {root}."
+    groups.sort(key=lambda g: -g[0].stat().st_size)
+    lines = [f"{len(groups)} duplicate group(s), {_gb(wasted)} reclaimable:"]
+    for g in groups[:top]:
+        sz = _gb(g[0].stat().st_size)
+        lines.append(f"  {sz} × {len(g)} copies:")
+        for p in g[:4]:
+            try:
+                lines.append(f"     {p.relative_to(root)}")
+            except Exception:
+                lines.append(f"     {p}")
+    return "\n".join(lines)
+
+
+def scan_treemap(target: str = "", top: int = 12) -> str:
+    """Folder-size tree — where the disk went, as an indented tree."""
+    root = Path(target).expanduser() if target else Path.home()
+    if not root.is_dir():
+        return f"Not a folder: {root}"
+    skip = {".git", "node_modules", "__pycache__", ".venv", "venv",
+            ".cache", "Library", "AppData"}
+
+    def du(p: Path) -> int:
+        total = 0
+        try:
+            for child in p.rglob("*"):
+                if any(part in skip for part in child.parts):
+                    continue
+                if child.is_file():
+                    try:
+                        total += child.stat().st_size
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return total
+
+    try:
+        subs = [(du(d), d) for d in root.iterdir() if d.is_dir()]
+        files = [(f.stat().st_size, f) for f in root.iterdir() if f.is_file()]
+    except Exception as e:
+        return f"Could not read {root}: {e}"
+    subs.sort(reverse=True)
+    files.sort(reverse=True)
+    grand = sum(s for s, _ in subs) + sum(s for s, _ in files)
+    lines = [f"{root} = {_gb(grand)}"]
+    for size, d in subs[:top]:
+        pct = 100 * size / grand if grand else 0
+        bar = "█" * int(pct / 4)
+        lines.append(f"  {_gb(size):>9}  {pct:4.1f}%  {d.name}/ {bar}")
+    for size, f in files[: max(0, top - len(subs))]:
+        pct = 100 * size / grand if grand else 0
+        lines.append(f"  {_gb(size):>9}  {pct:4.1f}%  {f.name}")
+    return "\n".join(lines)
+
+
+def scan_speed() -> str:
+    """Download speed test against Cloudflare's public endpoint (free)."""
+    import time as _t
+    import requests
+    url = "http://speed.cloudflare.com/__down?bytes=10000000"   # 10 MB
+    t0 = _t.time()
+    r = requests.get(url, timeout=30, stream=True)
+    r.raise_for_status()
+    got = 0
+    for chunk in r.iter_content(chunk_size=1 << 16):
+        got += len(chunk)
+        if _t.time() - t0 > 25:
+            break
+    dt = max(0.001, _t.time() - t0)
+    mbps = (got * 8) / dt / 1_000_000
+    return (f"Download: {mbps:.1f} Mbps "
+            f"({got / (1 << 20):.1f} MB in {dt:.1f}s, Cloudflare test).")
+
+
+def scan_drives() -> str:
+    """All mounted drives/partitions with free space."""
+    import psutil
+    lines = []
+    for part in psutil.disk_partitions(all=False):
+        try:
+            u = psutil.disk_usage(part.mountpoint)
+        except Exception:
+            continue
+        used_pct = 100 * u.used / u.total if u.total else 0
+        bar = "█" * int(used_pct / 5)
+        lines.append(
+            f"  {part.mountpoint:<18} {_gb(u.used):>8} / {_gb(u.total):<8} "
+            f"{used_pct:4.0f}% {bar}  [{part.fstype}]")
+    if not lines:
+        return "No drives found."
+    return "Drives (used / total):\n" + "\n".join(lines)
+
+
+def scan_startup() -> str:
+    """What launches at login — the autostart audit."""
+    import sys
+    entries: list[str] = []
+    if sys.platform.startswith("win"):
+        try:
+            import winreg
+            for hive, name in ((winreg.HKEY_CURRENT_USER,
+                                "HKCU\\Run"),
+                               (winreg.HKEY_LOCAL_MACHINE,
+                                "HKLM\\Run")):
+                try:
+                    k = winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Run")
+                except OSError:
+                    continue
+                i = 0
+                while True:
+                    try:
+                        val, _ = winreg.QueryValueEx(k, str(i))
+                        entries.append(f"  [{name}] {val[:100]}")
+                        i += 1
+                    except OSError:
+                        break
+        except Exception:
+            pass
+    elif sys.platform == "darwin":
+        for d in (Path.home() / "Library/LaunchAgents",
+                  Path("/Library/LaunchAgents")):
+            if d.is_dir():
+                entries += [f"  {p.name}" for p in d.glob("*.plist")]
+    else:
+        for d in (Path.home() / ".config/autostart",
+                  Path("/etc/xdg/autostart")):
+            if d.is_dir():
+                entries += [f"  {p.stem}" for p in d.glob("*.desktop")]
+    if not entries:
+        return "No autostart entries found."
+    return f"Autostart entries ({len(entries)}):\n" + "\n".join(entries[:30])
+
+
 _SCANS = {
     "system": scan_system,
     "network": scan_network,
     "ports": scan_ports,
     "files": scan_files,
+    "dupes": scan_dupes,
+    "treemap": scan_treemap,
+    "speed": scan_speed,
+    "drives": scan_drives,
+    "startup": scan_startup,
 }
 
 
@@ -277,7 +461,7 @@ def scan_action(parameters: dict = None, player=None, session_memory=None) -> st
                 f"'{what}' is not one of them.")
 
     try:
-        if what == "files":
+        if what in ("files", "dupes", "treemap"):
             return fn(target, int(params.get("top", 12) or 12))
         return fn()
     except Exception as e:
@@ -301,7 +485,9 @@ TOOL = {
         "properties": {
             "what": {
                 "type": "STRING",
-                "description": "What to scan: system | network | ports | files. Default: system.",
+                "description": ("What to scan: system | network | ports | files | "
+                                "dupes | treemap | speed | drives | startup. "
+                                "Default: system."),
             },
             "path": {
                 "type": "STRING",

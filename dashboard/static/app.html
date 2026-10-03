@@ -121,6 +121,15 @@
     #mic-btn.unsupported { opacity: 0.3; cursor: not-allowed; }
     @keyframes mic-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.65;transform:scale(0.97)} }
 
+    /* ── SCREEN MIRROR ── */
+    #mirror-view {
+      position:fixed; top:56px; right:8px; width:min(46vw,420px); z-index:40;
+      border:1px solid var(--border); border-radius:10px; overflow:hidden;
+      background:#000; box-shadow:0 8px 30px rgba(0,0,0,0.5);
+    }
+    #mirror-view img { width:100%; display:block; min-height:80px; }
+    #mirror-btn.on { border-color: var(--accent); color: var(--accent); opacity:1; }
+
     /* ── TOAST ── */
     #toast {
       position:fixed; top:66px; left:50%; transform:translateX(-50%) translateY(-8px);
@@ -148,9 +157,11 @@
     <label class="btn-attach" for="file-inp" title="Send file">📎</label>
     <input type="file" id="file-inp" multiple accept="*/*" style="display:none">
     <button id="mic-btn" onclick="doMic()" title="Voice command">🎤</button>
+    <button class="btn btn-wake" id="mirror-btn" onclick="doMirror()" title="Screen mirror">🖥️</button>
     <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
     <button class="btn btn-send" onclick="doSend()">SEND</button>
   </footer>
+  <div id="mirror-view" style="display:none"><img id="mirror-img" alt="PC screen"></div>
 
   <script>
     // ── Auth — bearer token ───────────────────────────────────────────────────
@@ -220,7 +231,41 @@
       if (m.type === 'wake')          sys('Wake word detected — connecting…');
       if (m.type === 'sys')           sys(m.text);
       if (m.type === 'file_received') _onFileReceived(m);
+      if (m.type === 'activity')      _onActivity(m);
+      if (m.type === 'frame')         _onFrame(m);
     };
+
+    // ── Screen mirror (PC → phone) ────────────────────────────────────────────
+    let _mirrorOn = false;
+    function doMirror() {
+      _mirrorOn = !_mirrorOn;
+      const v = document.getElementById('mirror-view');
+      v.style.display = _mirrorOn ? 'block' : 'none';
+      document.getElementById('mirror-btn').style.opacity = _mirrorOn ? '1' : '';
+      if (ws.readyState === 1) ws.send(JSON.stringify({type: 'mirror', on: _mirrorOn}));
+      toast(_mirrorOn ? 'Screen mirror on' : 'Screen mirror off');
+    }
+    function _onFrame(m) {
+      if (!_mirrorOn) return;
+      document.getElementById('mirror-img').src = 'data:image/jpeg;base64,' + m.data;
+    }
+
+    // ── Mission Control feed (tool activity from the PC) ──────────────────────
+    const _ACT_MAX = 60;
+    function _onActivity(a) {
+      const d = document.createElement('div');
+      const mark = a.running ? '…' : (a.ok ? '✓' : '✗');
+      const dur  = (a.duration != null && !a.running) ? ` ${a.duration}s` : '';
+      const args = a.args ? ` (${esc(a.args)})` : '';
+      d.className = 'msg ' + (a.running ? 'msg-sys' : (a.ok ? 'msg-j' : 'msg-u'));
+      d.innerHTML = `<div class="lbl">${esc(a.when)} · ${mark} ${esc(a.name)}${dur}</div>`
+                  + (a.args ? `<span style="opacity:.75">${args}</span>` : '')
+                  + ((a.preview && a.ok === false)
+                     ? `<div style="opacity:.75">${esc(a.preview)}</div>` : '');
+      feed.appendChild(d);
+      while (feed.children.length > _ACT_MAX * 3) feed.removeChild(feed.firstChild);
+      feed.scrollTop = feed.scrollHeight;
+    }
 
     function setStatus(s) {
       if (s === 'active') {

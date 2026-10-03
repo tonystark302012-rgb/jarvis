@@ -495,6 +495,9 @@ class DashboardServer:
         self._login_fails: dict[str, list]   = {}   # ip -> [timestamps]
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
+        # Screen mirror: phone can ask the PC to stream downscaled frames.
+        self._mirror_on: bool                = False
+        self._mirror_task                     = None
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
@@ -585,10 +588,11 @@ class DashboardServer:
 
     # ── broadcast ────────────────────────────────────────────────────────
 
-    async def broadcast(self, msg: dict) -> None:
-        self._history.append(msg)
-        if len(self._history) > 300:
-            self._history = self._history[-300:]
+    async def broadcast(self, msg: dict, history: bool = True) -> None:
+        if history:
+            self._history.append(msg)
+            if len(self._history) > 300:
+                self._history = self._history[-300:]
         dead: set[WebSocket] = set()
         for ws in list(self._clients):
             try:
@@ -596,6 +600,60 @@ class DashboardServer:
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+    # ── screen mirror ────────────────────────────────────────────────────
+
+    async def mirror_set(self, on: bool) -> None:
+        """Toggle the PC→phone screen stream. Frames are low-res JPEGs sent
+        as base64; activity/mirror traffic never enters the replay history.
+        The state message goes out BEFORE the capture task starts so a
+        client's first frame of messages is deterministic."""
+        on = bool(on)
+        if on == self._mirror_on:
+            return
+        self._mirror_on = on
+        await self.broadcast({"type": "sys",
+                              "text": "Screen mirror ON." if on else
+                                      "Screen mirror OFF."})
+        if on and (self._mirror_task is None or self._mirror_task.done()):
+            self._mirror_task = asyncio.create_task(self._mirror_loop())
+
+    async def _mirror_loop(self) -> None:
+        """~3 fps while enabled. Every failure path stops the stream with a
+        message instead of silently spinning (headless/no PIL/no display)."""
+        import base64
+        import io as _io
+        import time as _t
+        try:
+            from PIL import ImageGrab
+        except Exception as e:
+            await self.broadcast({"type": "sys",
+                                  "text": f"Screen mirror unavailable ({e})."})
+            self._mirror_on = False
+            return
+        sent = 0
+        while self._mirror_on:
+            t0 = _t.monotonic()
+            try:
+                img = ImageGrab.grab()
+                w, h = img.size
+                if w > 960:
+                    img = img.resize((960, max(1, int(h * 960 / w))))
+                buf = _io.BytesIO()
+                img.save(buf, format="JPEG", quality=45)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                await self.broadcast({"type": "frame", "data": b64},
+                                     history=False)
+                sent += 1
+            except Exception as e:
+                # ImageGrab raises on headless/locked sessions — stop cleanly.
+                await self.broadcast({"type": "sys",
+                                      "text": f"Screen mirror stopped ({e})."})
+                self._mirror_on = False
+                return
+            elapsed = _t.monotonic() - t0
+            await asyncio.sleep(max(0.05, 0.33 - elapsed))
+        # loop exited because toggle went off — nothing to clean
 
     # ── FastAPI app ───────────────────────────────────────────────────────
 
@@ -902,7 +960,9 @@ class DashboardServer:
             try:
                 while True:
                     data = await websocket.receive_json()
-                    if data.get("type") == "command":
+                    if data.get("type") == "mirror":
+                        await self.mirror_set(bool(data.get("on")))
+                    elif data.get("type") == "command":
                         enc = data.get("enc", "")
                         t   = self._decrypt(tok, enc) if enc else (data.get("text") or "").strip()
                         if t:

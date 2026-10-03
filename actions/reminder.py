@@ -283,12 +283,133 @@ def _schedule_linux(target_dt: datetime, task_name: str,
     print("[Reminder] ❌ Neither systemd-run nor at found on this Linux system.")
     return ""
 
+# ── Local registry: makes list/cancel possible without polling the OS ────────
+
+def _registry_path() -> Path:
+    return _scripts_dir() / "registry.json"
+
+
+def _registry_load() -> list[dict]:
+    try:
+        data = json.loads(_registry_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _registry_save(items: list[dict]) -> None:
+    try:
+        _registry_path().write_text(json.dumps(items, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[Reminder] registry save failed: {e}")
+
+
+def _registry_add(entry: dict) -> None:
+    items = _registry_load()
+    items.append(entry)
+    _registry_save(items)
+
+
+def _list_reminders() -> str:
+    items = _registry_load()
+    now = datetime.now()
+    live = []
+    for it in items:
+        try:
+            when = datetime.strptime(f"{it.get('date','')} {it.get('time','')}",
+                                     "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        if when >= now:
+            live.append((when, it))
+    if not live:
+        return "No upcoming reminders."
+    live.sort(key=lambda x: x[0])
+    lines = [f"{i}. {when.strftime('%b %d %H:%M')} — {it.get('message','')[:60]} "
+             f"(#{it.get('task','')[-8:]})"
+             for i, (when, it) in enumerate(live[:20], 1)]
+    return "Upcoming reminders:\n" + "\n".join(lines)
+
+
+def _cancel_reminder(which: str) -> str:
+    """Cancel by task-name suffix or by list number."""
+    items = _registry_load()
+    now = datetime.now()
+    live = []
+    for it in items:
+        try:
+            when = datetime.strptime(f"{it.get('date','')} {it.get('time','')}",
+                                     "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        if when >= now:
+            live.append((when, it))
+
+    pick = None
+    which = which.strip()
+    if which.isdigit():
+        idx = int(which) - 1
+        if 0 <= idx < len(live):
+            pick = live[idx][1]
+    else:
+        for _, it in live:
+            if which and which in str(it.get("task", "")):
+                pick = it
+                break
+    if pick is None:
+        return f"No reminder matching {which!r}. Say 'list reminders' first."
+
+    task = str(pick.get("task", ""))
+    os_name = _get_os()
+    cancelled = False
+    try:
+        if os_name == "windows":
+            r = subprocess.run(["schtasks", "/Delete", "/TN", task, "/F"],
+                               capture_output=True, text=True, timeout=10,
+                               **_CNW)
+            cancelled = r.returncode == 0
+        elif os_name == "mac":
+            label = f"com.jarvis.reminder.{task}"
+            lp = Path.home() / "Library/LaunchAgents" / f"{label}.plist"
+            r = subprocess.run(["launchctl", "unload", str(lp)],
+                               capture_output=True, text=True, timeout=10)
+            lp.unlink(missing_ok=True)
+            cancelled = r.returncode == 0
+        else:
+            if shutil.which("systemctl"):
+                r = subprocess.run(
+                    ["systemctl", "--user", "stop", f"{task}.timer"],
+                    capture_output=True, text=True, timeout=10)
+                subprocess.run(
+                    ["systemctl", "--user", "stop", f"{task}.service"],
+                    capture_output=True, text=True, timeout=10)
+                cancelled = r.returncode == 0
+    except Exception as e:
+        print(f"[Reminder] cancel error: {e}")
+
+    # Drop the registry entry either way — a stale entry is worse than an
+    # orphaned one-shot job the OS already fired.
+    items = [it for it in items if it.get("task") != task]
+    _registry_save(items)
+    (_scripts_dir() / f"{task}.py").unlink(missing_ok=True)
+    if cancelled:
+        return f"Cancelled: {pick.get('message','')[:60]}"
+    return (f"Removed from my list (system cancel returned nothing for "
+            f"{task[:30]} — the job may have already fired).")
+
+
 def reminder(
     parameters: dict,
     response=None,
     player=None,
     session_memory=None,
 ) -> str:
+
+    action = str(parameters.get("action", "")).lower().strip()
+    if action == "list":
+        return _list_reminders()
+    if action == "cancel":
+        return _cancel_reminder(str(parameters.get("which", "")))
 
     date_str = parameters.get("date", "").strip()
     time_str = parameters.get("time", "").strip()
@@ -332,6 +453,9 @@ def reminder(
     if player:
         player.write_log(f"[Reminder] ✅ {date_str} {time_str} — {safe_msg[:40]}")
 
+    _registry_add({"task": job_id, "date": date_str, "time": time_str,
+                   "message": safe_msg, "os": os_name})
+
     friendly_time = target_dt.strftime("%B %d at %I:%M %p")
     return f"Reminder set for {friendly_time}."
 
@@ -339,10 +463,18 @@ def reminder(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "reminder",
-    "description": "Sets a timed reminder using Task Scheduler.",
+    "description": (
+        "Sets a timed reminder using the OS scheduler; also lists and "
+        "cancels reminders. Actions: set (default — needs date/time/message), "
+        "list (upcoming reminders), cancel (by number from list or task id)."
+    ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
+            "action": {
+                "type": "STRING",
+                "description": "set (default) | list | cancel"
+            },
             "date": {
                 "type": "STRING",
                 "description": "Date in YYYY-MM-DD format"
@@ -354,13 +486,13 @@ TOOL = {
             "message": {
                 "type": "STRING",
                 "description": "Reminder message text"
+            },
+            "which": {
+                "type": "STRING",
+                "description": "For cancel: number from the list or task id"
             }
         },
-        "required": [
-            "date",
-            "time",
-            "message"
-        ]
+        "required": []
     },
     "handler": reminder,
 }

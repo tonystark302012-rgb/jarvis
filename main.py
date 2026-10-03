@@ -606,6 +606,7 @@ class JarvisLive:
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
+        self._focus_muted = False                  # focus session suppresses proactive voice
 
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
         self._tuned_live    = True  # turn-taking / media / thinking knobs; same fallback
@@ -636,6 +637,50 @@ class JarvisLive:
         self.ui.get_plugins = self._plugin_registry.list_for_ui
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
+
+        # ── Agentic task agent + automation rules ──────────────────────────
+        # Both dispatch through the SAME registry the model talks to, so a
+        # planned step can never reach a tool the session doesn't have, and
+        # every step lands in the Mission Control timeline like any tool call.
+        try:
+            from actions import task_agent as _task_agent
+            from actions import rules as _rules_mod
+
+            def _agent_runner(tool: str, tool_args: dict) -> str:
+                ctx = {"player": self.ui, "speak": self.speak,
+                       "response": None, "session_memory": None}
+                out = self._action_registry.run(tool, tool_args, ctx)
+                return out or "Done."
+
+            _task_agent.set_runner(_agent_runner)
+            _task_agent.set_runner_names(self._action_registry.names())
+            _rules_mod.set_runner(_agent_runner)
+            _rules_mod.set_notifier(lambda msg: self.ui.write_log(f"RULE: {msg}"))
+        except Exception as e:
+            print(f"[JARVIS] ⚠ Task/rules wiring failed: {e}")
+
+        # Mission Control: mirror every activity event to the dashboard feed.
+        try:
+            from core import activity as _activity
+
+            def _activity_to_dash(ev) -> None:
+                if self._dashboard is None:
+                    return
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    return
+                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(
+                    self._dashboard.broadcast({
+                        "type": "activity",
+                        "kind": ev.kind, "name": ev.name, "when": ev.when(),
+                        "ok": ev.ok, "running": ev.running,
+                        "args": ev.summary(), "preview": ev.preview[:160],
+                        "duration": round(ev.duration, 2) if not ev.running else None,
+                    })))
+            _activity.add_listener(_activity_to_dash)
+        except Exception as e:
+            print(f"[JARVIS] ⚠ Activity mirror failed: {e}")
 
         # ── Wake word ────────────────────────────────────────────────────────
         # _awake gates the mic (see _listen_audio) and the background speakers.
@@ -845,6 +890,15 @@ class JarvisLive:
         if self._wake_enabled and not self._awake:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
+        # Phrase-triggered automation rules: 'when I say X do Y'. Runs before
+        # the utterance goes to the model so the action happens even mid-outage.
+        try:
+            from actions import rules as _rules_mod
+            for out in _rules_mod.fire_phrase(text):
+                if out:
+                    self.ui.write_log(f"RULE: {str(out)[:160]}")
+        except Exception:
+            pass
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -1218,6 +1272,11 @@ class JarvisLive:
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
 
+        # Mission Control: every tool call starts a timeline event. The
+        # event object travels with the call and is closed on each exit path
+        # so the timeline never shows a phantom "running" entry.
+        from core import activity as _activity
+        _act_ev = _activity.begin("tool", name, args)
 
         if name == "save_memory":
             category = args.get("category", "notes")
@@ -1226,6 +1285,7 @@ class JarvisLive:
             if key and value:
                 update_memory({category: {key: {"value": value}}})
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+            _activity.finish(_act_ev, True, "saved")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -1358,6 +1418,9 @@ class JarvisLive:
             result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
             self.speak_error(name, e)
+            _activity.fail(_act_ev, e)
+        else:
+            _activity.finish(_act_ev, True, result)
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
@@ -2009,6 +2072,24 @@ class JarvisLive:
 
     # ── Background monitor ──────────────────────────────────────────────────────
 
+    async def _run_rules_tick(self) -> None:
+        """Evaluate automation rules every 30s — time/file triggers fire
+        through the action registry, so they land in Mission Control too."""
+        from actions import rules as _rules_mod
+        await asyncio.sleep(15)                  # let the app settle first
+        while True:
+            try:
+                fired = await asyncio.to_thread(_rules_mod.tick)
+                for out in fired:
+                    print(f"[Rules] {out[:120]}")
+                    try:
+                        self.ui.write_log(f"RULE: {str(out)[:160]}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[Rules] tick error: {e}")
+            await asyncio.sleep(30)
+
     async def _run_background_monitor(self) -> None:
         """Check user-configured topics once per day; speak alerts when new headlines appear."""
         await asyncio.sleep(300)          # wait 5 min after startup before first check
@@ -2052,6 +2133,10 @@ class JarvisLive:
             await asyncio.sleep(60)   # evaluate once per minute
 
             if not self.session or not self._awake:
+                continue
+
+            # Focus session in progress — silence is the whole point.
+            if self._focus_muted:
                 continue
 
             with self._speaking_lock:
@@ -2176,6 +2261,27 @@ class JarvisLive:
         except Exception as e:
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None
+
+        # Automation rules: evaluate triggers every 30s for the process
+        # lifetime (independent of session state — a rule must fire even if
+        # the model is reconnecting).
+        asyncio.create_task(self._run_rules_tick())
+
+        # Focus sessions: phase changes announce through the activity log;
+        # the mute flag gates proactive check-ins while working.
+        try:
+            from actions import focus as _focus_mod
+
+            def _focus_phase(phase: str, minutes: int) -> None:
+                from core import activity as _a
+                _a.note("task", f"focus: {phase} phase ({minutes} min)")
+
+            def _focus_mute(on: bool) -> None:
+                self._focus_muted = bool(on)
+
+            _focus_mod.set_callbacks(on_phase=_focus_phase, on_mute=_focus_mute)
+        except Exception as e:
+            print(f"[Focus] wiring failed: {e}")
 
         while True:
             try:
