@@ -950,6 +950,14 @@ class JarvisLive:
         source — HUD text box, phone command box, or the live voice
         transcript. Returns the rule outputs; never raises. Thread-safe
         (ui.write_log is a Qt signal emit)."""
+        # Presence: this function is the single choke-point every input
+        # path funnels through — count it as user-at-machine activity.
+        try:
+            from core.presence import tracker as _presence_tracker
+            if _presence_tracker().note_activity("input") == "present":
+                self.ui.write_log("SYS: presence — user back.")
+        except Exception:
+            pass
         try:
             from actions import rules as _rules_mod
             fired = _rules_mod.fire_phrase(text)
@@ -964,6 +972,13 @@ class JarvisLive:
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
+        # Presence counts typed input even while asleep (the wake gate
+        # below would otherwise swallow it) — a keystroke IS the user.
+        try:
+            from core.presence import tracker as _presence_tracker
+            _presence_tracker().note_activity("hud")
+        except Exception:
+            pass
         # Respect wake-word sleep: a typed command must not be answered while
         # asleep either (the sleep gate is not just for the mic). Wake first with
         # "Hey Jarvis" or the WAKE NOW button.
@@ -2282,6 +2297,16 @@ class JarvisLive:
             # Focus session in progress — silence is the whole point.
             if self._focus_muted:
                 continue
+
+            # Presence gate — don't talk to an empty room. Tracks idle
+            # input + best-effort OS idle; hysteresis in core/presence.py
+            # keeps it from flapping.
+            try:
+                from core.presence import tracker as _presence_tracker
+                if not _presence_tracker().is_present():
+                    continue
+            except Exception:
+                pass
 
             with self._speaking_lock:
                 speaking = self._is_speaking

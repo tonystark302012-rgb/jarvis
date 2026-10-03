@@ -2606,3 +2606,182 @@ class TestPrivacyGateCoverage:
         # …but summarize would go to the cloud
         out = fp.file_processor({"file_path": str(p), "action": "summarize"})
         assert "Privacy mode is ON" in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 3 — presence detection (core/presence.py + actions/presence.py)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestPresence:
+    """Flap-safe present/away state machine: JARVIS-input idle + optional
+    OS idle probe, hysteresis on the return edge."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self, monkeypatch):
+        import core.presence as cp
+        monkeypatch.setattr(cp, "_os_idle_seconds", lambda: None)
+        self.cp = cp
+        self.tr = cp.PresenceTracker(away_after=10.0)
+        yield
+
+    def test_starts_present(self):
+        st = self.tr.status()
+        assert st["present"] is True
+        assert st["state"] == "present"
+        assert st["away_after_seconds"] == 10.0
+
+    def test_activity_resets_idle_and_never_edges_when_present(self):
+        assert self.tr.note_activity("hud") is None
+        assert self.tr.is_present() is True
+
+    def test_poll_away_edge_fires_once(self):
+        # back-date last activity beyond threshold
+        self.tr._last_activity = self.cp.time.monotonic() - 20
+        assert self.tr.poll() == "away"
+        assert self.tr.poll() is None           # edge is reported ONCE
+        assert self.tr.is_present() is False
+
+    def test_activity_after_away_returns_present_edge(self):
+        self.tr._last_activity = self.cp.time.monotonic() - 20
+        assert self.tr.poll() == "away"
+        assert self.tr.note_activity("voice") == "present"
+        assert self.tr.note_activity("voice") is None   # no flapping
+        states = [h["state"] for h in self.tr.history]
+        assert states == ["away", "present"]
+
+    def test_os_probe_below_hysteresis_returns_present(self):
+        self.tr.force("away")
+        self.cp._os_idle_seconds = lambda: 4.0   # < away_after/2 → active
+        assert self.tr.poll() == "present"
+        assert self.tr.is_present() is True
+
+    def test_os_probe_still_idle_keeps_away(self):
+        self.tr.force("away")
+        self.cp._os_idle_seconds = lambda: 9999.0
+        assert self.tr.poll() is None
+        assert self.tr.is_present() is False
+
+    def test_os_probe_takes_precedence_when_fresher(self):
+        # our input 100s ago (looks idle) but OS says 3s ago → present
+        self.tr._last_activity = self.cp.time.monotonic() - 100
+        self.cp._os_idle_seconds = lambda: 3.0
+        assert self.tr.poll() is None           # min(100, 3) = 3 < 10
+        assert self.tr.is_present() is True
+
+    def test_force_and_history(self):
+        assert self.tr.force("away") is True
+        assert self.tr.force("away") is False   # already away
+        assert self.tr.force("present") is True
+        assert len(self.tr.history) == 2
+
+    def test_set_away_after_floor(self):
+        assert self.tr.set_away_after(0.0) == 1.0
+        assert self.tr.set_away_after(45) == 45.0
+
+    def test_singleton(self):
+        assert self.cp.tracker() is self.cp.tracker()
+
+
+class TestPresenceAction:
+    @pytest.fixture(autouse=True)
+    def _fresh(self, monkeypatch):
+        import core.presence as cp
+        import actions.presence as ap
+        monkeypatch.setattr(cp, "_os_idle_seconds", lambda: None)
+        cp._TRACKER = cp.PresenceTracker(away_after=10.0)
+        self.cp, self.ap = cp, ap
+        yield
+        cp._TRACKER = None
+
+    def test_status_report(self):
+        out = self.ap.presence({"action": "status"}, None)
+        assert "PRESENT" in out
+        assert "OS idle probe: unavailable" in out   # honest about fallback
+
+    def test_history_empty_then_populated(self):
+        assert "No presence transitions yet" in self.ap.presence(
+            {"action": "history"}, None)
+        self.cp._TRACKER.force("away")
+        out = self.ap.presence({"action": "history"}, None)
+        assert "AWAY" in out
+
+    def test_set_away_after_valid_and_invalid(self):
+        out = self.ap.presence({"action": "set_away_after",
+                                "seconds": 60}, None)
+        assert "60s" in out
+        out = self.ap.presence({"action": "set_away_after",
+                                "seconds": "abc"}, None)
+        assert "number of seconds" in out
+
+    def test_force_present_and_away(self):
+        assert "Marked AWAY" in self.ap.presence({"action": "away"}, None)
+        assert "Already away" in self.ap.presence({"action": "away"}, None)
+        assert "Marked present" in self.ap.presence({"action": "mark"}, None)
+        assert "Already present" in self.ap.presence({"action": "mark"}, None)
+
+    def test_unknown_action_lists_options(self):
+        assert "status" in self.ap.presence({"action": "zzz"}, None)
+
+    def test_tool_shape(self):
+        # end-to-end: the action must survive real discovery/validation
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions"))
+        assert "presence" in reg.names()
+        decl = next(d for d in reg.get_tool_declarations()
+                    if d["name"] == "presence")
+        assert decl["parameters"]["type"] == "OBJECT"
+        out = reg.run("presence", {}, {})
+        assert "PRESENT" in out or "AWAY" in out
+
+
+class TestPresenceWiring:
+    """main.py: activity at every input choke + proactive speech gated on
+    presence (main.py is Qt-bound → source-index assertions, same
+    convention as the other wiring tests)."""
+
+    @pytest.fixture(autouse=True)
+    def _src(self):
+        self.src = Path("main.py").read_text(encoding="utf-8")
+        yield
+
+    def test_fire_phrase_rules_counts_activity(self):
+        seg = self.src.split("def _fire_phrase_rules", 1)[1][:900]
+        assert 'note_activity("input")' in seg
+        assert "_presence_tracker" in seg
+
+    def test_typed_command_counts_even_while_asleep(self):
+        seg = self.src.split("def _on_text_command", 1)[1][:700]
+        assert 'note_activity("hud")' in seg
+        # placement: BEFORE the wake gate swallows the input
+        assert seg.index('note_activity("hud")') < seg.index("_awake")
+
+    def test_proactive_loop_checks_presence(self):
+        seg = self.src.split("async def _run_proactive_mode", 1)[1][:2000]
+        assert "_presence_tracker().is_present()" in seg
+        # the gate must skip (continue), not crash the loop
+        assert "if not _presence_tracker().is_present():" in seg
+
+    def test_no_qt_import_in_presence_modules(self):
+        for p in ("core/presence.py", "actions/presence.py"):
+            s = Path(p).read_text(encoding="utf-8")
+            assert "PyQt" not in s and "ui import" not in s
+
+    def test_every_tool_handler_accepts_parameters_kwarg(self):
+        # Regression guard: core.action_loader._call_handler invokes
+        # handlers as fn(parameters=..., **ctx). A handler named `params`
+        # registers fine but CRASHES on every dispatch (rules/orchestrator
+        # path returns "Tool failed: unexpected keyword 'parameters'").
+        # Caught this once on presence — never again.
+        import inspect
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions"))
+        offenders = []
+        for rec in reg._actions.values():
+            sig = inspect.signature(rec.handler)
+            has_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                             for p in sig.parameters.values())
+            if "parameters" not in sig.parameters and not has_var_kw:
+                offenders.append(rec.name)
+        assert offenders == [], (
+            f"handlers missing 'parameters' kwarg (breaks registry.run): "
+            f"{offenders}")
