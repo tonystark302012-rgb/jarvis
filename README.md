@@ -269,6 +269,7 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 | 🪟 **Window Layouts** | `split` / `coding` / `stack` / `left` / `right` / `center` — pure geometry with xdotool, win32 and AppleScript backends |
 | 📋 **Clipboard History** | A watcher keeps the last 100 clips — `clip_history` list / search / use / clear |
 | 🌐 **Scrape** | URL → clean text, links and title. bs4 when present, stdlib fallback when not, non-HTTP schemes rejected, same cached httpx client as everything else |
+| 🔬 **Research → Report** | Multi-query DDG fan-out → fetch top pages → Gemini-written markdown report with numbered citations (extractive fallback without a key) → saved to `research/<topic>-<ts>.md` |
 | 📊 **Charts & Diagrams** | `chart bar "CPU=42, RAM=68"` and `diagram flow "Voice → Wake word → Gemini"` — pure-SVG output, no matplotlib |
 | ⏱ **Focus Sessions** | Pomodoro rounds that mute proactive check-ins while you work |
 | 🔪 **Process Manager** | List/kill with `confirm=yes`, refuses to kill its own tree |

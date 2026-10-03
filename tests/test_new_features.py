@@ -1061,3 +1061,112 @@ class TestRealImportChains:
         assert "config" in str(r._path()) or r._path().name == "automation_rules.json"
         assert m._dir().name == "macros"
         assert get_base_dir().name == Path.cwd().name or (get_base_dir() / "main.py").exists()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# research → report pipeline (search fan-out → fetch → write → save)
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestResearch:
+    @pytest.fixture(autouse=True)
+    def _seams(self, tmp_path, monkeypatch):
+        import actions.research as r
+        monkeypatch.setattr(r, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(r, "_synth_report", lambda t, d: None)  # offline
+        self.r = r
+        self.tmp = tmp_path
+
+    def test_requires_topic(self):
+        assert "Give me a topic" in self.r.research({})
+        assert "Give me a topic" in self.r.research({"topic": "   "})
+
+    def test_no_sources_is_honest(self, monkeypatch):
+        monkeypatch.setattr(self.r, "_search", lambda q, max_results=6: [])
+        out = self.r.research({"topic": "quantum dust bunnies"})
+        assert "no usable sources" in out
+
+    def test_full_pipeline_saves_report(self, monkeypatch):
+        pages = {
+            "https://a.example/1": "<html><head><title>Alpha study</title></head>"
+                                   "<body><main><p>Long enough content about "
+                                   "Jaipur water tables that clears the stub "
+                                   "check comfortably with many more words: "
+                                   "aquifer levels, stepwell restoration, and "
+                                   "monsoon recharge statistics for the district. "
+                                   "</p>"
+                                   "</main></body></html>",
+            "https://b.example/2": "<html><head><title>Beta report</title></head>"
+                                   "<body><main><p>Second source with its own "
+                                   "substantial paragraph of findings for the "
+                                   "digest, also long enough to be kept as a "
+                                   "real excerpt of the page body.</p>"
+                                   "</main></body></html>",
+        }
+        calls = []
+
+        def fake_search(q, max_results=6):
+            calls.append(q)
+            if len(calls) == 1:
+                return [{"title": "Alpha", "url": "https://a.example/1",
+                         "snippet": "s1"},
+                        {"title": "Beta", "url": "https://b.example/2",
+                         "snippet": "s2"}]
+            return []                                  # second angle empty
+
+        monkeypatch.setattr(self.r, "_search", fake_search)
+        monkeypatch.setattr(self.r, "_fetch_url",
+                            lambda u, timeout=15: pages[u])
+        out = self.r.research({"topic": "Jaipur water table", "depth": "standard"})
+        assert "Research report saved:" in out
+        path = Path(out.split("saved: ", 1)[1].split(" ", 1)[0])
+        assert path.is_file()
+        body = path.read_text(encoding="utf-8")
+        assert "# Research report" in body and "## Sources" in body
+        assert "https://a.example/1" in body
+        # dedup: same URL from both angles fetched once → 2 docs
+        assert "(2 sources" in out
+
+    def test_broken_fetch_skips_source(self, monkeypatch):
+        monkeypatch.setattr(
+            self.r, "_search",
+            lambda q, max_results=6: [{"title": "A", "url": "https://a.ex/"},
+                                      {"title": "B", "url": "https://b.ex/"}])
+
+        def fetch(u, timeout=15):
+            if "a.ex" in u:
+                raise RuntimeError("boom")
+            return ("<html><head><title>B</title></head><body><main>"
+                    "<p>Kept page content that is definitely long enough "
+                    "to survive the minimum excerpt length check here, "
+                    "with two more clauses padding it well past the limit "
+                    "the fetcher uses to reject stub pages outright."
+                    "</p></main></body></html>")
+
+        monkeypatch.setattr(self.r, "_fetch_url", fetch)
+        out = self.r.research({"topic": "x"})
+        assert "(1 sources" in out or "(1 source" in out
+
+    def test_synthesis_used_when_available(self, monkeypatch):
+        monkeypatch.setattr(
+            self.r, "_search",
+            lambda q, max_results=6: [{"title": "T", "url": "https://t.ex/",
+                                       "snippet": "s"}])
+        monkeypatch.setattr(self.r, "_fetch_url", lambda u, timeout=15:
+                            "<html><head><title>T</title></head><body><main>"
+                            "<p>Content long enough to be retained for the "
+                            "synthesis step of the research pipeline test, "
+                            "padded with further sentences so it clears the "
+                            "minimum excerpt length check with room to spare."
+                            "</p></main></body></html>")
+        monkeypatch.setattr(self.r, "_synth_report",
+                            lambda t, d: "# Written by model\n\n## Summary\nok")
+        out = self.r.research({"topic": "ai chips"})
+        assert "Research report saved:" in out
+        path = Path(out.split("saved: ", 1)[1].split(" ", 1)[0])
+        assert path.read_text(encoding="utf-8").startswith("# Written by model")
+
+    def test_scheme_gate(self):
+        with pytest.raises(ValueError, match="unsupported scheme"):
+            self.r._fetch_url("ftp://evil.example/x")
+        with pytest.raises(ValueError, match="unsupported scheme"):
+            self.r._fetch_url("javascript:alert(1)")
