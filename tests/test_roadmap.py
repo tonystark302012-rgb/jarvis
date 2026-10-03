@@ -2291,3 +2291,240 @@ class TestBrowserAgentReasonAndWiring:
         props = bc.TOOL["parameters"]["properties"]
         assert "agent" in props["action"]["description"]
         assert "goal" in props and "max_steps" in props
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 3 — multi-agent planner→coder→tester dry-run pipeline
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMultiAgentHelpers:
+    def test_parse_plan_valid(self):
+        from actions.multi_agent import _parse_plan
+        raw = ('{"steps":["touch file"], "files":['
+               '{"path":"a.py","action":"modify","instruction":"add retry"},'
+               '{"path":"new.py","action":"create","instruction":"make it"}]}')
+        p = _parse_plan(raw)
+        assert p["steps"] == ["touch file"]
+        assert p["files"][0]["path"] == "a.py"
+        assert p["files"][1]["action"] == "create"
+
+    def test_parse_plan_fenced_and_junk_action(self):
+        from actions.multi_agent import _parse_plan
+        raw = '```json\n{"steps":[],"files":[{"path":"x.py","action":"obliterate"}]}\n```'
+        p = _parse_plan(raw)
+        assert p["files"][0]["action"] == "modify"   # normalised
+        assert p["steps"] == ["implement planned files"]
+
+    @pytest.mark.parametrize("bad", ["", "no json", "{broken", "[]", '{"files": []}'])
+    def test_parse_plan_rejects_unusable(self, bad):
+        from actions.multi_agent import _parse_plan
+        with pytest.raises(ValueError):
+            _parse_plan(bad)
+
+    def test_strip_fences(self):
+        from actions.multi_agent import _strip_fences
+        assert _strip_fences("```python\nx = 1\n```") == "x = 1\n"
+        assert _strip_fences("x = 1") == "x = 1\n"
+        # multi-line keeps content
+        assert "def f():\n    pass" in _strip_fences("```\ndef f():\n    pass\n```")
+
+    def test_make_diff_empty_when_unchanged(self):
+        from actions.multi_agent import _make_diff
+        assert _make_diff("same", "same", "a.py") == ""
+        d = _make_diff("a\nb\n", "a\nc\n", "a.py")
+        assert "-b" in d and "+c" in d
+        assert "--- a/a.py" in d and "+++ b/a.py" in d
+
+    def test_syntax_check_python(self):
+        from actions.multi_agent import _syntax_check
+        assert _syntax_check("x = 1\n", "a.py") is None
+        err = _syntax_check("def broken(:\n", "a.py")
+        assert err and "SyntaxError" in err
+        # non-python is out of scope — no false rejections
+        assert _syntax_check("function ( {", "a.js") is None
+
+    @pytest.mark.parametrize("raw,expected", [
+        ('{"verdict":"pass","issues":[]}', "pass"),
+        ('{"verdict":"FAIL","issues":["x"]}', "fail"),
+        ('{"verdict":"maybe"}', "fail"),          # unknown → fail (safe)
+        ('not json at all', "fail"),
+        ('{"verdict":"fail"}', "fail"),           # fail without issues gets one
+    ])
+    def test_parse_verdict(self, raw, expected):
+        from actions.multi_agent import _parse_verdict
+        v = _parse_verdict(raw)
+        assert v["verdict"] == expected
+        if expected == "fail":
+            assert v["issues"]
+
+
+class _ScriptedLLM:
+    """Callable that answers by prompt role — planner/coder/tester."""
+
+    def __init__(self, plan=None, code="new content\n", verdict="pass"):
+        self.plan = plan or {"steps": ["do it"],
+                             "files": [{"path": "a.py", "action": "modify",
+                                        "instruction": "improve"}]}
+        self.code = code
+        self.verdict = verdict
+        self.calls: list[str] = []
+
+    def __call__(self, prompt, system=None):
+        if "PLANNER" in prompt:
+            self.calls.append("plan")
+            return json.dumps(self.plan)
+        if "CODER" in prompt:
+            self.calls.append("code")
+            return f"```\n{self.code}\n```"
+        if "TESTER" in prompt:
+            self.calls.append("test")
+            if isinstance(self.verdict, dict):
+                return json.dumps(self.verdict)
+            return json.dumps({"verdict": self.verdict, "issues": []})
+        raise AssertionError(f"unexpected prompt: {prompt[:80]}")
+
+
+class TestMultiAgentPipeline:
+    def test_task_required(self):
+        from actions.multi_agent import run_pipeline
+        assert "needs a task" in run_pipeline("", {}, None)
+
+    def test_planning_failure_reported(self):
+        from actions.multi_agent import run_pipeline
+        def bad_llm(prompt, system=None):
+            return "I refuse to plan"
+        out = run_pipeline("t", {}, bad_llm)
+        assert "planning failed" in out
+
+    def test_dry_run_default_reports_diff_and_verb(self):
+        from actions.multi_agent import run_pipeline
+        llm = _ScriptedLLM(code="x = 2\n")
+        out = run_pipeline("change x", {"a.py": "x = 1\n"}, llm)
+        assert "PLAN —" in out
+        assert "[PASS] a.py" in out
+        assert "-x = 1" in out and "+x = 2" in out
+        assert "DRY-RUN: nothing written" in out
+        assert llm.calls == ["plan", "code", "test"]
+
+    def test_apply_writes_only_passing_files(self, tmp_path):
+        from actions.multi_agent import run_pipeline
+        llm = _ScriptedLLM(code="x = 2\n")
+        out = run_pipeline("change x", {"a.py": "x = 1\n"}, llm,
+                           apply=True, root=tmp_path)
+        assert "APPLIED:" in out
+        assert (tmp_path / "a.py").read_text() == "x = 2\n"
+
+    def test_apply_blocked_when_tester_fails(self, tmp_path):
+        from actions.multi_agent import run_pipeline
+        llm = _ScriptedLLM(code="x = 2\n",
+                           verdict={"verdict": "fail",
+                                    "issues": ["logic wrong"]})
+        out = run_pipeline("change x", {"a.py": "x = 1\n"}, llm,
+                           apply=True, root=tmp_path)
+        assert "NOT APPLIED" in out
+        assert "logic wrong" in out
+        # nothing reached disk — the inventory was in-memory only
+        assert not (tmp_path / "a.py").exists()
+
+    def test_syntax_error_triggers_revision_then_honest_fail(self):
+        from actions.multi_agent import run_pipeline
+        class LLM:
+            def __init__(self):
+                self.code_calls = 0
+
+            def __call__(self, prompt, system=None):
+                if "PLANNER" in prompt:
+                    return json.dumps({"steps": ["s"],
+                                       "files": [{"path": "a.py",
+                                                  "action": "modify",
+                                                  "instruction": "x"}]})
+                if "CODER" in prompt:
+                    self.code_calls += 1
+                    if self.code_calls == 1:
+                        return "def broken(:\n"          # syntax error
+                    assert "TESTER ISSUES" in prompt      # feedback delivered
+                    return "x = 1\n"                     # fixed, but…
+                if "TESTER" in prompt:
+                    return json.dumps({"verdict": "fail",
+                                       "issues": ["does not solve task"]})
+                raise AssertionError(prompt[:60])
+
+        llm = LLM()
+        logs: list[str] = []
+        out = run_pipeline("t", {"a.py": "old\n"}, llm, log=logs.append)
+        assert llm.code_calls == 2                       # one revision round
+        assert "[FAIL] a.py" in out
+        assert "does not solve task" in out
+        # deterministic gate fired on attempt 1 (logged), tester on attempt 2
+        assert any("SyntaxError" in line for line in logs)
+
+    def test_syntax_error_exhausted_reports_fail(self):
+        from actions.multi_agent import run_pipeline
+        class LLM:
+            def __call__(self, prompt, system=None):
+                if "PLANNER" in prompt:
+                    return json.dumps({"files": [{"path": "a.py",
+                                                  "action": "modify",
+                                                  "instruction": "x"}]})
+                if "CODER" in prompt:
+                    return "def broken(:\n"
+                raise AssertionError("tester must never run on bad syntax")
+        out = run_pipeline("t", {"a.py": "old\n"}, LLM())
+        assert "[FAIL] a.py" in out
+        assert "SyntaxError" in out
+
+    def test_unchanged_file_counts_as_fail(self):
+        from actions.multi_agent import run_pipeline
+        llm = _ScriptedLLM(code="x = 1")   # same as existing (modulo newline)
+        out = run_pipeline("t", {"a.py": "x = 1\n"}, llm)
+        assert "[FAIL] a.py" in out
+        assert "unchanged" in out
+
+    def test_coder_exception_reported_not_raised(self):
+        from actions.multi_agent import run_pipeline
+        def llm(prompt, system=None):
+            if "PLANNER" in prompt:
+                return json.dumps({"files": [{"path": "a.py",
+                                              "action": "modify",
+                                              "instruction": "x"}]})
+            raise RuntimeError("ollama crashed")
+        out = run_pipeline("t", {"a.py": "old\n"}, llm)
+        assert "[FAIL] a.py" in out
+        assert "coder failed" in out
+
+    def test_multiple_files_each_get_diff_and_verdict(self):
+        from actions.multi_agent import run_pipeline
+        plan = {"steps": ["s"],
+                "files": [{"path": "a.py", "action": "modify", "instruction": "i"},
+                          {"path": "b.py", "action": "create", "instruction": "i"}]}
+        llm = _ScriptedLLM(plan=plan, code="changed\n")
+        out = run_pipeline("t", {"a.py": "old a\n", "b.py": ""}, llm)
+        assert "[PASS] a.py" in out and "[PASS] b.py" in out
+        assert llm.calls.count("code") == 2
+
+    def test_handler_shorthand_single_file(self, monkeypatch, tmp_path):
+        import actions.multi_agent as ma
+        captured = {}
+
+        def fake_run(task, files, llm, *, apply=False, root=None, log=None):
+            captured.update(task=task, files=files, apply=apply, root=root)
+            return "ok"
+        monkeypatch.setattr(ma, "run_pipeline", fake_run)
+        out = ma.multi_agent({"task": "t", "file_path": "a.py",
+                              "content": "x = 1", "apply": "true",
+                              "root": str(tmp_path)})
+        assert out == "ok"
+        assert captured["files"] == {"a.py": "x = 1"}
+        assert captured["apply"] is True
+        assert captured["root"] == tmp_path
+
+    def test_handler_task_required(self):
+        import actions.multi_agent as ma
+        assert "needs a task" in ma.multi_agent({})
+
+    def test_tool_schema(self):
+        import actions.multi_agent as ma
+        assert ma.TOOL["name"] == "multi_agent"
+        assert "task" in ma.TOOL["parameters"]["required"]
+        assert "apply" in ma.TOOL["parameters"]["properties"]
+        assert ma.TOOL["handler"] is ma.multi_agent
