@@ -498,6 +498,9 @@ class DashboardServer:
         # Screen mirror: phone can ask the PC to stream downscaled frames.
         self._mirror_on: bool                = False
         self._mirror_task                     = None
+        # Camera motion detect — stateful frame differ (see dashboard/motion.py)
+        from dashboard.motion import MotionDetector
+        self._motion                          = MotionDetector()
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
@@ -872,7 +875,13 @@ class DashboardServer:
                 "size": len(data),
                 "ts": float(body.get("ts") or time.time()),
             }, history=False))
-            return JSONResponse({"ok": True, "size": len(data)})
+            # Motion detect: frame-over-frame diff (dashboard/motion.py).
+            # feed() never raises and degrades to None without PIL.
+            motion = self._motion.feed(data, time.time())
+            if motion:
+                asyncio.create_task(self.broadcast(motion, history=False))
+            return JSONResponse({"ok": True, "size": len(data),
+                                 "motion": bool(motion)})
 
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 

@@ -1627,3 +1627,188 @@ class TestBargeInMainWiring:
         # constructed alongside EchoGuard
         i = SRC.index("self._echo                 = EchoGuard()")
         assert "self._barge_on" in SRC[i:i + 300]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 3 — security-camera motion detect (dashboard/motion.py)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMotionDetector:
+    """Pure-logic tests — no PIL needed (decode is a seam)."""
+
+    @pytest.fixture(autouse=True)
+    def _det(self):
+        from dashboard.motion import MotionDetector, frame_diff
+        self.det = MotionDetector()
+        self.frame_diff = frame_diff
+        yield
+
+    @staticmethod
+    def _flat(v: float, n: int = 64 * 48) -> list[float]:
+        return [v] * n
+
+    def test_frame_diff_identical_is_zero(self):
+        assert self.frame_diff(self._flat(50), self._flat(50)) == 0.0
+
+    def test_frame_diff_opposite_is_one(self):
+        assert abs(self.frame_diff(self._flat(0), self._flat(255)) - 1.0) < 1e-9
+
+    def test_frame_diff_mismatched_lengths_is_full_change(self):
+        assert self.frame_diff([1.0], [1.0, 2.0]) == 1.0
+        assert self.frame_diff([], []) == 1.0
+
+    def test_first_frame_only_arms_never_alerts(self):
+        assert self.det.armed is False
+        assert self.det.update(self._flat(10), now=100.0) is None
+        assert self.det.armed is True
+
+    def test_scene_change_alerts(self):
+        self.det.update(self._flat(10), now=100.0)
+        evt = self.det.update(self._flat(240), now=101.0)
+        assert evt is not None
+        assert evt["type"] == "motion"
+        assert evt["score"] > 0.5 and evt["ts"] == 101.0
+
+    def test_calm_scene_never_alerts(self):
+        self.det.update(self._flat(100), now=100.0)
+        # JPEG-noise-level wobble (±3/255 ≈ 0.012) stays under 0.08
+        for i in range(10):
+            assert self.det.update(self._flat(100 + (i % 2) * 3),
+                                   now=101.0 + i) is None
+
+    def test_cooldown_suppresses_flood(self):
+        self.det.update(self._flat(10), now=100.0)
+        first = self.det.update(self._flat(240), now=101.0)
+        assert first is not None
+        # change persists, but inside the 3 s cooldown
+        assert self.det.update(self._flat(10), now=102.0) is None
+        assert self.det.update(self._flat(240), now=103.9) is None
+        # cooldown over → fires again
+        again = self.det.update(self._flat(10), now=104.1)
+        assert again is not None and again["ts"] == 104.1
+
+    def test_feed_without_pil_returns_none_and_never_raises(self):
+        # PIL is absent in this venv → _decode degrades to None
+        try:
+            import PIL  # noqa: F401
+            pytest.skip("PIL present — absence path covered in CI-only")
+        except ImportError:
+            pass
+        assert self.det.feed(b"\xff\xd8FAKEJPEG", now=100.0) is None
+        assert self.det.feed(b"", now=101.0) is None
+
+    def test_feed_garbage_never_raises_even_with_pil(self):
+        # garbage bytes → PIL decode fails → None (works whether or not
+        # PIL is installed)
+        assert self.det.feed(b"definitely-not-a-jpeg", now=100.0) is None
+
+    def test_custom_threshold_and_cooldown(self):
+        from dashboard.motion import MotionDetector
+        d = MotionDetector(threshold=0.5, cooldown=10.0)
+        d.update(self._flat(0), now=100.0)
+        assert d.update(self._flat(30), now=101.0) is None   # 30/255 < 0.5
+        assert d.update(self._flat(255), now=102.0) is not None
+        assert d.update(self._flat(0), now=111.9) is None    # inside cooldown
+        assert d.update(self._flat(255), now=112.1) is not None
+
+
+class TestMotionCameraEndpoint:
+    """POST /api/camera-frame now reports motion (seam-fed decode)."""
+
+    @pytest.fixture(autouse=True)
+    def _app(self, tmp_path, monkeypatch):
+        pytest.importorskip("fastapi", reason="needs fastapi")
+        import dashboard.server as ds
+        if not ds._DEPS_OK:
+            pytest.skip("dashboard deps incomplete")
+        monkeypatch.setattr(ds, "_ensure_network_access", lambda port: None)
+        monkeypatch.setattr(ds, "_ensure_certs", lambda: False)
+        self.srv = ds.DashboardServer()
+        self.srv._uploads_dir = tmp_path / "uploads"
+        self.token = "tok-motion-1"
+        self.srv._tokens.add(self.token)
+        self.broadcasts = []
+
+        async def _rec(msg, history=True):
+            self.broadcasts.append(msg)
+
+        monkeypatch.setattr(self.srv, "broadcast", _rec)
+        yield
+
+    def _post(self, frame_bytes: bytes):
+        import base64 as _b64
+        import json as _json
+        from fastapi.testclient import TestClient
+        return TestClient(self.srv.app).post(
+            "/api/camera-frame",
+            content=_json.dumps({"frame": _b64.b64encode(frame_bytes).decode(),
+                                 "ts": 1759500000.0}),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.token}"})
+
+    def _feed_seam(self, monkeypatch, values):
+        """Replace PIL decode with a scripted frame sequence."""
+        import dashboard.motion as mo
+        seq = iter(values)
+        monkeypatch.setattr(mo, "_decode",
+                            lambda data: next(seq, None))
+
+    def test_motion_broadcast_when_scene_changes(self, monkeypatch):
+        self._feed_seam(monkeypatch, [self._flat(10), self._flat(240)])
+        r1 = self._post(b"\xff\xd8A" + b"x" * 200)
+        r2 = self._post(b"\xff\xd8B" + b"y" * 200)
+        assert r1.status_code == 200 and r1.json()["motion"] is False
+        assert r2.status_code == 200 and r2.json()["motion"] is True
+        # create_task fires on next loop tick inside TestClient
+        time.sleep(0.05)
+        motion_msgs = [m for m in self.broadcasts if m.get("type") == "motion"]
+        assert len(motion_msgs) == 1
+        assert motion_msgs[0]["score"] > 0.5
+
+    @staticmethod
+    def _flat(v: float) -> list[float]:
+        return [v] * (64 * 48)
+
+    def test_calm_scene_no_motion_broadcast(self, monkeypatch):
+        self._feed_seam(monkeypatch, [self._flat(100), self._flat(101)])
+        self._post(b"\xff\xd8A" + b"x" * 200)
+        self._post(b"\xff\xd8B" + b"y" * 200)
+        time.sleep(0.05)
+        assert not [m for m in self.broadcasts if m.get("type") == "motion"]
+
+    def test_undecodable_frame_returns_ok_without_motion(self, monkeypatch):
+        # decode seam returns None (no PIL / bad jpeg) → 200, motion False
+        import dashboard.motion as mo
+        monkeypatch.setattr(mo, "_decode", lambda data: None)
+        resp = self._post(b"\xff\xd8FAKE" + b"z" * 200)
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True and resp.json()["motion"] is False
+        time.sleep(0.05)
+        assert not [m for m in self.broadcasts if m.get("type") == "motion"]
+
+    def test_motion_detector_state_persists_across_posts(self, monkeypatch):
+        # same server instance keeps baseline → second post is comparable
+        self._feed_seam(monkeypatch,
+                        [self._flat(10), self._flat(240), self._flat(10)])
+        self._post(b"\xff\xd8A" + b"x" * 200)   # arms
+        r = self._post(b"\xff\xd8B" + b"y" * 200)  # change → motion
+        assert r.json()["motion"] is True
+        r3 = self._post(b"\xff\xd8C" + b"z" * 200)  # back, but cooldown
+        assert r3.json()["motion"] is False
+
+
+class TestMotionWiring:
+    """Source-level: server wires the detector, app.html renders it."""
+
+    def test_server_constructs_and_feeds_detector(self):
+        s = Path("dashboard/server.py").read_text(encoding="utf-8")
+        assert "MotionDetector()" in s
+        assert "self._motion.feed(data" in s
+        assert '"motion": bool(motion)' in s
+        assert "broadcast(motion, history=False)" in s
+
+    def test_app_html_handles_motion_type(self):
+        h = Path("dashboard/static/app.html").read_text(encoding="utf-8")
+        assert "m.type === 'motion'" in h
+        assert "_onMotion" in h
+        assert "Motion detected" in h

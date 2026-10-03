@@ -252,6 +252,7 @@
       if (m.type === 'file_received') _onFileReceived(m);
       if (m.type === 'activity')      _onActivity(m);
       if (m.type === 'frame')         _onFrame(m);
+      if (m.type === 'motion')        _onMotion(m);
     };
 
     // ── Screen mirror (PC → phone) ────────────────────────────────────────────
@@ -372,6 +373,17 @@
       const d = document.createElement('div');
       d.className = 'msg msg-sys'; d.textContent = text;
       feed.appendChild(d); feed.scrollTop = feed.scrollHeight;
+    }
+
+    // ── Camera motion alert (server-side frame diff, dashboard/motion.py) ──
+    let _motionLast = 0;
+    function _onMotion(m) {
+      // The server already rate-limits (cooldown 3 s); this second guard
+      // only covers overlapping broadcasts from reconnect replays.
+      const now = Date.now();
+      if (now - _motionLast < 1500) return;
+      _motionLast = now;
+      sys(`⚠️ Motion detected in camera view (score ${m.score})`);
     }
 
     function esc(s) {
