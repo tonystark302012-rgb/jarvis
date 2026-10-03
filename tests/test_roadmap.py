@@ -1484,3 +1484,146 @@ class TestRulesSelfHeal:
         assert not ok and "failed at step 2" in out
         r._note_health(rule, ok, out, 1_000_000.0)
         assert rule["id"] in r._HEALTH
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 3 — auto barge-in (EchoGuard sustained-evidence gate)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBargeIn:
+    SR = 16000
+
+    def _pcm(self, freq: float):
+        import numpy as np
+        n = 1024
+        t = np.arange(n) / self.SR
+        return (0.4 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+
+    @pytest.fixture(autouse=True)
+    def _guard(self):
+        from core.echo import EchoGuard
+        self.g = EchoGuard()
+        self.echo = self._pcm(500)      # what JARVIS "says"
+        self.user = self._pcm(4000)     # a different voice
+        self.t0 = 10_000.0
+        yield
+
+    def _warmup(self):
+        """16 echo blocks so the guard knows the room + passes warmup."""
+        self.g.note_output(self.echo, self.SR, 0.5, when=self.t0)
+        for i in range(16):
+            self.g.should_interrupt(self.echo, self.SR, 0.3,
+                                    when=self.t0 + 0.05 + i * 0.06)
+
+    def test_no_history_never_interrupts(self):
+        assert self.g.should_interrupt(self.user, self.SR, 0.3,
+                                       when=self.t0) is False
+
+    def test_echo_never_interrupts(self):
+        self._warmup()
+        for i in range(10):
+            r = self.g.should_interrupt(self.echo, self.SR, 0.3,
+                                        when=self.t0 + 1.0 + i * 0.04)
+            assert r is False, "our own echo must never cut us off"
+
+    def test_user_voice_needs_sustained_blocks(self):
+        self._warmup()
+        base = self.t0 + 1.25
+        self.g.note_output(self.echo, self.SR, 0.5, when=base)
+        fired = [self.g.should_interrupt(self.user, self.SR, 0.3,
+                                         when=base + i * 0.05)
+                 for i in range(6)]
+        req = self.g.required_blocks
+        # index req-1 is the req-th consecutive block → first True there
+        assert fired == [False] * (req - 1) + [True] * (6 - req + 1), \
+            (fired, req)
+
+    def test_single_cough_resets_evidence(self):
+        self._warmup()
+        base = self.t0 + 1.25
+        self.g.note_output(self.echo, self.SR, 0.5, when=base)
+        # 3 voice blocks (below threshold) …
+        for i in range(3):
+            self.g.should_interrupt(self.user, self.SR, 0.3,
+                                    when=base + i * 0.05)
+        # … one echo block between them (a cough-equivalent break) …
+        assert self.g.should_interrupt(self.echo, self.SR, 0.3,
+                                       when=base + 4 * 0.05) is False
+        # … restarts the count: first voice block after it does NOT fire
+        assert self.g.should_interrupt(self.user, self.SR, 0.3,
+                                       when=base + 5 * 0.05) is False
+
+    def test_note_interrupted_resets(self):
+        self._warmup()
+        base = self.t0 + 1.25
+        self.g.note_output(self.echo, self.SR, 0.5, when=base)
+        for i in range(self.g.required_blocks):
+            self.g.should_interrupt(self.user, self.SR, 0.3,
+                                    when=base + i * 0.05)
+        self.g.note_interrupted()
+        assert self.g._int_run == 0
+        assert self.g.should_interrupt(self.user, self.SR, 0.3,
+                                       when=base + 6 * 0.05) is False
+
+    def test_reset_clears_evidence_and_history(self):
+        self._warmup()
+        self.g.reset()
+        assert self.g._int_run == 0 and self.g._hist == []
+        assert self.g.should_interrupt(self.user, self.SR, 0.3,
+                                       when=self.t0) is False
+
+    def test_silence_never_counts(self):
+        self._warmup()
+        base = self.t0 + 1.25
+        self.g.note_output(self.echo, self.SR, 0.5, when=base)
+        for i in range(20):
+            assert self.g.should_interrupt(self.user, self.SR, 0.01,
+                                           when=base + i * 0.03) is False
+
+    def test_exception_returns_false(self):
+        # garbage inputs must never raise nor interrupt (audio thread!)
+        assert self.g.should_interrupt(None, 0, 0.3) is False
+
+    def test_config_flag_helpers(self, tmp_path, monkeypatch):
+        import memory.config_manager as cm
+        monkeypatch.setattr(cm, "CONFIG_FILE", tmp_path / "api_keys.json")
+        # default ON
+        assert cm.get_barge_in_enabled() is True
+        cm.save_barge_in_enabled(False)
+        assert cm.get_barge_in_enabled() is False
+        # other keys preserved
+        cm.save_api_keys("k" * 20)
+        assert cm.get_barge_in_enabled() is False
+        cm.save_barge_in_enabled(True)
+        data = json.loads((tmp_path / "api_keys.json").read_text())
+        assert data["gemini_api_key"] == "k" * 20
+        assert data["barge_in"] is True
+
+
+class TestBargeInMainWiring:
+    """Source-level: main.py wires EchoGuard.should_interrupt → interrupt()
+    behind the per-reply _barge_on cache (PyQt absent → no import tests)."""
+
+    def test_callback_classifies_and_interrupts(self):
+        i = SRC.index("if jarvis_speaking:")
+        block = SRC[i:i + 1600]
+        assert "should_interrupt" in block
+        assert "note_interrupted" in block
+        assert "self.interrupt()" in block
+        assert "audio callback must never raise" in block
+
+    def test_flag_cached_per_reply_not_per_block(self):
+        assert "self._barge_on" in SRC
+        i = SRC.index("def set_speaking")
+        block = SRC[i:i + 900]
+        assert "get_barge_in_enabled" in block, \
+            "flag must refresh in set_speaking, not read disk per audio block"
+        assert "never in the audio callback" in block
+
+    def test_default_state_on(self):
+        assert "self._barge_on             = True" in SRC
+
+    def test_default_state_on_init_line_present(self):
+        # constructed alongside EchoGuard
+        i = SRC.index("self._echo                 = EchoGuard()")
+        assert "self._barge_on" in SRC[i:i + 300]

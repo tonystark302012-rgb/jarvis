@@ -130,6 +130,7 @@ class EchoGuard:
         self._residuals: list[float] = []   # recent ECHO residuals only
         self._floor = 0.10        # typical echo residual here; learned
         self._run = 0             # consecutive blocks called speech
+        self._int_run = 0         # consecutive interrupt-evidence blocks
         self._head = 0.13         # near-worst echo residual here; learned
 
     # ── diagnostics, for the log and for tests ──────────────────────────────
@@ -177,6 +178,49 @@ class EchoGuard:
         """Playback stopped — drop the history, keep what was learned."""
         self._hist.clear()
         self._last_sim = 0.0
+        self._run = 0          # stale verdicts must not carry into a reply
+        self._int_run = 0
+
+    # ── barge-in: the sustained-evidence gate over is_user_speech ────────────
+
+    def should_interrupt(self, pcm, sr: int, level: float,
+                         when: float | None = None) -> bool:
+        """True when this mic block justifies cutting the reply short.
+
+        Three gates, in order — a single block is never enough:
+          1. we must know what we are playing (non-empty echo history) —
+             at the very start of a reply the playback path has not yet
+             called note_output(), and with no reference every ambient
+             sound would look like a voice;
+          2. the block must classify as the user, not our echo
+             (is_user_speech — content subtraction, not a level test);
+          3. `required_blocks` CONSECUTIVE verdicts must agree
+             (~320 ms in a clean room, ~770 ms in a noisy one), so a
+             cough, a door or one TV word cannot stop JARVIS.
+
+        The consecutive count is kept HERE rather than reading the
+        internal `_run`: is_user_speech has a "nothing in the window
+        explained it" fast path that returns True without touching
+        `_run`, and interrupt evidence must accumulate on every kind of
+        positive verdict, not only the learned one.
+        """
+        try:
+            if not self._hist:
+                self._int_run = 0
+                return False
+            if not self.is_user_speech(pcm, sr, level, when):
+                self._int_run = 0
+                return False
+            self._int_run += 1
+            return self._int_run >= self.required_blocks
+        except Exception:
+            self._int_run = 0
+            return False      # any doubt: do not interrupt
+
+    def note_interrupted(self) -> None:
+        """The reply was cut — start the next one's evidence count fresh."""
+        self._run = 0
+        self._int_run = 0
 
     # ── the two entry points ────────────────────────────────────────────────
 

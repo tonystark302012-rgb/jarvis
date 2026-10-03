@@ -562,6 +562,9 @@ class JarvisLive:
         self._ptt                  = None    # core.hotkey.PushToTalk
         self._out_level            = 0.0     # level of the audio being played right now
         self._echo                 = EchoGuard()
+        # Auto barge-in per-reply config cache — refreshed in
+        # set_speaking(True) so the audio callback never touches disk.
+        self._barge_on             = True
         # `stream.write()` returns when the buffer accepts the audio, not when the
         # speaker has finished with it, so sound is still in the room after the
         # speaking flag drops. Streaming the microphone during that gap is how an
@@ -958,6 +961,13 @@ class JarvisLive:
             self._is_speaking = value
         if value:
             self._tail_until = 0.0
+            # Refresh the barge-in flag once per reply (config read here,
+            # never in the audio callback).
+            try:
+                from memory.config_manager import get_barge_in_enabled
+                self._barge_on = get_barge_in_enabled()
+            except Exception:
+                self._barge_on = True
         else:
             # Hold the guard open across the device's own output latency plus a
             # margin for the room. The microphone is NOT muted during it — the
@@ -1531,12 +1541,24 @@ class JarvisLive:
             if jarvis_speaking:
                 # Nothing is streamed while JARVIS talks.
                 #
-                # Interrupting by voice used to live here: `EchoGuard` can pick a
-                # user out from under our own echo, and `core/echo.py` still does
-                # that for the tail below. Re-enabling is small — classify each
-                # block here and call interrupt() after `required_blocks` of
-                # agreement — but it depends on the listener's room, so it stays
-                # out until it can be tried on real hardware.
+                # Auto barge-in: classify the block with EchoGuard (content
+                # subtraction — survives our own echo) and interrupt() only
+                # after `required_blocks` of consecutive agreement, so a
+                # cough/TV word can't stop the reply. Gated by the
+                # "barge_in" config flag (default on, cached per reply in
+                # set_speaking — no disk reads in the audio callback);
+                # disabled → old behaviour (listen to the end). Any
+                # classifier doubt → no interrupt (should_interrupt's
+                # contract).
+                if self._barge_on:
+                    try:
+                        if self._echo.should_interrupt(
+                                indata, SEND_SAMPLE_RATE,
+                                _pcm_level(indata)):
+                            self._echo.note_interrupted()
+                            self.interrupt()
+                    except Exception:
+                        pass      # audio callback must never raise
                 return
 
             # ── Echo tail ────────────────────────────────────────────────────
