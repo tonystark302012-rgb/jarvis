@@ -263,7 +263,7 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 |---|---|
 | 🕐 **Mission Control** | Every tool call the session makes — time, arguments, duration, success/failure — lands on a live timeline. Ask `mission_control` for `timeline`, `stats` or `clear`, or open the dashboard's **🎮 Activity** tab |
 | 🧠 **Agentic Task Engine** | Give a goal ("clean my downloads folder"), a planner breaks it into tool calls, the orchestrator executes each step with stop-on-failure, retry and a written report. Steps dispatch through the same registry the model uses, so an agent can never reach a tool the session doesn't have |
-| 🤖 **Rules & Automation** | `when 18:00 → system_monitor`, `when report.pdf appears in ~/Downloads → file_processor`, `when I say "movie mode" → video_player` — time, file-event and phrase triggers that fire real actions |
+| 🤖 **Rules & Automation** | `when 18:00 → system_monitor`, `when report.pdf appears in ~/Downloads → file_processor`, `when I say "movie mode" → video_player`, USB plug/unplug triggers — time, file-event, phrase and device triggers that fire real actions, with self-healing retries. This IS JARVIS's scheduled-NL-automation layer ("every day at 8 say X" = a time rule), so a separate schedule engine would duplicate it |
 | 🎬 **Macro Recorder** | Record a screen macro, replay it later. Replay is gated behind `confirm=yes` and a 400-event safety cap |
 | 🔍 **Scanner upgrades** | Five new modes: `dupes` (MD5 duplicate finder), `treemap` (folder-size bars), `speed` (Cloudflare 10 MB speed test), `drives` (partitions), `startup` (autostart audit) |
 | 🪟 **Window Layouts** | `split` / `coding` / `stack` / `left` / `right` / `center` — pure geometry with xdotool, win32 and AppleScript backends |

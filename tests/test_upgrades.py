@@ -653,3 +653,61 @@ def test_all_first_party_modules_compile():
             except OSError:
                 pass
     assert not failures, "compile failures:\n" + "\n".join(failures)
+
+
+# ── Local-LLM exposure: Ollama must stay the DEFAULT stack ──────────────────
+# The upgrade roadmap asked for a local LLM stack AS DEFAULT. The code
+# already does this — these tests pin it so a future refactor can't
+# silently flip JARVIS back to a cloud-only toolchain.
+
+class TestLocalLLMDefaults:
+    def test_ollama_is_the_default_stack(self):
+        from core import llm_client as m
+        assert m._DEFAULTS["llm_provider"] == "ollama"
+        assert m._DEFAULTS["llm_url"] == "http://localhost:11434"
+        assert m._DEFAULTS["llm_model"] == "llama3.2"
+
+    def test_empty_config_resolves_to_local_defaults(self, tmp_path,
+                                                     monkeypatch):
+        import json
+        from core import llm_client as m
+        cfg = tmp_path / "api_keys.json"
+        cfg.write_text(json.dumps({}), encoding="utf-8")
+        monkeypatch.setattr(m, "CONFIG_PATH", cfg)
+        url, model = m.get_llm_settings()
+        assert url == "http://localhost:11434"
+        assert model == "llama3.2"
+        assert m.get_llm_provider() == "ollama"
+
+    @pytest.mark.parametrize("alias", ["lmstudio", "localai", "jan",
+                                       "llamacpp", "openai"])
+    def test_openai_compatible_aliases_normalize(self, tmp_path, monkeypatch,
+                                                 alias):
+        import json
+        from core import llm_client as m
+        cfg = tmp_path / "api_keys.json"
+        cfg.write_text(json.dumps({"llm_provider": alias}), encoding="utf-8")
+        monkeypatch.setattr(m, "CONFIG_PATH", cfg)
+        assert m.get_llm_provider() == "openai"
+
+    def test_unknown_provider_falls_back_to_ollama(self, tmp_path,
+                                                   monkeypatch):
+        import json
+        from core import llm_client as m
+        cfg = tmp_path / "api_keys.json"
+        cfg.write_text(json.dumps({"llm_provider": "wat"}),
+                       encoding="utf-8")
+        monkeypatch.setattr(m, "CONFIG_PATH", cfg)
+        assert m.get_llm_provider() == "ollama"
+
+    def test_user_override_is_respected(self, tmp_path, monkeypatch):
+        import json
+        from core import llm_client as m
+        cfg = tmp_path / "api_keys.json"
+        cfg.write_text(json.dumps({
+            "llm_url": "http://127.0.0.1:1234", "llm_model": "qwen2.5"}),
+            encoding="utf-8")
+        monkeypatch.setattr(m, "CONFIG_PATH", cfg)
+        url, model = m.get_llm_settings()
+        assert url == "http://127.0.0.1:1234"
+        assert model == "qwen2.5"
