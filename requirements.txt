@@ -63,7 +63,8 @@ qrcode[pil]>=7,<9
 google-api-python-client     # gmail_control, calendar_control — OAuth
 google-auth-oauthlib         # gmail_control, calendar_control — OAuth
 tinytuya                     # home_assistant — Tuya / Smart Life bulbs
-paho-mqtt                    # printer_control — MQTT printers
+paho-mqtt                    # printer_control — MQTT printers;
+                             # smart_home — HA/zigbee2mqtt/Tasmota pub-sub
 openpyxl                     # excel_writer — spreadsheet output
 youtube-transcript-api       # youtube_video — transcript fetch for summaries
 pygetwindow                  # game_updater, chat_takeover — window geometry

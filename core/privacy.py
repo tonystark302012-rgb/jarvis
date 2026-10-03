@@ -32,6 +32,8 @@ CLOUD_TOOLS = frozenset({
     "file_processor",    # image/document analysis branches
     "background_monitor",  # sends monitoring topics as searches
     "flight_finder",     # sends routes/dates
+    "smart_home",        # INTERNET brokers only — the handler re-allows
+                         # loopback/private-network targets itself
 })
 
 

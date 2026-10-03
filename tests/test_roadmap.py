@@ -102,7 +102,8 @@ class TestPrivacy:
         for path in ("actions/research.py", "actions/scrape.py",
                      "actions/web_search.py", "actions/phone_vision.py",
                      "actions/file_processor.py", "actions/flight_finder.py",
-                     "actions/background_monitor.py"):
+                     "actions/background_monitor.py",
+                     "actions/smart_home.py"):
             src = Path(path).read_text(encoding="utf-8")
             # gate call exists and precedes any network import in handler
             assert '_privacy.gate(' in src, path
@@ -2785,3 +2786,217 @@ class TestPresenceWiring:
         assert offenders == [], (
             f"handlers missing 'parameters' kwarg (breaks registry.run): "
             f"{offenders}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 3 — smart home (MQTT pub/sub/status, paho optional, LAN-only in privacy)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _FakeInfo:
+    def __init__(self, rc=0):
+        self.rc = rc
+
+    def wait_for_publish(self, timeout=None):
+        return None
+
+
+class _FakeMQTTClient:
+    """Duck-typed paho client: records calls, optionally fails connect,
+    optionally delivers one message on the first loop()."""
+
+    def __init__(self, fail_connect=False, pub_rc=0, deliver=None):
+        self.fail_connect = fail_connect
+        self.pub_rc = pub_rc
+        self.deliver = deliver
+        self.published = []
+        self.subscribed = []
+        self.connected = None
+        self.on_message = None
+        self._delivered = False
+        self.loop_starts = 0
+        self.loop_stops = 0
+        self.disconnected = False
+
+    def connect(self, host, port, keepalive=0):
+        self.connected = (host, port)
+        if self.fail_connect:
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+        return 0
+
+    def publish(self, topic, payload, qos=0, retain=False):
+        self.published.append((topic, payload, qos, retain))
+        return _FakeInfo(self.pub_rc)
+
+    def subscribe(self, topic, qos=0):
+        self.subscribed.append((topic, qos))
+        return (0, 1)
+
+    def loop(self, timeout=None):
+        if self.deliver and not self._delivered and self.on_message:
+            self._delivered = True
+            self.on_message(self, None, self.deliver)
+        else:
+            time.sleep(0.01)
+
+    def loop_start(self):
+        self.loop_starts += 1
+
+    def loop_stop(self):
+        self.loop_stops += 1
+
+    def disconnect(self):
+        self.disconnected = True
+
+    def username_pw_set(self, user, password=None):
+        self.auth = (user, password)
+
+
+class TestSmartHome:
+    @pytest.fixture(autouse=True)
+    def _fakes(self, monkeypatch):
+        import actions.smart_home as sh
+        import core.presence  # noqa: F401  (keep import order stable)
+        self.sh = sh
+        self.client = _FakeMQTTClient()
+        monkeypatch.setattr(sh, "_client_factory", lambda: self.client)
+        monkeypatch.setattr(
+            sh, "_settings",
+            lambda: {"host": "localhost", "port": 1883,
+                     "user": None, "password": None})
+        yield
+
+    def test_bare_call_returns_help(self):
+        out = self.sh.smart_home({}, None)
+        assert "MQTT cheat-sheet" in out
+        assert "zigbee2mqtt" in out
+
+    def test_publish_happy_path(self):
+        out = self.sh.smart_home(
+            {"action": "pub", "topic": "zigbee2mqtt/lamp/set",
+             "payload": '{"state":"ON"}'}, None)
+        assert "Published to 'zigbee2mqtt/lamp/set'" in out
+        assert self.client.published == [
+            ("zigbee2mqtt/lamp/set", '{"state":"ON"}', 0, False)]
+        assert self.client.connected == ("localhost", 1883)
+        assert self.client.disconnected is True
+        # network loop started AND stopped (no orphaned threads)
+        assert (self.client.loop_starts, self.client.loop_stops) == (1, 1)
+
+    def test_publish_state_shorthand_becomes_json(self):
+        out = self.sh.smart_home(
+            {"action": "pub", "topic": "t", "state": "ON",
+             "brightness": 200}, None)
+        assert "Published to 't'" in out
+        payload = self.client.published[0][1]
+        assert json.loads(payload) == {"state": "ON", "brightness": 200}
+
+    def test_publish_retain_qos_roundtrip(self):
+        self.sh.smart_home(
+            {"action": "pub", "topic": "t", "payload": "1",
+             "retain": "true", "qos": 2}, None)
+        assert self.client.published[0][2:] == (2, True)
+
+    def test_publish_needs_topic(self):
+        out = self.sh.smart_home({"action": "pub"}, None)
+        assert "needs a topic" in out
+        assert self.client.published == []
+
+    def test_publish_rc_failure_honest(self):
+        self.client.pub_rc = 1
+        out = self.sh.smart_home(
+            {"action": "pub", "topic": "t", "payload": "x"}, None)
+        assert "failed (rc=1)" in out
+
+    def test_broker_refused_maps_to_actionable_error(self):
+        self.client.fail_connect = True
+        out = self.sh.smart_home(
+            {"action": "pub", "topic": "t", "payload": "x"}, None)
+        assert "NOT reachable" in out
+        assert "mosquitto" in out
+
+    def test_status_reachable_and_refused(self):
+        out = self.sh.smart_home({"action": "status"}, None)
+        assert "REACHABLE" in out
+        self.client.fail_connect = True
+        out = self.sh.smart_home({"action": "status"}, None)
+        assert "NOT reachable" in out
+
+    def test_sub_collects_delivered_message(self):
+        class _Msg:
+            topic = "zigbee2mqtt/lamp"
+            payload = b'{"state":"ON"}'
+        out = self.sh.smart_home(
+            {"action": "sub", "topic": "zigbee2mqtt/#",
+             "timeout": 0.3}, None)
+        # deliver via fixture client configured below
+        assert "message" in out or "No messages" in out
+        # now with delivery
+        self.client.deliver = _Msg()
+        out = self.sh.smart_home(
+            {"action": "sub", "topic": "zigbee2mqtt/#",
+             "timeout": 0.5}, None)
+        assert "1 message(s)" in out
+        assert '"state":"ON"' in out
+        assert self.client.subscribed  # filter registered
+
+    def test_sub_timeout_no_messages(self):
+        out = self.sh.smart_home(
+            {"action": "sub", "topic": "none/#", "timeout": 0.15}, None)
+        assert "No messages" in out
+
+    def test_missing_paho_says_how_to_install(self, monkeypatch):
+        monkeypatch.setattr(self.sh, "_client_factory", lambda: None)
+        for act in ({"action": "pub", "topic": "t", "payload": "x"},
+                    {"action": "status"},
+                    {"action": "sub", "topic": "t"}):
+            out = self.sh.smart_home(act, None)
+            assert "pip install paho-mqtt" in out
+
+    def test_unknown_action_lists_options(self):
+        assert "pub | sub | status | help" in self.sh.smart_home(
+            {"action": "zzz"}, None)
+
+
+class TestSmartHomePrivacy:
+    """smart_home ∈ CLOUD_TOOLS, but the handler re-allows loopback/LAN
+    targets — only internet brokers are refused."""
+
+    @pytest.fixture(autouse=True)
+    def _fakes(self, monkeypatch):
+        import actions.smart_home as sh
+        import core.privacy as cp
+        self.sh, self.cp = sh, cp
+        self.client = _FakeMQTTClient()
+        monkeypatch.setattr(sh, "_client_factory", lambda: self.client)
+        cp.set(True)
+        yield
+        cp.set(False)
+
+    def test_remote_broker_blocked_when_privacy_on(self, monkeypatch):
+        monkeypatch.setattr(
+            self.sh, "_settings",
+            lambda: {"host": "mq.example.com", "port": 1883,
+                     "user": None, "password": None})
+        out = self.sh.smart_home(
+            {"action": "pub", "topic": "t", "payload": "x"}, None)
+        assert "Privacy mode is ON" in out
+        assert "loopback/private" in out
+        assert self.client.connected is None      # never touched the socket
+
+    def test_local_broker_allowed_when_privacy_on(self, monkeypatch):
+        out = self.sh.smart_home(
+            {"action": "pub", "topic": "t", "payload": "x"}, None)
+        assert "Published to 't'" in out
+
+    @pytest.mark.parametrize("host", [
+        "127.0.0.1", "localhost", "192.168.1.20", "10.0.0.5",
+        "172.16.9.9", "hass.local",
+    ])
+    def test_local_host_classification(self, host):
+        assert self.sh._is_local_host(host) is True
+
+    @pytest.mark.parametrize("host", [
+        "8.8.8.8", "broker.example.com", "172.32.0.1", "192.169.0.1",
+    ])
+    def test_remote_host_classification(self, host):
+        assert self.sh._is_local_host(host) is False
