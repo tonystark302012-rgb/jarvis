@@ -104,7 +104,8 @@ class TestPrivacy:
                      "actions/file_processor.py", "actions/flight_finder.py",
                      "actions/background_monitor.py",
                      "actions/smart_home.py",
-                     "actions/gui_agent.py"):
+                     "actions/gui_agent.py",
+                     "actions/world_view.py"):
             src = Path(path).read_text(encoding="utf-8")
             # gate call exists and precedes any network import in handler
             assert '_privacy.gate(' in src, path
@@ -4658,3 +4659,176 @@ class TestMCPHTTP:
         props = self.m.TOOL["parameters"]["properties"]
         assert "url" in props and "headers" in props
         assert "Streamable HTTP" in self.m.TOOL["description"]
+
+
+class TestWorldView:
+    """Batch 5h — satellite/map tiles from FREE sources (NASA GIBS / OSM)."""
+
+    @pytest.fixture(autouse=True)
+    def _f(self, monkeypatch, tmp_path):
+        import actions.world_view as wv
+        self.wv = wv
+        self.fetched: list[str] = []
+        self.composed: list = []
+        monkeypatch.setattr(wv, "_out_path",
+                            lambda mode: tmp_path / f"view-{mode}.png")
+        orig_compose, orig_fetch = wv._compose, wv._fetch
+        yield
+        wv._compose = orig_compose          # tests assign seams directly
+        wv._fetch = orig_fetch
+
+    def _fetch_map(self, respond):
+        """respond(url) -> bytes | None"""
+        def fake(url, timeout=15.0):
+            self.fetched.append(url)
+            return respond(url)
+        self.wv._fetch = fake
+        return fake
+
+    def _compose_ok(self, pieces, left, top, n):
+        self.composed.append(dict(pieces))
+        return b"\x89PNG-fake"
+
+    # -- math -----------------------------------------------------------
+    def test_tile_roundtrip(self):
+        x, y = self.wv.latlon_to_tile(0.0, 0.0, 0)
+        assert (x, y) == (0.5, 0.5)         # world tile centre
+        x, y = self.wv.latlon_to_tile(0.0, 0.0, 1)
+        assert (x, y) == (1.0, 1.0)
+        lat, lon = 26.9124, 75.7873
+        xt, yt = self.wv.latlon_to_tile(lat, lon, 11)
+        blat, blon = self.wv.tile_to_latlon(xt, yt, 11)
+        assert abs(blat - lat) < 1e-6 and abs(blon - lon) < 1e-6
+
+    def test_grid_clamps_at_world_edges(self):
+        left, top, n = self.wv._tile_grid(85.0, 179.9, 6, 1024)
+        assert n == 4
+        limit = 1 << 6
+        assert 0 <= left <= limit - n and 0 <= top <= limit - n
+        left2, top2, n2 = self.wv._tile_grid(-85.0, -179.9, 3, 256)
+        assert n2 == 1 and left2 >= 0 and top2 >= 0
+
+    def test_url_builders(self):
+        assert self.wv._map_tile_url(12, 456, 250) == \
+            "https://tile.openstreetmap.org/12/456/250.png"
+        u = self.wv._sat_tile_url("2026-10-03", 6, 10, 20)
+        assert "gibs.earthdata.nasa.gov" in u
+        assert "VIIRS_SNPP_CorrectedReflectance_TrueColor" in u
+        assert "/2026-10-03/GoogleMapsCompatible_Level8/6/20/10.jpeg" in u
+
+    def test_sat_dates_newest_first(self):
+        import datetime as dt
+        dates = self.wv._sat_dates(now=1_791_000_000)
+        assert len(dates) == self.wv._SAT_DATES_BACK
+        assert dates[0] > dates[-1]
+        dt.date.fromisoformat(dates[0])            # valid ISO
+
+    # -- handler --------------------------------------------------------
+    def test_missing_coordinates_honest(self):
+        out = self.wv.world_view({}, None)
+        assert "Give lat and lon" in out
+
+    def test_bad_inputs_rejected(self):
+        assert "mode must be" in self.wv.world_view(
+            {"mode": "hologram", "lat": 1, "lon": 1}, None)
+        assert "lat must be" in self.wv.world_view(
+            {"lat": 91, "lon": 0}, None)
+        assert "lon must be" in self.wv.world_view(
+            {"lat": 0, "lon": 181}, None)
+        assert "lat and lon" in self.wv.world_view(
+            {"lat": "abc", "lon": 0}, None)
+
+    def test_map_happy_path(self, tmp_path):
+        self._fetch_map(lambda u: b"tile")
+        self.wv._compose = self._compose_ok
+        player_calls = []
+
+        class P:
+            def show_content(self, t, b):
+                player_calls.append((t, b))
+
+        out = self.wv.world_view({"mode": "map", "lat": 26.91,
+                                  "lon": 75.79, "zoom": 12}, P())
+        assert "WORLD VIEW — map" in out and "Saved:" in out
+        assert "OpenStreetMap" in out
+        assert any("tile.openstreetmap.org/12/" in u for u in self.fetched)
+        assert player_calls and player_calls[0][0].startswith("WORLD VIEW")
+        saved = tmp_path / "view-map.png"
+        assert saved.read_bytes() == b"\x89PNG-fake"
+
+    def test_satellite_walks_back_for_granule(self):
+        today = self.wv._sat_dates()[0]
+
+        def respond(url):
+            if f"/{today}/" in url:
+                return None                     # today's granule not ready
+            return b"jpg"
+
+        self._fetch_map(respond)
+        self.wv._compose = self._compose_ok
+        out = self.wv.world_view({"mode": "satellite", "lat": 0.0,
+                                  "lon": 0.0}, None)
+        assert f"granule {self.wv._sat_dates()[1]}" in out
+        assert "NASA EOSDIS GIBS" in out
+
+    def test_satellite_no_granules_at_all(self):
+        self._fetch_map(lambda u: None)
+        out = self.wv.world_view({"mode": "satellite", "lat": 0.0,
+                                  "lon": 0.0}, None)
+        assert "No satellite tiles" in out and "mode=map" in out
+
+    def test_zero_tiles_honest(self):
+        self._fetch_map(lambda u: None)
+        out = self.wv.world_view({"mode": "map", "lat": 10.0, "lon": 10.0},
+                                 None)
+        assert "Couldn't fetch a single tile" in out
+
+    def test_partial_grid_reported(self):
+        state = {"n": 0}
+
+        def respond(url):
+            state["n"] += 1
+            return b"tile" if state["n"] % 4 == 1 else None
+
+        self._fetch_map(respond)
+        self.wv._compose = self._compose_ok
+        out = self.wv.world_view({"mode": "map", "lat": 20.0, "lon": 20.0,
+                                  "zoom": 5, "size": 512}, None)
+        assert "tile(s) missing" in out
+
+    def test_zoom_clamped_per_mode(self):
+        self._fetch_map(lambda u: b"t")
+        self.wv._compose = self._compose_ok
+        self.wv.world_view({"mode": "satellite", "lat": 0, "lon": 0,
+                            "zoom": 15}, None)
+        assert any("/8/" in u for u in self.fetched)      # GIBS ceiling
+        self.fetched.clear()
+        self.wv.world_view({"mode": "map", "lat": 0, "lon": 0,
+                            "zoom": 99}, None)
+        assert any("/19/" in u for u in self.fetched)     # OSM ceiling
+
+    def test_pillow_absent_is_honest(self):
+        # real _compose: sandbox has no Pillow → instruction, not a crash
+        self._fetch_map(lambda u: b"tile")
+        out = self.wv.world_view({"mode": "map", "lat": 1.0, "lon": 1.0},
+                                 None)
+        assert "pip install pillow" in out
+
+    def test_privacy_blocks_before_fetch(self):
+        import core.privacy as cp
+        cp.set(True)
+        try:
+            out = self.wv.world_view({"mode": "map", "lat": 1, "lon": 2},
+                                     None)
+        finally:
+            cp.set(False)
+        assert "Privacy mode is ON" in out
+        assert self.fetched == []                 # zero coordinates leaked
+
+    def test_registers_and_schema(self):
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions"))
+        assert "world_view" in reg.names()
+        props = self.wv.TOOL["parameters"]["properties"]
+        assert self.wv.TOOL["parameters"]["required"] == ["lat", "lon"]
+        assert props["mode"]["description"].startswith("satellite")

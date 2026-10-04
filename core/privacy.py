@@ -35,6 +35,7 @@ CLOUD_TOOLS = frozenset({
     "smart_home",        # INTERNET brokers only — the handler re-allows
                          # loopback/private-network targets itself
     "gui_agent",         # screenshots leave the machine for decisions
+    "world_view",        # your coordinates go to the public tile servers
 })
 
 
