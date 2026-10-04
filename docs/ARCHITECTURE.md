@@ -1,6 +1,13 @@
 # JARVIS — Agent Architecture (HLD + LLD)
 
 > Status: living design document for the "voice assistant → AI agent" transition.
+> **Delivery (batch 4, all shipped on `arena/01a101af-jarvis`):**
+> 0 architecture (this doc) + 1 replan brain + 2 cooperative cancel + 3 autonomy
+> modes = `833c8cf`; 4 MCP native flatten = `2ed0624`; 5 GUI agent (§2.5,
+> T13–T16 green) = `a870a21`; 6 self-mining rules suggest (§2.6, T17–T18 green)
+> = `5eb257b`. Gates at final: **618/618**, ruff clean, 48 actions discovered.
+> Still open (§4 backlog): satellite view, MCP Streamable HTTP, virtual screen
+> mirror, VLM provider docs, stale-run sweep, interval triggers.
 > Everything here maps to real code paths (file:line cited where it matters).
 > Nothing in this document is a prototype: each subsystem ships implemented
 > and tested in the same change that introduces it.
@@ -377,7 +384,7 @@ stale patterns (7-day window on history queries).
 | T17 | suggest on empty history/runs | "no patterns yet" — no fake proposals | unit |
 | T18 | suggest thresholds not met (2 asks) | nothing proposed | unit |
 | T19 | parallel gather: cancel during run | flag honoured at next boundary | unit (fake runner sleeps steps) |
-| T20 | registry invariant | every handler still accepts `parameters` kwarg; 46→47 tools discover | existing suite |
+| T20 | registry invariant | every handler still accepts `parameters` kwarg; 46→47→48 tools discover | existing suite |
 
 ---
 
