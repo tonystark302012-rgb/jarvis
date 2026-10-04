@@ -1,31 +1,55 @@
-# DOT PLATFORM — self-hosted specialist-agent workspace
+# DOTS INSIDE JARVIS — specialist agents + workspace, integrated
 
-> Status: authoritative design for the "Dots" self-hosted AI agent product
-> built INSIDE this repo (package `dots/`), reusing JARVIS's free core.
-> Companion to `docs/ARCHITECTURE.md` (desktop assistant) — that document
-> stays the spec for the PyQt app; this one governs the web platform.
-> Rule zero: **every component is free/self-hosted** (see mapping table).
+> Status: authoritative design for bringing the "Dots" feature set INTO
+> JARVIS — turning the Python voice assistant into a real-life agent.
+> **There is no separate Dots product**: `dots/` is an internal engine
+> package (like `dashboard/`), `actions/dots.py` + `actions/pages.py` are
+> the voice/tool surface, the dashboard (JARVIS's one web server, one
+> login) serves the workspace routes. Rule zero: **every component is
+> free/self-hosted** (mapping table below).
+> 
+> Supersedes the earlier standalone framing (batch 6a's storage/blocks/
+> approval engine is unchanged — only the surfaces moved into JARVIS).
 
 ---
 
-## 0. What the product is
+## 0. What lands inside JARVIS
 
-A self-hosted web app where a user runs several specialist AI agents
-("**Dots**"), each with its own name, role instructions, permissions and
-conversation history. Dots work inside a **Notion-like document workspace**
-(Spaces → Pages, nested, visual editor, autosave + revisions), propose
-edits that a human **approves or declines** (human-in-the-loop), can get an
-**isolated persistent computer** (browser/files/shell with audit log and
-human takeover), do **web research** with cited sources, run
-**background/scheduled jobs**, keep shared **preferences (memory)**,
-**learn reusable skills from conversations** (human publishes — never
-auto), integrate with **Slack**, and talk on a **voice call** with
-captions while a background compute agent works.
+JARVIS (voice assistant) gains, as native capabilities:
 
-Coexistence: `python -m dots` serves the platform; JARVIS desktop keeps
-running unchanged. Shared: `config/api_keys.json` (keys), the free LLM
-clients (`core/gemini.py`, `core/llm_client.py`), search/scrape code, sqlite
-patterns, FastAPI/uvicorn deps already in `requirements.txt`.
+1. **Specialist Dots** — persistent personas with own name, role
+   instructions, permissions and SEPARATE conversations, created and
+   talked to BY VOICE (`dots action=chat dot=Researcher …`).
+2. **Spaces & Pages** — Notion-like workspace (nested pages, markdown +
+   block JSON, autosave, honest revisions, history) reachable by voice
+   (`pages action=…`) and served by the JARVIS dashboard for the
+   visual editor + slash commands (UI batch).
+3. **Human-in-the-loop review** — Dot edits arrive as proposals;
+   approve/decline by voice (`dots action=approve`) or dashboard card.
+   Stale proposals never overwrite (T3).
+4. **Dot Computers** — per-Dot isolated persistent workspace with
+   browser/files/shell, audit log, human takeover — built on JARVIS's
+   existing sandbox/computer/browser stacks behind per-Dot permission
+   gates (not a second computer stack).
+5. **Web research** — Dot-permitted use of JARVIS's EXISTING
+   `research`/`web_search`/`scrape` engines (parallel DDG, public page
+   reader, cited sources) — duplicate-check: never rebuilt.
+6. **Voice calls** — JARVIS IS the voice assistant (Gemini Live);
+   call sessions add captions/timer/transcript + a background compute
+   agent bound to the call.
+7. **Slack** — mention → JARVIS Dot thread, workspace/user allowlists.
+8. **Background/scheduled tasks** — recurring instructions on the
+   server with pause/retry/cancel and a 90 s run cap, layered on
+   JARVIS's scheduler patterns.
+9. **Memory** — Dot-readable preferences with per-Dot allowlists,
+   editable by the owner (alongside JARVIS's existing long-term memory).
+10. **Automatic learning** — conversations mine reusable skill drafts;
+    the owner publishes them (never auto-approved).
+
+Reuse-first (duplicate-check done): research engines, browser control,
+sandboxed terminal, rules/taskstore scheduling, Gemini voice, memory,
+dashboard auth — all exist in JARVIS; Dots ADD permissions, proposals,
+persistence and the workspace around them.
 
 ---
 
@@ -46,10 +70,12 @@ patterns, FastAPI/uvicorn deps already in `requirements.txt`.
 ## 2. High-Level Architecture
 
 ```
-Browser (dots/static SPA: spaces tree, block editor + /, approvals,
-         call UI)
-   │  fetch/JSON (same-origin)
-API layer — dots/server.py (FastAPI): routes, validation, approval gates
+Voice / model tools — actions/dots.py, actions/pages.py (registry)
+Browser (JARVIS dashboard UI: spaces tree, block editor + /, approval
+         cards, call panel — UI batch)
+   │  fetch/JSON (same origin, dashboard bearer auth)
+API layer — dots/server.py (APIRouter) MOUNTED INTO
+         dashboard/server.py `_build_app`: routes, approval gates
    │
    ├─ Brain      dots/brain.py  — dot conversation loop: role+memory+page
    │               context → LLM tool-calls → permission gate → tools →
@@ -225,12 +251,13 @@ Loop (bounded, max 8 tool rounds): build messages =
 * Background compute agent during call = a task bound to the call's dot
   (scheduler machinery reused), shown in the call panel with live timer.
 
-### 3.11 Auth (v1 scope)
+### 3.11 Auth
 
-Self-hosted LAN product: v1 binds `127.0.0.1` by default; `--host` flag
-opens it up and TRIGGERS a required access PIN (config `dots_pin`,
-session cookie). Slack allowlist and approval gates protect agent writes;
-PIN protects the owner surface. Documented, tested (T10).
+No new auth system: dots routes are `include_router`-ed with a
+dependency running the dashboard's existing bearer-token `_auth`
+(one login, one token store). Voice/tool access goes through JARVIS's
+session (model tools are owner-directed). Slack allowlist + approval
+gates protect agent writes (T10).
 
 ---
 
@@ -271,13 +298,16 @@ PIN protects the owner surface. Documented, tested (T10).
 
 ## 6. Build batches (in order)
 
-* **6a** storage + blocks + pages/revisions/approvals + memory API + dot/
-  space CRUD (+ minimal page/dot chat with injectable brain seam)
-* **6b** brain tool-loop + spaces tools (list/read/create/edit) + research
-  tools (parallel DDG + public page reader + sources)
-* **6c** Dot Computers (jail, browser/files/exec, audit, takeover,
-  persistence, permissions)
-* **6d** scheduler (90 s runs, pause/retry/cancel) + skills learning loop
-* **6e** Slack integration + voice-call session/captions (phase 1)
-* **6f** web UI (spaces tree, block editor + slash, approvals panel,
-  computer panel, call UI) + auth PIN
+* **6a** ✅ engine (storage, blocks, revisions, approvals, memory,
+  conversations) + JARVIS integration: `dots/` → APIRouter mounted in
+  the dashboard (auth-riding), `actions/dots.py` + `actions/pages.py`
+  voice surface, standalone entry REMOVED
+* **6b** Dot brain tool-loop (permission-gated) + research tools wired
+  to JARVIS's existing engines + sources on saved pages
+* **6c** Dot Computers on JARVIS's sandbox/browser stacks (jail,
+  browser/files/exec, audit, takeover, persistence, permissions)
+* **6d** scheduler (90 s runs, pause/retry/cancel, JARVIS patterns) +
+  skills learning loop (draft → owner publish)
+* **6e** Slack integration + voice-call session/captions (Gemini Live)
+* **6f** dashboard UI (spaces tree, block editor + slash, approval
+  cards, computer panel, call UI)

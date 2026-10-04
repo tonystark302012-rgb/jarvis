@@ -1054,6 +1054,21 @@ class DashboardServer:
             finally:
                 self._clients.discard(websocket)
 
+        # ── Dots workspace (specialist agents, pages, approvals, memory)
+        # mounted on THIS app: one server, one login, one origin — the
+        # routes ride the same bearer-token auth as the rest of the API.
+        try:
+            from fastapi import Depends, HTTPException as _HE
+            from dots.server import router as _dots_router
+
+            def _dots_auth(req: Request) -> None:
+                if not _auth(req):
+                    raise _HE(status_code=401, detail="Not authenticated")
+
+            app.include_router(_dots_router, dependencies=[Depends(_dots_auth)])
+        except Exception as _e:
+            print(f"[Dots] routes disabled: {_e}")
+
         return app
 
     # ── serve ─────────────────────────────────────────────────────────────

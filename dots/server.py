@@ -1,24 +1,28 @@
 # dots/server.py
-"""FastAPI surface for the Dots platform (batch 6a: dots, spaces, pages,
-revisions, approvals, memory, conversations). Same deps as the JARVIS
-dashboard — no new packages.
+"""Dots routes — an APIRouter mounted INTO the JARVIS dashboard app
+(dashboard/server.py `_build_app`), so the workspace shares JARVIS's
+one server, one login, one origin. NOT a standalone product: there is
+no `python -m dots`.
+
+Covers dots, spaces, pages, revisions, approvals, conversations and
+memory. The dashboard applies its bearer-token auth as an include
+dependency; tests mount the router on a bare FastAPI.
 """
 from __future__ import annotations
 
-
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import JSONResponse
 
 from . import brain, store
 
-app = FastAPI(docs_url="/api/docs", redoc_url=None)
+router = APIRouter()
 
 
 def _err(status: int, msg: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": msg})
 
 
-@app.get("/api/health")
+@router.get("/api/health")
 def health() -> dict:
     from . import db
     db._conn()
@@ -27,12 +31,12 @@ def health() -> dict:
 
 # ── dots ─────────────────────────────────────────────────────────────────────
 
-@app.get("/api/dots")
+@router.get("/api/dots")
 def api_list_dots() -> list[dict]:
     return store.list_dots()
 
 
-@app.post("/api/dots", status_code=201)
+@router.post("/api/dots", status_code=201)
 def api_create_dot(payload: dict = Body(...)) -> dict:
     try:
         return store.create_dot(payload.get("name"),
@@ -45,7 +49,7 @@ def api_create_dot(payload: dict = Body(...)) -> dict:
         raise HTTPException(400, str(e))
 
 
-@app.get("/api/dots/{dot_id}")
+@router.get("/api/dots/{dot_id}")
 def api_get_dot(dot_id: int) -> dict:
     d = store.get_dot(dot_id)
     if d is None:
@@ -53,7 +57,7 @@ def api_get_dot(dot_id: int) -> dict:
     return d
 
 
-@app.patch("/api/dots/{dot_id}")
+@router.patch("/api/dots/{dot_id}")
 def api_update_dot(dot_id: int, payload: dict = Body(...)) -> dict:
     try:
         return store.update_dot(dot_id, name=payload.get("name"),
@@ -65,7 +69,7 @@ def api_update_dot(dot_id: int, payload: dict = Body(...)) -> dict:
         raise HTTPException(400, str(e))
 
 
-@app.delete("/api/dots/{dot_id}")
+@router.delete("/api/dots/{dot_id}")
 def api_delete_dot(dot_id: int) -> dict:
     if not store.delete_dot(dot_id):
         raise HTTPException(404, f"no dot #{dot_id}")
@@ -74,12 +78,12 @@ def api_delete_dot(dot_id: int) -> dict:
 
 # ── spaces ───────────────────────────────────────────────────────────────────
 
-@app.get("/api/spaces")
+@router.get("/api/spaces")
 def api_list_spaces() -> list[dict]:
     return store.list_spaces()
 
 
-@app.post("/api/spaces", status_code=201)
+@router.post("/api/spaces", status_code=201)
 def api_create_space(payload: dict = Body(...)) -> dict:
     try:
         return store.create_space(payload.get("name"))
@@ -87,14 +91,14 @@ def api_create_space(payload: dict = Body(...)) -> dict:
         raise HTTPException(400, str(e))
 
 
-@app.get("/api/spaces/{space_id}/pages")
+@router.get("/api/spaces/{space_id}/pages")
 def api_list_pages(space_id: int) -> list[dict]:
     if store.get_space(space_id) is None:
         raise HTTPException(404, f"no space #{space_id}")
     return store.list_pages(space_id)
 
 
-@app.post("/api/spaces/{space_id}/pages", status_code=201)
+@router.post("/api/spaces/{space_id}/pages", status_code=201)
 def api_owner_create_page(space_id: int,
                           payload: dict = Body(...)) -> dict:
     page, err = store.owner_create_page(
@@ -109,7 +113,7 @@ def api_owner_create_page(space_id: int,
 
 # ── pages: read, owner save with revision check, revisions ───────────────────
 
-@app.get("/api/pages/{page_id}")
+@router.get("/api/pages/{page_id}")
 def api_get_page(page_id: int) -> dict:
     p = store.get_page(page_id)
     if p is None:
@@ -117,7 +121,7 @@ def api_get_page(page_id: int) -> dict:
     return p
 
 
-@app.patch("/api/pages/{page_id}")
+@router.patch("/api/pages/{page_id}")
 def api_save_page(page_id: int, payload: dict = Body(...)) -> dict:
     page, conflict = store.owner_save_page(
         page_id, payload.get("base_rev"),
@@ -130,14 +134,14 @@ def api_save_page(page_id: int, payload: dict = Body(...)) -> dict:
     return page
 
 
-@app.get("/api/pages/{page_id}/revisions")
+@router.get("/api/pages/{page_id}/revisions")
 def api_revisions(page_id: int) -> list[dict]:
     if store.get_page(page_id) is None:
         raise HTTPException(404, f"no page #{page_id}")
     return store.list_revisions(page_id)
 
 
-@app.get("/api/pages/{page_id}/revisions/{rev}")
+@router.get("/api/pages/{page_id}/revisions/{rev}")
 def api_revision(page_id: int, rev: int) -> dict:
     r = store.get_revision(page_id, rev)
     if r is None:
@@ -147,12 +151,12 @@ def api_revision(page_id: int, rev: int) -> dict:
 
 # ── conversations: per-dot and per-page (separate by construction) ──────────
 
-@app.get("/api/conversations/{convo_key:path}/messages")
+@router.get("/api/conversations/{convo_key:path}/messages")
 def api_list_messages(convo_key: str, limit: int = 50) -> list[dict]:
     return store.list_messages(convo_key, limit=limit)
 
 
-@app.post("/api/conversations/{convo_key:path}/messages", status_code=201)
+@router.post("/api/conversations/{convo_key:path}/messages", status_code=201)
 def api_post_message(convo_key: str, payload: dict = Body(...)) -> dict:
     text = str(payload.get("content") or "").strip()
     if not text:
@@ -180,12 +184,12 @@ def api_post_message(convo_key: str, payload: dict = Body(...)) -> dict:
 
 # ── approvals (human-in-the-loop review cards) ──────────────────────────────
 
-@app.get("/api/pending")
+@router.get("/api/pending")
 def api_pending(status: str = "pending") -> list[dict]:
     return store.list_pending(status)
 
 
-@app.post("/api/pending/{pid}/approve")
+@router.post("/api/pending/{pid}/approve")
 def api_approve(pid: int) -> dict:
     out = store.approve_pending(pid)
     if "error" in out:
@@ -196,7 +200,7 @@ def api_approve(pid: int) -> dict:
     return out
 
 
-@app.post("/api/pending/{pid}/decline")
+@router.post("/api/pending/{pid}/decline")
 def api_decline(pid: int) -> dict:
     out = store.decline_pending(pid)
     if "error" in out:
@@ -206,12 +210,12 @@ def api_decline(pid: int) -> dict:
 
 # ── memory (preferences) ─────────────────────────────────────────────────────
 
-@app.get("/api/memory")
+@router.get("/api/memory")
 def api_memory() -> list[dict]:
     return store.list_prefs()
 
 
-@app.put("/api/memory")
+@router.put("/api/memory")
 def api_memory_set(payload: dict = Body(...)) -> dict:
     try:
         return store.set_pref(payload.get("key"), payload.get("value"),
@@ -220,7 +224,7 @@ def api_memory_set(payload: dict = Body(...)) -> dict:
         raise HTTPException(400, str(e))
 
 
-@app.delete("/api/memory/{pref_id}")
+@router.delete("/api/memory/{pref_id}")
 def api_memory_delete(pref_id: int) -> dict:
     if not store.delete_pref(pref_id):
         raise HTTPException(404, f"no preference #{pref_id}")

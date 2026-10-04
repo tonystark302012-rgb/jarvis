@@ -1,6 +1,7 @@
 # tests/test_dots.py — Dots platform (self-hosted agent workspace)
 # Batch 6a: storage, blocks, revisions, approvals, memory, conversations.
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,8 +16,11 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "_db_path", lambda: tmp_path / "dots.db")
     db.reset_for_tests()
 
+    from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from dots.server import app
+    from dots.server import router
+    app = FastAPI()
+    app.include_router(router)
     client = TestClient(app)
 
     brain.set_llm(lambda system, hist: f"scripted reply to: {hist[-1]['content']}")
@@ -391,3 +395,141 @@ class TestPlumbing:
         bad = c.post(f"/api/spaces/{parent['space_id']}/pages",
                      json={"title": "X", "parent_id": 999})
         assert bad.status_code == 400
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# JARVIS integration: voice/tools surface + dashboard mount + no-standalone
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestJARVISIntegration:
+    @pytest.fixture(autouse=True)
+    def _f(self, env):
+        self.env = env
+        from actions import dots as dots_action
+        from actions import pages as pages_action
+        self.da, self.pa = dots_action, pages_action
+
+    def _call(self, handler, **params):
+        return handler(parameters=params, player=None)
+
+    def test_both_actions_discoverable(self):
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions"))
+        assert "dots" in reg.names() and "pages" in reg.names()
+        assert self.da.TOOL["handler"] is self.da.dots
+        assert self.pa.TOOL["handler"] is self.pa.pages
+        assert self.da.TOOL["parameters"]["type"] == "OBJECT"
+
+    def test_dots_action_lifecycle_and_voice_chat(self):
+        out = self._call(self.da.dots, action="dot_create",
+                         name="Researcher", role="cite every source")
+        assert "created" in out and "#1" in out
+        listing = self._call(self.da.dots, action="dot_list")
+        assert "Researcher" in listing and "cite every source" in listing
+        dup = self._call(self.da.dots, action="dot_create",
+                         name="researcher")
+        assert "already exists" in dup
+        reply = self._call(self.da.dots, action="chat", dot="Researcher",
+                           message="summarise topic X")
+        assert reply.startswith("scripted reply")
+        from dots import store
+        msgs = store.list_messages("dot:1")
+        assert [m["role"] for m in msgs] == ["user", "dot"]
+
+    def test_dots_chat_unknown_is_honest(self):
+        out = self._call(self.da.dots, action="chat", dot="Nobody",
+                         message="hi")
+        assert "No Dot named" in out
+
+    def test_voice_approve_and_stale_refusal(self):
+        from dots import store
+        self._call(self.pa.pages, action="space_create", name="Research")
+        self._call(self.pa.pages, action="page_create", space="Research",
+                   title="Topic X", content="v1")
+        dot = store.create_dot("Writer")
+        p = store.list_pages(store.list_spaces()[0]["id"])[0]
+        pend = store.propose_edit(dot["id"], p["id"], base_rev=p["rev"],
+                                  content_md="dot draft v2")
+        listed = self._call(self.da.dots, action="pending_list")
+        assert f"#{pend['id']}" in listed and "Writer" in listed
+        ok = self._call(self.da.dots, action="approve",
+                        which=str(pend["id"]))
+        assert "Approved" in ok and "rev 2" in ok
+        page = store.get_page(p["id"])
+        assert page["content_md"] == "dot draft v2"
+        pend2 = store.propose_edit(dot["id"], p["id"],
+                                   base_rev=page["rev"],
+                                   content_md="next draft")
+        self._call(self.pa.pages, action="page_save", page="Topic X",
+                   content="owner moved to rev 3")
+        stale = self._call(self.da.dots, action="approve",
+                           which=str(pend2["id"]))
+        assert "NOT saved" in stale and "re-propose" in stale
+        assert store.get_page(p["id"])["content_md"] == \
+            "owner moved to rev 3"
+
+    def test_dots_memory_actions(self):
+        out = self._call(self.da.dots, action="memory_set", key="language",
+                         value="Hinglish")
+        assert "Saved" in out
+        assert "language = Hinglish" in self._call(
+            self.da.dots, action="memory_list")
+        out = self._call(self.da.dots, action="memory_delete",
+                         which="language")
+        assert "Deleted" in out
+        assert "No preferences" in self._call(self.da.dots,
+                                              action="memory_list")
+
+    def test_pages_voice_owner_flow(self):
+        self._call(self.pa.pages, action="space_create", name="Notes")
+        created = self._call(self.pa.pages, action="page_create",
+                             space="Notes", title="Daily",
+                             content="- morning\n- evening")
+        assert "created" in created
+        shown = self._call(self.pa.pages, action="page_show", page="Daily")
+        assert "morning" in shown and "rev 1" in shown
+        saved = self._call(self.pa.pages, action="page_save", page="Daily",
+                           content="- updated")
+        assert "rev 2" in saved
+        revs = self._call(self.pa.pages, action="revisions", page="Daily")
+        assert "rev 2" in revs and "rev 1" in revs
+        from dots import store
+        p = store.list_pages(store.list_spaces()[0]["id"])[0]
+        stale = self._call(self.pa.pages, action="page_save",
+                           page="Daily", content="clobber", base_rev=1)
+        assert "CONFLICT" in stale and "nothing was overwritten" in stale
+        assert store.get_page(p["id"])["content_md"] == "- updated"
+
+    def test_pages_chat_is_page_scoped(self):
+        from dots import store
+        store.create_dot("Writer")
+        self._call(self.pa.pages, action="space_create", name="S")
+        self._call(self.pa.pages, action="page_create", space="S",
+                   title="Doc", content="body")
+        out = self._call(self.pa.pages, action="chat", page="Doc",
+                         dot="Writer", message="improve this")
+        assert out.startswith("scripted reply")
+        assert store.list_messages("page:1")
+        assert store.list_messages("dot:1") == []
+
+    def test_unknown_actions_are_honest(self):
+        assert "Unknown dots action" in self._call(self.da.dots,
+                                                   action="launch")
+        assert "Unknown pages action" in self._call(self.pa.pages,
+                                                    action="launch")
+
+    def test_dashboard_mounts_router_with_auth(self):
+        src = Path("dashboard/server.py").read_text(encoding="utf-8")
+        assert "from dots.server import router" in src
+        assert "app.include_router(_dots_router" in src
+        assert "_dots_auth" in src and "401" in src
+
+    def test_no_standalone_product_surface(self):
+        assert not Path("dots/__main__.py").exists()
+        import dots.server as dsrv
+        assert hasattr(dsrv, "router")
+        assert not hasattr(dsrv, "app")            # no standalone app
+        assert "no `python -m dots`" in dsrv.__doc__
+        doc = Path("docs/DOT_PLATFORM.md").read_text(encoding="utf-8")
+        assert "no separate Dots product" in doc
+        assert "actions/dots.py" in doc
