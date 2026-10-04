@@ -303,6 +303,17 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 | 🏠 **Smart Home (MQTT)** | `smart_home pub/sub/status` against Home Assistant, zigbee2mqtt, Tasmota, ESPHome — internet brokers blocked under privacy |
 | 🌲 **Code Outline** | `code_outline file=…` — tree-sitter AST symbols with line numbers and nesting; stdlib `ast` for .py, labelled approximate scan elsewhere |
 | 🤖 **Local LLM by Default** | Ollama + llama3.2 on localhost:11434 out of the box; LM Studio / LocalAI / Jan aliases normalize to the OpenAI-compatible path |
+| 🧠 **Replanning Brain** | The planner asks before it guesses (ambiguous goals → one clarifying question, nothing runs) and re-plans up to twice when a step fails — bounded, same-plan loops detected and stopped, everything auditable in the report |
+| 🛑 **Voice Cancel** | "Stop the task" mid-run: cooperative cancellation at the next step boundary, status `cancelled`, plan + finished steps kept — `task_agent action=resume` picks up where it stopped |
+| 🕹 **Autonomy Modes** | `observe` (mutating tools refuse — watch only) · `ask` (confirm per action) · `auto` (confirmed actions enhance themselves), with TTL so auto forgets itself; `shutdown`, `send_message`, vault and macro stay manual in every mode |
+| 🔌 **MCP Native Tools** | Every tool on every configured MCP server appears as a first-class `mcp__server__tool` in the session — no JSON round trip, TTL-cached declarations, dead servers simply absent, sanitised names with collision suffixes |
+| 🌐 **MCP over Streamable HTTP** | The second standard MCP transport (spec 2025-11-25): `mcp action=add name=x url=…` with auth headers — SSE or JSON answers, session-id echo, transparent re-init on 404, DELETE on close |
+| 🖱 **GUI Agent** | "Enable dark mode for me" → screenshots, decides the next click/type/scroll (preview first, acts only when allowed), verifies after every step, detects stuck loops, respects privacy and cancel; `gui_provider=ollama` runs the vision brain fully local |
+| 🪞 **Self-Improving Rules** | `rules action=suggest` mines your own history and task runs for repeats (3+ days / hour-clustered runs) and hands you the exact `rules add` line — it never installs anything itself |
+| ⏳ **Interval Triggers** | `when every 2h → …` joins time/file/phrase/USB triggers; anchored on disk so restarts don't reset the clock, rejected up-front if the value isn't `30m/2h/1d/1w` |
+| 🔄 **Crash Recovery** | A run interrupted by a kill/kill-switch is swept at boot into resumable `cancelled` — plan and completed steps intact, one honest console line, `resume` continues |
+| 📜 **Recency-Weighted Recall** | History search re-ranks FTS results by relevance × freshness — a fresh equal answer wins, a strong old answer still beats a weak fresh one |
+| 🛰 **World View** | Satellite (NASA GIBS VIIRS true colour — free, no key) or street map (OpenStreetMap) of any lat/lon, stitched to a PNG on the HUD; the mirror tool toggles the phone's live PC view by voice |
 
 ### The guarantees behind it
 

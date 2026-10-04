@@ -5,9 +5,14 @@
 > 0 architecture (this doc) + 1 replan brain + 2 cooperative cancel + 3 autonomy
 > modes = `833c8cf`; 4 MCP native flatten = `2ed0624`; 5 GUI agent (§2.5,
 > T13–T16 green) = `a870a21`; 6 self-mining rules suggest (§2.6, T17–T18 green)
-> = `5eb257b`. Gates at final: **618/618**, ruff clean, 48 actions discovered.
-> Still open (§4 backlog): satellite view, MCP Streamable HTTP, virtual screen
-> mirror, VLM provider docs, stale-run sweep, interval triggers.
+> = `5eb257b`. **Batch 5 (pending-list close-out)**: identity rebrand;
+> rules interval triggers + suggest mapping fix; taskstore boot sweep;
+> history recency ranking; browser agent on runtime keys; gui_agent
+> local-VLM provider (Ollama); MCP Streamable HTTP; world_view (NASA
+> GIBS + OSM); screen_mirror as a thin tool over the EXISTING dashboard
+> mirror (duplicate rejected — see §2.8). Gates at final: **693/693**,
+> ruff clean, 50 actions discovered.
+> §4 backlog below now holds only what is deliberately still open.
 > Everything here maps to real code paths (file:line cited where it matters).
 > Nothing in this document is a prototype: each subsystem ships implemented
 > and tested in the same change that introduces it.
@@ -352,14 +357,60 @@ stale patterns (7-day window on history queries).
 
 | Future feature | Lands on |
 |---|---|
-| Local-VLM GUI decisions | `_decide` provider swap (config `gui_provider`) |
-| Browser agent onto shared runtime | browser_control already has budgets/cancel-shaped loop; adopt `agent_runtime` keys when it grows pause |
+| ~~Local-VLM GUI decisions~~ | **shipped** — `gui_provider=ollama` routes `_decide`; §2.8 documents the keys |
+| ~~Browser agent onto shared runtime~~ | **shipped** — `agent_runtime` key `browser`, boundary cancel, `action=cancel` |
 | Rules running goals (not just tools) | rules runner already dispatches any registered tool → `task_agent(goal)` composable |
 | A2A / multi-host agents | tool plane is transport-agnostic (MCP native shows the pattern: declare → dispatch) |
-| Stale-`running` sweep | taskstore boot hook (listed in backlog §4) |
-| Autonomy UI toggle | `actions/autonomy` state readable by settings drawer (same pattern as privacy status) |
+| ~~Stale-`running` sweep | **shipped** — `taskstore.sweep_stale()` at boot (main runner) |
+| Autonomy UI toggle | `actions/autonomy` state readable by settings drawer (same pattern as privacy status) — still open |
 
 ---
+
+### 2.8 Batch-5 extensions
+
+**MCP Streamable HTTP (`_HttpClient`)** — same interface as the stdio
+client; POST with `Accept: application/json, text/event-stream`;
+parses single-JSON **or** SSE answers; captures `Mcp-Session-Id` on
+initialize and echoes it; 404 → one transparent re-handshake + retry;
+close() sends the spec's DELETE. `_connect(name)` dispatches on the
+config entry (`url` → HTTP, `command` → stdio), so `_list_tools`,
+`action=call` and `call_native` are transport-agnostic. Handshake uses
+`protocolVersion 2025-06-18` on HTTP, keeps `2024-11-05` on stdio.
+
+**Rules interval triggers** — `trigger {type: interval, value: 30m|2h|
+1d|1w|<minutes>}`; validated at add-time; `_due_interval` arms on the
+first tick (file-trigger contract), persists `last_fired` so restarts
+don't reset the clock, fires exactly once per period.
+
+**Boot sweep** — `taskstore.sweep_stale(max_age_hours=24)` flips runs
+whose `updated` is older than the cutoff from `running` → `cancelled`
+(resumable). Called once in `main().runner` before `JarvisLive`; plan
+and per-step results untouched (index-based pending still converges).
+
+**History recency ranking** — `search()` fetches a bm25 candidate pool,
+re-ranks with `rel × (0.5 + 0.5·e^(−age/30d))` in Python, ties break
+newest-first, limit applied after the re-rank.
+
+**gui_agent local VLM (provider docs)** — config keys in
+`config/api_keys.json`:
+`gui_provider` = `gemini` (default) | `ollama`; `gui_vlm_model`
+(default `qwen2.5vl`); `ollama_url` (default `http://127.0.0.1:11434`).
+Local setup: install from ollama.com → `ollama serve` →
+`ollama pull qwen2.5vl` (any Ollama vision model works — set
+`gui_vlm_model`). Traffic never leaves the machine; failures land in
+`_LAST_DECIDE_ERR` and append to the run/preview report.
+
+**world_view** — satellite = NASA EOSDIS GIBS VIIRS true colour
+(free, no key, zoom ≤ 8, walks back ≤ 5 granule days), map = OSM
+tiles (zoom ≤ 19, ≤16 tiles/ask, identifying UA). `world_view` ∈
+CLOUD_TOOLS with `gate()` as the first handler statement.
+
+**screen_mirror = adapter, not implementation** — the mirror itself is
+`dashboard/server.py`'s websocket stream (shipped first, tests intact).
+Duplicate check rejected the MJPEG re-implementation; the tool only
+adds `mirror_set_sync` (run_coroutine_threadsafe onto the dashboard
+loop) + `ACTIVE` handle + `mirror_on`. A source-index test bans any
+capture stack from reappearing in `actions/screen_mirror.py`.
 
 ## 3. Failure modes → test matrix
 
@@ -388,13 +439,21 @@ stale patterns (7-day window on history queries).
 
 ---
 
-## 4. Backlog (deliberately out of this pass)
+## 4. Backlog (what remains deliberately open)
 
-* taskstore stale-`running` recovery sweep at boot
-* Local-VLM `_decide` provider for gui_agent (needs vision model pull docs)
-* Rules `interval` triggers (every Nh) — separate feature, not agent-core
-* Browser agent migrating onto `agent_runtime` keys (behaviour-neutral refactor)
-* History recency-weighted ranking
+Batch 4/5 cleared the previous backlog (sweep, VLM provider, interval
+triggers, browser runtime migration, recency ranking, MCP Streamable
+HTTP, satellite/map view, screen-mirror reach — all shipped with
+tests). What is honestly still open:
+
+* Autonomy UI toggle (settings drawer reads `core/autonomy` state)
+* Extra local-VLM providers (LM Studio / llama.cpp vision endpoints) —
+  Ollama landed; the seam + config keys are in §2.8
+* Higher-zoom satellite (GIBS caps at z8; anything closer needs a
+  non-free tile source — deliberately not added under free-only)
+* A2A / multi-host agents
+* Rules running full `task_agent` goals on interval triggers
+  (composition exists; confirm-gating policy to design first)
 
 ## 5. Change-management rules
 
