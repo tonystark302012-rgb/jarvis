@@ -273,7 +273,7 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 | 📊 **Charts & Diagrams** | `chart bar "CPU=42, RAM=68"` and `diagram flow "Voice → Wake word → Gemini"` — pure-SVG output, no matplotlib |
 | ⏱ **Focus Sessions** | Pomodoro rounds that mute proactive check-ins while you work |
 | 🔪 **Process Manager** | List/kill with `confirm=yes`, refuses to kill its own tree |
-| 🛣 **Screen Mirror** | Dashboard 🖥️ button streams a low-res live view of the PC to the phone |
+| 🛣 **Screen Mirror** | Dashboard 🖥️ button **or voice** ("mirror my screen" → `screen_mirror start/stop/status`) streams a low-res live view of the PC to the phone |
 | ☁️ **Git Snapshots** | Every successful `dev_agent` build commits itself — argv-only git, identity env-pinned, failure never fails the build |
 | ⏰ **Reminder List/Cancel** | `reminder action=list` shows upcoming scheduled reminders, `action=cancel 2` removes one |
 | 🌡 **Hourly Weather** | "Kaisa rahega aaj ka weather *next hours*" → a 12-hour strip alongside the daily forecast |
@@ -286,7 +286,7 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 | 🔒 **Privacy Mode** | `privacy on` — cloud-facing tools (search, research, scrape, vision, translate, file analysis, monitors, flights) refuse with an honest message instead of transmitting; memory, history, RAG, automation and LAN MQTT keep working |
 | 🕵️ **History Search** | Local sqlite FTS5 over past conversations — survives restarts; *“what did I say about that laptop”* answers from the actual exchange |
 | 📚 **Local RAG** | `rag index path=…` then ask — your text/markdown/code/CSV files (PDF/DOCX via file_processor), offline, no API |
-| 🔌 **MCP Client** | `mcp list/call` — tools from any Model Context Protocol server (filesystem, GitHub, Slack, Notion, …) over stdio |
+| 🔌 **MCP Client** | `mcp list/call` — tools from any Model Context Protocol server (filesystem, GitHub, Slack, Notion, …) over **both standard transports: stdio and Streamable HTTP** (`url=` + auth headers) |
 | 🦜 **Live Translate** | `translate live from=en to=hi` — offline Argos pair first, Gemini when online, honest refusal when neither can |
 | 🧩 **Event-Driven Rules** | File-appears, USB-plug, phrase and time events reach the rules engine through a shared event bus — not just polling |
 | 💾 **Task Persistence** | Agentic runs live in sqlite — `task_agent` lists them and *“resume task N”* skips completed steps (idempotent) |

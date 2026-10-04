@@ -4834,112 +4834,96 @@ class TestWorldView:
         assert props["mode"]["description"].startswith("satellite")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 5i (revised) — screen_mirror tool over the EXISTING dashboard mirror
+# ═══════════════════════════════════════════════════════════════════════════
+
 class TestScreenMirror:
-    """Batch 5i — loopback MJPEG screen mirror (real local HTTP stream)."""
+    """Duplicate-check proof: the mirror stays dashboard/server.py's —
+    the tool only adds model/voice reach via mirror_set_sync."""
 
     @pytest.fixture(autouse=True)
     def _f(self, monkeypatch):
         import actions.screen_mirror as sm
-        self.sm = sm
-        sm._stop()                      # belt & braces between tests
-        self._orig_grab = sm._grab
+        import dashboard.server as dsrv
+        self.sm, self.dsrv = sm, dsrv
+        self._orig = dsrv.ACTIVE
+        dsrv.ACTIVE = None
         yield
-        sm._stop()
-        sm._grab = self._orig_grab
+        dsrv.ACTIVE = self._orig
 
-    def _fake_grab(self, payload=b"FAKEJPEGDATA" * 8, delay=0.0):
-        def grab():
-            if delay:
-                time.sleep(delay)
-            return payload
-        self.sm._grab = grab
+    class _FakeDash:
+        def __init__(self):
+            self.calls: list = []
+            self.on = False
+            self.fail: str | None = None
 
-    def test_status_when_idle(self):
-        assert "not running" in self.sm.screen_mirror({"action": "status"})
+        def mirror_set_sync(self, on, timeout=5.0):
+            if self.fail:
+                raise RuntimeError(self.fail)
+            self.calls.append(bool(on))
+            self.on = bool(on)
 
-    def test_stop_when_idle_honest(self):
-        assert "not running" in self.sm.screen_mirror({"action": "stop"})
+        @property
+        def mirror_on(self):
+            return self.on
 
-    def test_start_and_fetch_frames_end_to_end(self):
-        self._fake_grab(payload=b"FRAMEBYTES")
-        # pick a likely-free high port
-        import socket
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        s.close()
-        out = self.sm.screen_mirror({"action": "start", "port": port,
-                                     "fps": 12}, None)
-        assert "LIVE" in out and str(port) in out
-        assert self.sm._STATE["server"].server_address[0] == "127.0.0.1"
-        # real HTTP round-trip against the streaming endpoint
-        import urllib.request
-        url = f"http://127.0.0.1:{port}/stream"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            chunk = resp.read(400)
-        assert b"--framejarvis" in chunk
-        assert b"FRAMEBYTES" in chunk
-        # status page
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/", timeout=5) as resp:
-            page = resp.read().decode()
-        assert "/stream" in page
-        # status action reflects frames + served
-        st = self.sm.screen_mirror({"action": "status"})
-        assert "LIVE" in st and "frame(s) captured" in st
-        # stop tears it down
-        assert "stopped after" in self.sm.screen_mirror({"action": "stop"})
-        assert "not running" in self.sm.screen_mirror({"action": "status"})
+        def get_url(self):
+            return "https://10.0.0.5:8001/"
 
-    def test_double_start_refused_with_existing_url(self):
-        self._fake_grab()
-        import socket
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        s.close()
-        first = self.sm.screen_mirror({"action": "start", "port": port})
-        assert "LIVE" in first
-        second = self.sm.screen_mirror({"action": "start", "port": port})
-        assert "already running" in second and str(port) in second
+    def test_no_dashboard_honest(self):
+        out = self.sm.screen_mirror({"action": "start"})
+        assert "isn't loaded" in out and "pip install fastapi" in out
 
-    def test_port_busy_honest(self):
-        import socket
-        blocker = socket.socket()
-        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        blocker.bind(("127.0.0.1", 0))
-        blocker.listen(1)
-        port = blocker.getsockname()[1]
-        try:
-            self._fake_grab()
-            out = self.sm.screen_mirror({"action": "start", "port": port})
-            assert "not free" in out and "pick another" in out
-            assert not self.sm._STATE["running"]
-        finally:
-            blocker.close()
+    def test_start_stop_status_through_existing_server(self):
+        dash = self._FakeDash()
+        self.dsrv.ACTIVE = dash
+        assert "OFF" in self.sm.screen_mirror({"action": "status"})
+        out = self.sm.screen_mirror({"action": "start"})
+        assert dash.calls == [True] and "ON" in out and "dashboard" in out
+        out = self.sm.screen_mirror({"action": "status"})
+        assert "ON" in out and "https://10.0.0.5:8001/" in out
+        out = self.sm.screen_mirror({"action": "stop"})
+        assert dash.calls == [True, False] and "OFF" in out
+        assert "OFF" in self.sm.screen_mirror({})      # default = status
 
-    def test_missing_capture_stack_is_honest(self):
-        # real _grab in this sandbox: mss/Pillow absent → instruction
-        self.sm._grab = self._orig_grab
-        import socket
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        s.close()
-        out = self.sm.screen_mirror({"action": "start", "port": port})
-        assert "Screen capture unavailable" in out
-        assert "pip install" in out
-        assert not self.sm._STATE["running"]
+    def test_loop_not_ready_is_honest(self):
+        dash = self._FakeDash()
+        dash.fail = "dashboard loop not ready"
+        self.dsrv.ACTIVE = dash
+        out = self.sm.screen_mirror({"action": "start"})
+        assert "couldn't start" in out and "loop not ready" in out
+        out = self.sm.screen_mirror({"action": "stop"})
+        assert "couldn't stop" in out
 
-    def test_bad_params(self):
-        assert "between 1025" in self.sm.screen_mirror(
-            {"action": "start", "port": 80})
-        assert "port must be a number" in self.sm.screen_mirror(
-            {"action": "start", "port": "abc"})
-        assert "fps must be a number" in self.sm.screen_mirror(
-            {"action": "start", "fps": "x"})
+    def test_bad_action(self):
+        self.dsrv.ACTIVE = self._FakeDash()
         assert "start | stop | status" in self.sm.screen_mirror(
-            {"action": "launch"})
+            {"action": "record"})
+
+    def test_tool_contains_no_second_capture_stack(self):
+        src = Path("actions/screen_mirror.py").read_text(encoding="utf-8")
+        for banned in ("mss", "ImageGrab", "_grab", "PIL",
+                       "ThreadingHTTPServer", "multipart", "urllib"):
+            assert banned not in src, f"duplicate capture path: {banned}"
+
+    def test_server_bridge_wiring(self):
+        src = Path("dashboard/server.py").read_text(encoding="utf-8")
+        assert "def mirror_set_sync" in src
+        assert "run_coroutine_threadsafe" in src
+        assert "ACTIVE = self" in src
+        assert "self._loop = asyncio.get_running_loop()" in src
+        assert "@property\n    def mirror_on" in src
+
+    def test_real_server_object_reaches_status(self):
+        # constructing the real class wires ACTIVE and default state
+        srv = self.dsrv.DashboardServer()
+        assert self.dsrv.ACTIVE is srv
+        assert srv.mirror_on is False
+        assert "OFF" in self.sm.screen_mirror({"action": "status"})
+        # loop never served in this test → start must say so, not crash
+        out = self.sm.screen_mirror({"action": "start"})
+        assert "loop not ready" in out
 
     def test_registers_through_discovery(self):
         from core.action_loader import discover_actions

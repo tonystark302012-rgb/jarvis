@@ -475,9 +475,17 @@ def _read(name: str) -> str:
 
 # ── DashboardServer ───────────────────────────────────────────────────────────
 
+# The one live server instance — tools (actions/screen_mirror.py) reach the
+# existing mirror through this instead of growing a second capture stack.
+ACTIVE: "DashboardServer | None" = None
+
+
 class DashboardServer:
 
     def __init__(self):
+        global ACTIVE
+        ACTIVE = self
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._ip                          = _local_ip()
         self._tokens: set[str]            = set()
         self._token_keys: dict[str, str]  = {}   # auth_token → session_key
@@ -620,6 +628,23 @@ class DashboardServer:
                                       "Screen mirror OFF."})
         if on and (self._mirror_task is None or self._mirror_task.done()):
             self._mirror_task = asyncio.create_task(self._mirror_loop())
+
+    @property
+    def mirror_on(self) -> bool:
+        """Public read of the mirror toggle (GIL-safe bool)."""
+        return bool(self._mirror_on)
+
+    def mirror_set_sync(self, on: bool, timeout: float = 5.0) -> None:
+        """Thread-safe toggle for tools running OFF this server's loop
+        (action handlers execute in an executor thread). Raises
+        RuntimeError when the dashboard loop isn't up yet — callers
+        surface that honestly instead of pretending to toggle."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            raise RuntimeError("dashboard loop not ready")
+        fut = asyncio.run_coroutine_threadsafe(
+            self.mirror_set(bool(on)), loop)
+        fut.result(timeout)
 
     async def _mirror_loop(self) -> None:
         """~3 fps while enabled. Every failure path stops the stream with a
@@ -1048,6 +1073,7 @@ class DashboardServer:
         await uvicorn.Server(cfg).serve()
 
     async def serve(self) -> None:
+        self._loop = asyncio.get_running_loop()
         if not _DEPS_OK:
             print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
             print("[Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")
