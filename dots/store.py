@@ -158,6 +158,10 @@ def _page_dict(r) -> dict:
         p["blocks"] = json.loads(p.get("content_json") or "[]")
     except ValueError:
         p["blocks"] = []
+    try:
+        p["sources"] = json.loads(p.get("sources_json") or "[]")
+    except ValueError:
+        p["sources"] = []
     return p
 
 
@@ -178,25 +182,36 @@ def list_pages(space_id: int) -> list[dict]:
 
 def _write_page(space_id, parent_id, title, content_json_str, content_md,
                 author: str, rev: int, note: str, page_id: int | None,
-                created_at: float | None = None) -> dict:
+                created_at: float | None = None,
+                sources_json_str: str | None = None) -> dict:
     """Internal: apply a page write + revision row. Caller holds no lock —
-    we take it here so rev increments are atomic."""
+    we take it here so rev increments are atomic. sources_json_str=None on
+    an UPDATE keeps the page's existing sources (owner saves never clobber
+    research links); on a CREATE it defaults to '[]'."""
     now = _now()
     with db._LOCK:
         c = db._conn()
         if page_id is None:
             cur = c.execute(
                 "INSERT INTO pages (space_id, parent_id, title, content_json,"
-                " content_md, rev, created_by, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
+                " content_md, rev, created_by, sources_json, created_at,"
+                " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (space_id, parent_id, title, content_json_str, content_md,
-                 rev, author, created_at or now, now))
+                 rev, author, sources_json_str or "[]",
+                 created_at or now, now))
             page_id = cur.lastrowid
         else:
-            c.execute(
-                "UPDATE pages SET title=?, content_json=?, content_md=?,"
-                " rev=?, updated_at=? WHERE id=?",
-                (title, content_json_str, content_md, rev, now, page_id))
+            if sources_json_str is None:
+                c.execute(
+                    "UPDATE pages SET title=?, content_json=?, content_md=?,"
+                    " rev=?, updated_at=? WHERE id=?",
+                    (title, content_json_str, content_md, rev, now, page_id))
+            else:
+                c.execute(
+                    "UPDATE pages SET title=?, content_json=?, content_md=?,"
+                    " rev=?, sources_json=?, updated_at=? WHERE id=?",
+                    (title, content_json_str, content_md, rev,
+                     sources_json_str, now, page_id))
         c.execute(
             "INSERT INTO page_revisions (page_id, rev, title, content_json,"
             " content_md, author, note, created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -208,7 +223,8 @@ def _write_page(space_id, parent_id, title, content_json_str, content_md,
 
 def owner_create_page(space_id: int, title: str, content_json=None,
                       content_md=None, parent_id: int | None = None,
-                      author: str = "owner") -> tuple[dict | None, str | None]:
+                      author: str = "owner",
+                      sources=None) -> tuple[dict | None, str | None]:
     if get_space(space_id) is None:
         return None, f"no space #{space_id}"
     js, md, err = _normalize_content(content_json, content_md)
@@ -217,8 +233,13 @@ def owner_create_page(space_id: int, title: str, content_json=None,
     if parent_id is not None and get_page(parent_id) is None:
         return None, f"no parent page #{parent_id}"
     title = str(title or "Untitled").strip() or "Untitled"
+    try:
+        src = _norm_sources(sources)
+    except ValueError as e:
+        return None, str(e)
     return _write_page(int(space_id), parent_id, title, js, md,
-                       author, 1, "created", None), None
+                       author, 1, "created", None,
+                       sources_json_str=src), None
 
 
 def owner_save_page(page_id: int, base_rev: int, title=None,
@@ -280,12 +301,45 @@ def _pending_dict(r) -> dict:
         p["blocks"] = json.loads(p.get("content_json") or "[]")
     except ValueError:
         p["blocks"] = []
+    raw = p.get("sources_json")
+    if raw is None:
+        p["sources"] = None          # "not provided" — keep page's own
+    else:
+        try:
+            p["sources"] = json.loads(raw or "[]")
+        except ValueError:
+            p["sources"] = []
     return p
+
+
+def _norm_sources(sources) -> str | None:
+    """Normalise research links for storage → JSON str, or None when the
+    caller did not provide sources (nullable = "leave as-is" on approve)."""
+    if sources is None:
+        return None
+    if isinstance(sources, str):
+        try:
+            sources = json.loads(sources)
+        except ValueError:
+            sources = [sources]
+    if not isinstance(sources, list):
+        raise ValueError("sources must be a list of links")
+    out = []
+    for item in sources[:20]:
+        if isinstance(item, str):
+            u = item.strip()
+            if u:
+                out.append({"title": "", "url": u})
+        elif isinstance(item, dict):
+            u = str(item.get("url") or "").strip()
+            if u:
+                out.append({"title": str(item.get("title") or ""), "url": u})
+    return json.dumps(out)
 
 
 def propose_edit(dot_id: int, page_id: int, base_rev: int,
                  title=None, content_json=None, content_md=None,
-                 reason: str = "") -> dict:
+                 reason: str = "", sources=None) -> dict:
     """A dot's edit_space_page — proposal ONLY (T2). No page bytes move."""
     page = get_page(page_id)
     if page is None:
@@ -301,14 +355,15 @@ def propose_edit(dot_id: int, page_id: int, base_rev: int,
             raise ValueError(err)
         title = page["title"] if title is None else str(title)
     now = _now()
+    src = _norm_sources(sources)
     with db._LOCK:
         c = db._conn()
         cur = c.execute(
             "INSERT INTO pending_changes (kind, page_id, dot_id, base_rev,"
-            " title, content_json, content_md, reason, created_at)"
-            " VALUES ('edit',?,?,?,?,?,?,?,?)",
+            " title, content_json, content_md, reason, sources_json,"
+            " created_at) VALUES ('edit',?,?,?,?,?,?,?,?,?)",
             (int(page_id), int(dot_id), int(base_rev), title, js, md,
-             str(reason or ""), now))
+             str(reason or ""), src, now))
         c.commit()
         pid = cur.lastrowid
     return get_pending(pid)
@@ -317,7 +372,7 @@ def propose_edit(dot_id: int, page_id: int, base_rev: int,
 def propose_create(dot_id: int, space_id: int, title: str,
                    content_json=None, content_md=None,
                    parent_id: int | None = None,
-                   reason: str = "") -> dict:
+                   reason: str = "", sources=None) -> dict:
     """A dot's create_space_page — a create is a write too, so it is a
     proposal (decision Q3 in the doc)."""
     if get_space(space_id) is None:
@@ -328,15 +383,16 @@ def propose_create(dot_id: int, space_id: int, title: str,
     if err:
         raise ValueError(err)
     now = _now()
+    src = _norm_sources(sources)
     with db._LOCK:
         c = db._conn()
         cur = c.execute(
             "INSERT INTO pending_changes (kind, page_id, space_id, parent_id,"
             " dot_id, base_rev, title, content_json, content_md, reason,"
-            " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " sources_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             ("create", None, int(space_id), parent_id, int(dot_id), 0,
              str(title or "Untitled").strip() or "Untitled", js, md,
-             str(reason or ""), now))
+             str(reason or ""), src, now))
         c.commit()
         pid = cur.lastrowid
     return get_pending(pid)
@@ -370,7 +426,8 @@ def approve_pending(pid: int) -> dict:
         page, err = owner_create_page(
             p["space_id"], p["title"], content_json=p["content_json"],
             parent_id=p["parent_id"],
-            author=f"dot:{p['dot_id']}")
+            author=f"dot:{p['dot_id']}",
+            sources=p.get("sources") or [])
         if err:
             return {"error": err}
         with db._LOCK:
@@ -397,7 +454,8 @@ def approve_pending(pid: int) -> dict:
     applied = _write_page(page["space_id"], page["parent_id"], p["title"],
                           p["content_json"], p["content_md"],
                           f"dot:{p['dot_id']}", page["rev"] + 1,
-                          p["reason"] or "approved proposal", page["id"])
+                          p["reason"] or "approved proposal", page["id"],
+                          sources_json_str=_norm_sources(p.get("sources")))
     with db._LOCK:
         c = db._conn()
         c.execute("UPDATE pending_changes SET status='approved',"

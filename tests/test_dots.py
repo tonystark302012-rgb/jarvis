@@ -533,3 +533,372 @@ class TestJARVISIntegration:
         doc = Path("docs/DOT_PLATFORM.md").read_text(encoding="utf-8")
         assert "no separate Dots product" in doc
         assert "actions/dots.py" in doc
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 6b: brain tool-loop + research/space tools (permission-gated)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBrainTools:
+    def test_spec_exposure_by_permission(self, env):
+        from dots import store
+        from dots.tools import specs_for
+        bare = store.create_dot("Bare")
+        assert specs_for(bare) == []
+        res = store.create_dot("Web", permissions={"research": True})
+        names = [t["function"]["name"] for t in specs_for(res)]
+        assert names == ["search_web", "read_public_page"]
+        spa = store.create_dot("Sp", permissions={"space": True})
+        names = [t["function"]["name"] for t in specs_for(spa)]
+        assert names == ["list_authorized_spaces", "list_space_pages",
+                         "read_space_page", "create_space_page",
+                         "edit_space_page"]
+        both = store.create_dot("AB",
+                                permissions={"research": True, "space": True})
+        assert len(specs_for(both)) == 7
+
+    def test_tool_loop_search_then_answer(self, env, monkeypatch):
+        from dots import brain, store, tools_research
+        calls = {"n": 0}
+
+        def fake_ddg(q):
+            return [{"title": f"Hit for {q}", "url": "https://ex.org/a",
+                     "snippet": "the snippet"}]
+
+        monkeypatch.setattr(tools_research, "_ddg", fake_ddg)
+        monkeypatch.setattr(tools_research, "_research_mode", lambda: "parallel")
+
+        seen = []
+
+        def llm(messages, tools):
+            calls["n"] += 1
+            assert any(t["function"]["name"] == "search_web" for t in tools)
+            if calls["n"] == 1:
+                return {"content": "", "tool_calls": [
+                    {"id": "c1", "function": {
+                        "name": "search_web",
+                        "arguments": {"queries": ["topic x"]}}}]}
+            seen.append(messages)
+            return {"content": "final answer with sources", "tool_calls": []}
+
+        brain.set_llm(llm)
+        dot = store.create_dot("R", permissions={"research": True})
+        out = brain.reply(dot, "dot:999", "research topic x")
+        assert out == "final answer with sources"
+        tool_msgs = [m for m in seen[0] if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert "https://ex.org/a" in tool_msgs[0]["content"]
+        assert tool_msgs[0]["tool_call_id"] == "c1"
+
+    def test_search_caps_queries_and_dedupes(self, env, monkeypatch):
+        from dots import tools_research
+        seen_queries = []
+
+        def fake_ddg(q):
+            seen_queries.append(q)
+            return [{"title": q, "url": "https://same.org/x", "snippet": "s"},
+                    {"title": "d", "url": f"https://u/{q}", "snippet": "p"}]
+
+        monkeypatch.setattr(tools_research, "_ddg", fake_ddg)
+        monkeypatch.setattr(tools_research, "_research_mode", lambda: "parallel")
+        out = tools_research.run({}, "search_web", {
+            "queries": ["a", "b", "c", "d"]})
+        assert len(seen_queries) == 3          # 1..3 clamp
+        assert out.count("https://same.org/x") == 1   # URL dedupe
+        assert "extra queries dropped" in out
+        assert "https://u/a" in out and "https://u/c" in out
+
+    def test_research_denied_honest_in_loop(self, env, monkeypatch):
+        from dots import brain, store, tools
+        dot = store.create_dot("NoWeb")           # no research permission
+        assert tools.run_tool(dot, "search_web",
+                              {"queries": ["x"]}).startswith("denied:")
+
+        captured = {}
+
+        def llm(messages, tools):
+            if not any(m.get("role") == "tool" for m in messages):
+                return {"content": "", "tool_calls": [
+                    {"id": "c1", "function": {
+                        "name": "search_web",
+                        "arguments": {"queries": ["x"]}}}]}
+            captured["messages"] = messages
+            return {"content": "I do not have research permission.",
+                    "tool_calls": []}
+
+        brain.set_llm(llm)
+        out = brain.reply(dot, "dot:0", "search something")
+        denied = [m for m in captured["messages"] if m.get("role") == "tool"]
+        assert denied and denied[0]["content"].startswith("denied:")
+        assert "permission" in denied[0]["content"]
+        assert "research permission" in out
+
+    def test_research_mode_config_refusals(self, env, monkeypatch):
+        from dots import store, tools_research
+        dot = store.create_dot("R", permissions={"research": True})
+        monkeypatch.setattr(tools_research, "_research_mode",
+                            lambda: "disabled")
+        assert "research_mode=disabled" in tools_research.run(
+            dot, "search_web", {"queries": ["x"]})
+        assert "research_mode=disabled" in tools_research.run(
+            dot, "read_public_page", {"url": "https://a.b"})
+        monkeypatch.setattr(tools_research, "_research_mode",
+                            lambda: "browser")
+        assert "read_public_page only" in tools_research.run(
+            dot, "search_web", {"queries": ["x"]})
+        monkeypatch.setattr(tools_research, "_fetch",
+                            lambda u: "<html><title>T</title>body</html>")
+        monkeypatch.setattr(tools_research, "_extract",
+                            lambda h, u: ("T", "readable text"))
+        monkeypatch.setattr(tools_research, "_links", lambda h, u: [])
+        out = tools_research.run(dot, "read_public_page",
+                                 {"url": "https://site.example/p"})
+        assert "readable text" in out
+
+    def test_read_public_page_guards(self, env, monkeypatch):
+        from dots import tools_research
+        monkeypatch.setattr(tools_research, "_research_mode",
+                            lambda: "parallel")
+        out = tools_research.run({}, "read_public_page",
+                                 {"url": "ftp://x"})
+        assert out.startswith("denied:")
+        assert tools_research.run({}, "read_public_page",
+                                  {"url": ""}).startswith("read_public_page")
+
+        def boom(u):
+            raise RuntimeError("403")
+
+        monkeypatch.setattr(tools_research, "_fetch", boom)
+        out = tools_research.run({}, "read_public_page",
+                                 {"url": "https://x.y/z"})
+        assert out.startswith("error: could not fetch")
+
+        monkeypatch.setattr(tools_research, "_fetch",
+                            lambda u: "<html>hi</html>")
+        monkeypatch.setattr(tools_research, "_extract",
+                            lambda h, u: ("Title", "main text"))
+        monkeypatch.setattr(tools_research, "_links",
+                            lambda h, u: [("L1", "https://x.y/1")])
+        out = tools_research.run({}, "read_public_page",
+                                 {"url": "https://x.y/z"})
+        assert "title: Title" in out and "main text" in out
+        assert "L1" in out
+
+    def test_space_tools_read_and_list(self, env):
+        from dots import store
+        s, pg = _mk_space_page(env["client"], title="Daily",
+                               md="- morning routine")
+        dot = store.create_dot("S", permissions={"space": True})
+        from dots.tools import run_tool
+        assert f"#{s['id']} Work" in run_tool(dot, "list_authorized_spaces",
+                                              {})
+        assert "Daily" in run_tool(dot, "list_space_pages",
+                                   {"space_id": s["id"]})
+        got = run_tool(dot, "read_space_page", {"page_id": pg["id"]})
+        assert "rev 1" in got and "- morning routine" in got
+        assert "error:" in run_tool(dot, "read_space_page",
+                                    {"page_id": 99999})
+
+    def test_edit_tool_proposal_only_and_gates(self, env):
+        from dots import store
+        from dots.tools import run_tool
+        s, pg = _mk_space_page(env["client"], title="Doc", md="v1")
+        dot = store.create_dot("E", permissions={"space": True})
+        # missing base_rev → honest, nothing written
+        out = run_tool(dot, "edit_space_page",
+                       {"page_id": pg["id"], "content_md": "v2"})
+        assert "base_rev" in out and "read_space_page" in out
+        assert store.get_page(pg["id"])["content_md"] == "v1"
+        # missing content+title → honest usage error
+        out = run_tool(dot, "edit_space_page",
+                       {"page_id": pg["id"], "base_rev": 1})
+        assert out.startswith("edit_space_page: pass content_md")
+        # real proposal → pending only (T2)
+        out = run_tool(dot, "edit_space_page",
+                       {"page_id": pg["id"], "base_rev": 1,
+                        "content_md": "v2 from dot"})
+        assert "proposed — pending approval #" in out
+        assert store.get_page(pg["id"])["content_md"] == "v1"  # untouched
+        pid = int(out.split("#")[1].split(" ")[0])
+        assert store.get_pending(pid)["status"] == "pending"
+
+    def test_create_tool_then_approve_sources(self, env):
+        from dots import store
+        from dots.tools import run_tool
+        s = env["client"].post("/api/spaces", json={"name": "W"}).json()
+        dot = store.create_dot("C", permissions={"space": True})
+        out = run_tool(dot, "create_space_page", {
+            "space_id": s["id"], "title": "Findings",
+            "content_md": "body",
+            "sources": ["https://src.example/1",
+                        {"title": "Ref", "url": "https://src.example/2"}]})
+        assert "proposed — pending approval #" in out
+        pid = int(out.split("#")[1].split(" ")[0])
+        assert store.list_pages(s["id"]) == []   # nothing exists yet
+        res = store.approve_pending(pid)
+        assert res["ok"]
+        page = res["page"]
+        assert page["title"] == "Findings"
+        assert page["sources"][0]["url"] == "https://src.example/1"
+        assert page["sources"][1]["title"] == "Ref"
+
+    def test_edit_proposal_sources_apply_and_preserve(self, env):
+        from dots import store
+        s, pg = _mk_space_page(env["client"], title="R", md="x")
+        dot = store.create_dot("S2", permissions={"space": True})
+        # proposal WITH sources → approved replaces page sources
+        p1 = store.propose_edit(dot["id"], pg["id"], base_rev=1,
+                                content_md="v2",
+                                sources=["https://keep.me/1"])
+        assert store.approve_pending(p1["id"])["ok"]
+        page = store.get_page(pg["id"])
+        assert page["sources"] == [{"title": "", "url": "https://keep.me/1"}]
+        # proposal WITHOUT sources → approve keeps existing sources
+        p2 = store.propose_edit(dot["id"], pg["id"], base_rev=2,
+                                content_md="v3")
+        assert store.approve_pending(p2["id"])["ok"]
+        page = store.get_page(pg["id"])
+        assert page["content_md"] == "v3"
+        assert page["sources"][0]["url"] == "https://keep.me/1"
+        # proposal with explicit [] → clears
+        p3 = store.propose_edit(dot["id"], pg["id"], base_rev=3,
+                                content_md="v4", sources=[])
+        assert store.approve_pending(p3["id"])["ok"]
+        assert store.get_page(pg["id"])["sources"] == []
+
+    def test_owner_only_review_tool_honest(self, env):
+        from dots import store
+        from dots.tools import run_tool
+        dot = store.create_dot("X", permissions={"space": True, "research": True})
+        out = run_tool(dot, "review_space_page", {"page_id": 1})
+        assert "owner-only" in out and "self-approve" in out
+        assert "unknown tool" in run_tool(dot, "nope", {})
+
+    def test_loop_round_cap_honest(self, env, monkeypatch):
+        from dots import brain, store, tools_research
+        monkeypatch.setattr(tools_research, "_ddg",
+                            lambda q: [{"title": "t", "url": "https://u",
+                                        "snippet": "s"}])
+        monkeypatch.setattr(tools_research, "_research_mode",
+                            lambda: "parallel")
+        n = {"calls": 0}
+
+        def stubborn(messages, tools):
+            n["calls"] += 1
+            return {"content": f"round {n['calls']}", "tool_calls": [
+                {"id": f"c{n['calls']}", "function": {
+                    "name": "search_web",
+                    "arguments": {"queries": ["q"]}}}]}
+
+        brain.set_llm(stubborn)
+        dot = store.create_dot("Loop", permissions={"research": True})
+        out = brain.reply(dot, "dot:1", "keep searching")
+        assert n["calls"] == brain.MAX_ROUNDS == 8
+        assert "tool limit" in out
+
+    def test_system_prompt_permission_summary(self, env):
+        from dots import brain, store
+        dot = store.create_dot("P", permissions={"research": True})
+        sys_txt = brain.system_prompt(dot, [], None)
+        assert "PERMISSIONS (owner-granted): research" in sys_txt
+        assert "TOOLS available: search_web, read_public_page" in sys_txt
+        assert "'denied:'" in sys_txt
+        bare = store.create_dot("Q")
+        sys_txt = brain.system_prompt(bare, [], None)
+        assert "PERMISSIONS (owner-granted): none" in sys_txt
+        assert "(none — you cannot call tools)" in sys_txt
+
+    def test_default_path_local_llm_loop(self, env, monkeypatch):
+        # no seam → local tool LLM first (doc: local-first), gemini unused
+        from dots import brain, store, tools_research
+        brain.set_llm(None)
+        monkeypatch.setattr(brain, "_local_ready", lambda: True)
+        monkeypatch.setattr(tools_research, "_research_mode",
+                            lambda: "parallel")
+
+        def fake_ddg(q):
+            return [{"title": "T", "url": "https://n.example", "snippet": "s"}]
+
+        monkeypatch.setattr(tools_research, "_ddg", fake_ddg)
+        import core.gemini as gemini
+        monkeypatch.setattr(gemini, "call",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError("gemini must not be used")))
+        import core.llm_client as llm_client
+        state = {"n": 0}
+
+        def fake_call_llm(messages, tools=None, timeout=120):
+            state["n"] += 1
+            if state["n"] == 1:
+                return {"content": "", "tool_calls": [
+                    {"function": {"name": "search_web",
+                                  "arguments": {"queries": ["ai"]}}}]}
+            return {"content": "local final", "tool_calls": []}
+
+        monkeypatch.setattr(llm_client, "call_llm", fake_call_llm)
+        dot = store.create_dot("L", permissions={"research": True})
+        out = brain.reply(dot, "dot:2", "find ai news")
+        assert out == "local final"
+        assert state["n"] == 2
+
+    def test_default_path_unreachable_is_honest(self, env, monkeypatch):
+        # T11 through the new default path: probe fails → gemini fails →
+        # the stored reply SAYS no brain (never a fake answer)
+        from dots import brain, store
+        brain.set_llm(None)
+        monkeypatch.setattr(brain, "_local_ready", lambda: False)
+        import core.gemini as gemini
+        monkeypatch.setattr(gemini, "call",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("no key")))
+        dot = store.create_dot("H")
+        out = brain.reply(dot, "dot:3", "hello")
+        assert out.startswith("No brain reachable")
+        assert "configure a key or local LLM" in out
+
+    def test_voice_chat_runs_tool_loop(self, env, monkeypatch):
+        # end-to-end: voice chat → brain loop → research tool → answer
+        from dots import brain, store, tools_research
+        monkeypatch.setattr(tools_research, "_research_mode",
+                            lambda: "parallel")
+        monkeypatch.setattr(tools_research, "_ddg",
+                            lambda q: [{"title": "Src",
+                                        "url": "https://cite.example",
+                                        "snippet": "evidence"}])
+        env["client"].post("/api/dots", json={
+            "name": "Webby", "role": "researcher",
+            "permissions": {"research": True}})
+        state = {"n": 0}
+
+        def llm(messages, tools):
+            state["n"] += 1
+            if state["n"] == 1:
+                return {"content": "", "tool_calls": [
+                    {"id": "c1", "function": {
+                        "name": "search_web",
+                        "arguments": {"queries": ["topic"]}}}]}
+            return {"content": "answer with the evidence", "tool_calls": []}
+
+        brain.set_llm(llm)
+        from actions.dots import dots as dots_action
+        out = dots_action({"action": "chat", "dot": "Webby",
+                           "message": "research topic"})
+        assert out == "answer with the evidence"
+        msgs = store.list_messages("dot:1")
+        assert msgs[-2]["role"] == "user" and msgs[-1]["role"] == "dot"
+        assert msgs[-1]["content"] == "answer with the evidence"
+
+    def test_voice_dot_create_perms_parsing(self, env):
+        from actions.dots import _parse_perms, dots as dots_action
+        assert _parse_perms("research,memory") == {"research": True,
+                                                   "memory": True}
+        assert _parse_perms("all") == {"research": True, "memory": True,
+                                       "space": True}
+        assert _parse_perms('{"research": false}') == {"research": False}
+        assert _parse_perms(None) is None
+        out = dots_action({"action": "dot_create", "name": "Pars",
+                           "role": "r", "perms": "research,space"})
+        assert "[perms: research, space]" in out
+        from dots import store
+        d = store.find_dot_by_name("Pars")
+        assert d["permissions"] == {"research": True, "space": True}

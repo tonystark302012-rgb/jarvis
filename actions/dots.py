@@ -7,7 +7,8 @@ surface: create specialists, talk to each one (every Dot keeps its OWN
 conversation), review their proposed page edits, and manage the
 preferences (memory) they are allowed to read.
 
-    dots action=dot_create name=Researcher role="cite every source"
+    dots action=dot_create name=Researcher role="cite every source" \
+         perms="research,memory,space"
     dots action=chat dot=Researcher message="compare these two papers"
     dots action=pending_list
     dots action=approve which=3
@@ -33,6 +34,29 @@ def _resolve_dot(params: dict) -> dict | None:
     return store.find_dot_by_name(raw)
 
 
+def _parse_perms(raw) -> dict | None:
+    """dot_create perms: 'research,memory,space' | 'all' | JSON object |
+    already-a-dict → permissions dict (doc: per-Dot permissions)."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (list, tuple)):
+        return {str(k).strip(): True for k in raw if str(k).strip()}
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.startswith("{"):
+        try:
+            obj = json.loads(s)
+            return obj if isinstance(obj, dict) else None
+        except ValueError:
+            return None
+    if s.lower() == "all":
+        return {"research": True, "memory": True, "space": True}
+    return {k.strip().lower(): True for k in s.split(",") if k.strip()}
+
+
 def _require_dot(params: dict) -> tuple[dict | None, str | None]:
     d = _resolve_dot(params)
     if d is None:
@@ -50,11 +74,17 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
     # ── specialist agents ──────────────────────────────────────────────
     if action in ("dot_create", "create"):
         try:
-            d = store.create_dot(params.get("dot") or params.get("name"),
-                                 params.get("role") or "")
+            d = store.create_dot(
+                params.get("dot") or params.get("name"),
+                params.get("role") or "",
+                permissions=_parse_perms(params.get("perms")
+                                         or params.get("permissions")))
         except ValueError as e:
             return str(e)
-        return (f"Dot '{d['name']}' created (#{d['id']}). "
+        granted = ", ".join(sorted(k for k, v in d["permissions"].items()
+                                   if v)) or "none"
+        return (f"Dot '{d['name']}' created (#{d['id']}) "
+                f"[perms: {granted}]. "
                 f"Talk to it: dots action=chat dot={d['name']} "
                 f"message=...")
 
@@ -221,6 +251,10 @@ TOOL = {
             "name": {"type": "STRING", "description": "New Dot's name"},
             "role": {"type": "STRING",
                      "description": "Role instructions for dot_create"},
+            "perms": {"type": "STRING",
+                      "description": "dot_create permissions: comma list "
+                                     "(research,memory,space), 'all', or "
+                                     "a JSON object; default none"},
             "message": {"type": "STRING",
                         "description": "Message for chat"},
             "page": {"type": "STRING",

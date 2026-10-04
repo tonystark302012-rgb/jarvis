@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS pages (
   content_md TEXT NOT NULL DEFAULT '',
   rev INTEGER NOT NULL DEFAULT 1,
   created_by TEXT NOT NULL DEFAULT 'owner',
+  sources_json TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS pending_changes (
   content_md TEXT NOT NULL DEFAULT '',
   reason TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending',
+  sources_json TEXT,
   created_at REAL NOT NULL,
   decided_at REAL
 );
@@ -157,9 +159,24 @@ def _conn() -> sqlite3.Connection:
         c.execute("PRAGMA busy_timeout = 5000")
         c.execute("PRAGMA journal_mode = WAL")
         c.executescript(_SCHEMA)
+        _migrate(c)
         c.commit()
         _CONN = c
     return _CONN
+
+
+def _migrate(c: sqlite3.Connection) -> None:
+    """Additive column migrations for DBs created before this batch.
+    CREATE TABLE IF NOT EXISTS never alters an existing table, so
+    sources_json (research links, batch 6b) lands via guarded ALTER."""
+    for ddl in (
+        "ALTER TABLE pages ADD COLUMN sources_json TEXT",
+        "ALTER TABLE pending_changes ADD COLUMN sources_json TEXT",
+    ):
+        try:
+            c.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # already exists
 
 
 def reset_for_tests() -> None:

@@ -118,8 +118,14 @@ def pages(parameters: dict = None, player=None, session_memory=None) -> str:
                                     body[:4000])
             except Exception:
                 pass
+        srcs = p.get("sources") or []
+        src_txt = ""
+        if srcs:
+            src_txt = "\nSources:\n" + "\n".join(
+                f"- {s.get('title') or ''} {s.get('url')}".rstrip()
+                for s in srcs)
         return (f"{p['title']} (rev {p['rev']}, space #{p['space_id']}):\n"
-                f"{body}")
+                f"{body}{src_txt}")
 
     if action in ("page_save", "save", "edit"):
         p = _resolve_page(params)

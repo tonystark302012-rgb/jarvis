@@ -302,8 +302,17 @@ gates protect agent writes (T10).
   conversations) + JARVIS integration: `dots/` → APIRouter mounted in
   the dashboard (auth-riding), `actions/dots.py` + `actions/pages.py`
   voice surface, standalone entry REMOVED
-* **6b** Dot brain tool-loop (permission-gated) + research tools wired
-  to JARVIS's existing engines + sources on saved pages
+* **6b** ✅ brain tool-loop (`dots/brain.py`, ≤8 rounds, seam
+  `(messages, tools)`; legacy `(system, hist)` kept) + router
+  `dots/tools.py` (permission gate FIRST, honest `denied:`) + space
+  tools (`dots/tools_spaces.py`: read/list + `create_space_page`/
+  `edit_space_page` = pending-only proposals) + research tools
+  (`dots/tools_research.py`: 1–3 query DDG fan-out over
+  `actions/web_search`, `read_public_page` over `actions/scrape`;
+  `research_mode` parallel|browser|disabled) + local-first default path
+  (`core/llm_client` → gemini fallback) + **sources on pages**
+  (proposal → approve → `sources_json`, owner saves never clobber) +
+  voice `dot_create perms=` parsing
 * **6c** Dot Computers on JARVIS's sandbox/browser stacks (jail,
   browser/files/exec, audit, takeover, persistence, permissions)
 * **6d** scheduler (90 s runs, pause/retry/cancel, JARVIS patterns) +
