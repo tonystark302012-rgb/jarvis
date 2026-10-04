@@ -4832,3 +4832,117 @@ class TestWorldView:
         props = self.wv.TOOL["parameters"]["properties"]
         assert self.wv.TOOL["parameters"]["required"] == ["lat", "lon"]
         assert props["mode"]["description"].startswith("satellite")
+
+
+class TestScreenMirror:
+    """Batch 5i — loopback MJPEG screen mirror (real local HTTP stream)."""
+
+    @pytest.fixture(autouse=True)
+    def _f(self, monkeypatch):
+        import actions.screen_mirror as sm
+        self.sm = sm
+        sm._stop()                      # belt & braces between tests
+        self._orig_grab = sm._grab
+        yield
+        sm._stop()
+        sm._grab = self._orig_grab
+
+    def _fake_grab(self, payload=b"FAKEJPEGDATA" * 8, delay=0.0):
+        def grab():
+            if delay:
+                time.sleep(delay)
+            return payload
+        self.sm._grab = grab
+
+    def test_status_when_idle(self):
+        assert "not running" in self.sm.screen_mirror({"action": "status"})
+
+    def test_stop_when_idle_honest(self):
+        assert "not running" in self.sm.screen_mirror({"action": "stop"})
+
+    def test_start_and_fetch_frames_end_to_end(self):
+        self._fake_grab(payload=b"FRAMEBYTES")
+        # pick a likely-free high port
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        out = self.sm.screen_mirror({"action": "start", "port": port,
+                                     "fps": 12}, None)
+        assert "LIVE" in out and str(port) in out
+        assert self.sm._STATE["server"].server_address[0] == "127.0.0.1"
+        # real HTTP round-trip against the streaming endpoint
+        import urllib.request
+        url = f"http://127.0.0.1:{port}/stream"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            chunk = resp.read(400)
+        assert b"--framejarvis" in chunk
+        assert b"FRAMEBYTES" in chunk
+        # status page
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/", timeout=5) as resp:
+            page = resp.read().decode()
+        assert "/stream" in page
+        # status action reflects frames + served
+        st = self.sm.screen_mirror({"action": "status"})
+        assert "LIVE" in st and "frame(s) captured" in st
+        # stop tears it down
+        assert "stopped after" in self.sm.screen_mirror({"action": "stop"})
+        assert "not running" in self.sm.screen_mirror({"action": "status"})
+
+    def test_double_start_refused_with_existing_url(self):
+        self._fake_grab()
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        first = self.sm.screen_mirror({"action": "start", "port": port})
+        assert "LIVE" in first
+        second = self.sm.screen_mirror({"action": "start", "port": port})
+        assert "already running" in second and str(port) in second
+
+    def test_port_busy_honest(self):
+        import socket
+        blocker = socket.socket()
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        port = blocker.getsockname()[1]
+        try:
+            self._fake_grab()
+            out = self.sm.screen_mirror({"action": "start", "port": port})
+            assert "not free" in out and "pick another" in out
+            assert not self.sm._STATE["running"]
+        finally:
+            blocker.close()
+
+    def test_missing_capture_stack_is_honest(self):
+        # real _grab in this sandbox: mss/Pillow absent → instruction
+        self.sm._grab = self._orig_grab
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        out = self.sm.screen_mirror({"action": "start", "port": port})
+        assert "Screen capture unavailable" in out
+        assert "pip install" in out
+        assert not self.sm._STATE["running"]
+
+    def test_bad_params(self):
+        assert "between 1025" in self.sm.screen_mirror(
+            {"action": "start", "port": 80})
+        assert "port must be a number" in self.sm.screen_mirror(
+            {"action": "start", "port": "abc"})
+        assert "fps must be a number" in self.sm.screen_mirror(
+            {"action": "start", "fps": "x"})
+        assert "start | stop | status" in self.sm.screen_mirror(
+            {"action": "launch"})
+
+    def test_registers_through_discovery(self):
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions"))
+        assert "screen_mirror" in reg.names()
+        assert self.sm.TOOL["parameters"]["type"] == "OBJECT"
