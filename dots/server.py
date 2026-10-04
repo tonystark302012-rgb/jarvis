@@ -229,3 +229,154 @@ def api_memory_delete(pref_id: int) -> dict:
     if not store.delete_pref(pref_id):
         raise HTTPException(404, f"no preference #{pref_id}")
     return {"ok": True}
+
+
+# ── computers (per-Dot isolated machine — owner/takeover surface) ────────────
+
+@router.get("/api/computers")
+def api_list_computers(dot_id: int | None = None) -> list[dict]:
+    from . import computer
+    return computer.list_computers(dot_id)
+
+
+@router.post("/api/computers", status_code=201)
+def api_create_computer(payload: dict = Body(...)) -> dict:
+    from . import computer
+    dot_id = payload.get("dot_id")
+    if dot_id is None:
+        raise HTTPException(400, "dot_id required")
+    try:
+        return computer.create_for_dot(int(dot_id),
+                                       payload.get("perms"))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/api/computers/{cid}")
+def api_get_computer(cid: int) -> dict:
+    from . import computer
+    comp = computer.get(cid)
+    if comp is None:
+        raise HTTPException(404, f"no computer #{cid}")
+    return comp
+
+
+@router.post("/api/computers/{cid}/start")
+def api_start_computer(cid: int) -> dict:
+    from . import computer
+    try:
+        return computer.start(cid, actor="owner")
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/api/computers/{cid}/stop")
+def api_stop_computer(cid: int) -> dict:
+    from . import computer
+    try:
+        return computer.stop(cid, actor="owner")
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.patch("/api/computers/{cid}/perms")
+def api_computer_perms(cid: int, payload: dict = Body(...)) -> dict:
+    from . import computer
+    try:
+        return computer.set_perms(cid, payload.get("perms") or payload)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.delete("/api/computers/{cid}")
+def api_delete_computer(cid: int) -> dict:
+    from . import computer
+    if not computer.delete(cid, actor="owner"):
+        raise HTTPException(404, f"no computer #{cid}")
+    return {"ok": True}
+
+
+@router.get("/api/computers/{cid}/audit")
+def api_computer_audit(cid: int, limit: int = 100) -> list[dict]:
+    from . import computer
+    if computer.get(cid) is None:
+        raise HTTPException(404, f"no computer #{cid}")
+    return computer.audit_rows(cid, limit)
+
+
+def _op_result(result) -> dict:
+    if isinstance(result, dict) and "error" in result:
+        status = 403 if str(result["error"]).startswith("denied:") else 400
+        return _err(status, result["error"])
+    return result
+
+
+@router.post("/api/computers/{cid}/exec")
+def api_computer_exec(cid: int, payload: dict = Body(...)) -> dict:
+    from . import computer
+    comp = computer.get(cid)
+    if comp is None:
+        raise HTTPException(404, f"no computer #{cid}")
+    argv = payload.get("argv")
+    if not isinstance(argv, list):
+        return _err(400, "argv must be a JSON list of strings "
+                         "(no shell string, ever)")
+    return _op_result(computer.shell(comp, argv, payload.get("timeout"),
+                                     actor="owner"))
+
+
+@router.post("/api/computers/{cid}/files/list")
+def api_computer_files_list(cid: int, payload: dict = Body(default={})) -> dict:
+    from . import computer
+    comp = computer.get(cid)
+    if comp is None:
+        raise HTTPException(404, f"no computer #{cid}")
+    return _op_result(computer.files_list(
+        comp, str((payload or {}).get("path") or ""), actor="owner"))
+
+
+@router.post("/api/computers/{cid}/files/read")
+def api_computer_files_read(cid: int, payload: dict = Body(...)) -> dict:
+    from . import computer
+    comp = computer.get(cid)
+    if comp is None:
+        raise HTTPException(404, f"no computer #{cid}")
+    path = payload.get("path")
+    if not path:
+        return _err(400, "path required")
+    return _op_result(computer.files_read(comp, str(path), actor="owner"))
+
+
+@router.post("/api/computers/{cid}/files/write")
+def api_computer_files_write(cid: int, payload: dict = Body(...)) -> dict:
+    from . import computer
+    comp = computer.get(cid)
+    if comp is None:
+        raise HTTPException(404, f"no computer #{cid}")
+    path = payload.get("path")
+    if not path:
+        return _err(400, "path required")
+    return _op_result(computer.files_write(
+        comp, str(path), payload.get("content"),
+        append=bool(payload.get("append")), actor="owner"))
+
+
+_BROWSER_OPS = {"navigate", "read", "snapshot", "screenshot", "click",
+                "type", "key", "scroll"}
+
+
+@router.post("/api/computers/{cid}/browser")
+def api_computer_browser(cid: int, payload: dict = Body(...)) -> dict:
+    from . import computer
+    comp = computer.get(cid)
+    if comp is None:
+        raise HTTPException(404, f"no computer #{cid}")
+    op = str(payload.get("op") or "").strip()
+    if op not in _BROWSER_OPS:
+        return _err(400, f"op must be one of {sorted(_BROWSER_OPS)}")
+    kw = {k: v for k, v in payload.items() if k != "op"}
+    return _op_result(computer.browser(comp, op, actor="owner", **kw))

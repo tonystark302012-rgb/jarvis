@@ -79,3 +79,4 @@ config/vault.enc
 memory/events_fired.json
 memory/history.db
 memory/rag.db
+memory/dots_pcs/

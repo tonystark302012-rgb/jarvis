@@ -9,12 +9,23 @@ import pytest
 # Fixture: isolated db + TestClient + scripted brain
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _tmp_pcs_root(tmp_path):
+    def _root():
+        d = tmp_path / "dots_pcs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    return _root
+
+
 @pytest.fixture()
 def env(monkeypatch, tmp_path):
     import dots.db as db
     import dots.brain as brain
+    import dots.computer as computer
     monkeypatch.setattr(db, "_db_path", lambda: tmp_path / "dots.db")
+    monkeypatch.setattr(computer, "_pcs_root", _tmp_pcs_root(tmp_path))
     db.reset_for_tests()
+    computer.reset_for_tests()
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -26,6 +37,7 @@ def env(monkeypatch, tmp_path):
     brain.set_llm(lambda system, hist: f"scripted reply to: {hist[-1]['content']}")
     yield {"client": client, "brain": brain, "db": db, "tmp": tmp_path}
     brain.set_llm(None)
+    computer.reset_for_tests()
     db.reset_for_tests()
 
 
@@ -902,3 +914,370 @@ class TestBrainTools:
         from dots import store
         d = store.find_dot_by_name("Pars")
         assert d["permissions"] == {"research": True, "space": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 6c: Dot Computers — jail (T7), audit owner|agent (T8), lifecycle
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _FakeEngine:
+    def __init__(self, cid):
+        self.cid = cid
+        self.ops = []
+        self.closed = False
+
+    def perform(self, op, **kw):
+        self.ops.append((op, kw))
+        if op == "screenshot":
+            from dots import computer
+            shots = computer.dirs(self.cid)[0] / "_shots"
+            shots.mkdir(parents=True, exist_ok=True)
+            p = shots / "fake.png"
+            p.write_bytes(b"\x89PNG fake")
+            return {"ok": True, "path": "_shots/fake.png"}
+        if op == "snapshot":
+            return {"ok": True, "url": "https://ex.test/", "title": "T",
+                    "text": "body text",
+                    "elements": [{"sel": "#go", "text": "Go"}]}
+        if op == "navigate":
+            return {"ok": True, "url": kw.get("url"), "title": "T"}
+        return {"ok": True, **{k: str(v) for k, v in kw.items()}}
+
+    def close(self):
+        self.closed = True
+
+
+class TestDotComputer:
+    def _mk(self, env, perms=None, comp_perms=None):
+        from dots import computer, store
+        c = env["client"]
+        d = c.post("/api/dots", json={"name": "Op", "role": "r",
+                                      "permissions": perms or {}}).json()
+        r = c.post("/api/computers",
+                   json={"dot_id": d["id"], "perms": comp_perms or {}})
+        assert r.status_code == 201, r.text
+        return store.get_dot(d["id"]), r.json()
+
+    def test_create_dirs_and_one_per_dot(self, env, tmp_path):
+        from dots import computer, store
+        c = env["client"]
+        d = store.create_dot("Solo")
+        r = c.post("/api/computers", json={"dot_id": d["id"]})
+        assert r.status_code == 201, r.text
+        comp = r.json()
+        assert Path(comp["work"]).exists() and Path(comp["profile"]).exists()
+        assert str(tmp_path) in comp["work"]          # isolated per test
+        again = c.post("/api/computers", json={"dot_id": d["id"]})
+        assert again.status_code == 400 and "already has" in again.text
+        assert c.post("/api/computers", json={"dot_id": 999}).status_code \
+            == 404
+        assert computer.get(comp["id"])["status"] == "stopped"
+        assert c.get(f"/api/computers/{comp['id']}").status_code == 200
+
+    def test_jail_t7(self, env):
+        # T7: .., absolute escapes and symlinks pointing out — all refused
+        dot, comp = self._mk(env, perms={"computer": True})
+        from dots import computer as pc
+        work = Path(comp["work"])
+        outside = work.parent / "outside.txt"
+        outside.write_text("secret", encoding="utf-8")
+        for bad in ("../outside.txt", str(outside), "/etc/passwd",
+                    "a/../../outside.txt"):
+            res = pc.files_write(comp, bad, "x")
+            assert "denied" in res["error"] and "escapes" in res["error"], bad
+            res = pc.files_read(comp, bad)
+            assert "denied" in res["error"], bad
+        link = work / "link.txt"
+        link.symlink_to(outside)
+        res = pc.files_read(comp, "link.txt")
+        assert "denied" in res["error"]             # resolve follows link
+        res = pc.files_list(comp, "..")
+        assert "denied" in res["error"]
+        assert not outside.exists() or outside.read_text() == "secret"
+        # legit file lands inside work
+        pc.files_write(comp, "notes/ok.txt", "fine")
+        assert (work / "notes" / "ok.txt").read_text() == "fine"
+
+    def test_files_ops_and_live_perm_gate(self, env):
+        dot, comp = self._mk(env, perms={"computer": True})
+        from dots import computer as pc
+        c = env["client"]
+        # files work while STOPPED (they persist by definition)
+        assert pc.files_write(comp, "a.txt", "hello")["ok"] is True
+        got = pc.files_read(comp, "a.txt")
+        assert got["content"] == "hello"
+        lst = pc.files_list(comp, "")
+        assert "a.txt" in lst["entries"]
+        assert "no such" in pc.files_read(comp, "missing.txt")["error"]
+        # live toggle: files off → next call refused (no restart)
+        r = c.patch(f"/api/computers/{comp['id']}/perms",
+                    json={"perms": {"files": False}})
+        assert r.status_code == 200 and r.json()["perms"]["files"] is False
+        assert pc.files_read(comp, "a.txt")["error"].startswith("denied:")
+        comp2 = pc.get(comp["id"])
+        assert comp2["perms"]["files"] is False
+        # audit recorded both the write and the denial
+        rows = pc.audit_rows(comp["id"])
+        assert any(r["action"] == "files_write" and r["ok"] for r in rows)
+        assert any(r["action"] == "files_read" and not r["ok"]
+                   for r in rows)
+
+    def test_exec_argv_timeout_output(self, env):
+        import sys
+        import time as _t
+        dot, comp = self._mk(env, perms={"computer": True},
+                             comp_perms={"shell": True})
+        from dots import computer as pc
+        # shell needs the machine running
+        stopped = pc.shell(comp, [sys.executable, "-c", "print(1)"])
+        assert "stopped" in stopped["error"]
+        pc.start(comp["id"])
+        comp = pc.get(comp["id"])
+        res = pc.shell(comp, [sys.executable, "-c", "print('hi')"])
+        assert res["ok"] and "hi" in res["stdout"] and res["returncode"] == 0
+        # argv must be a LIST — a shell line is refused, ever
+        assert "no shell string" in pc.shell(comp, "ls -la")["error"]
+        # timeout: 1 s kill of a 5 s sleeper, honest error
+        t0 = _t.monotonic()
+        res = pc.shell(comp, [sys.executable, "-c", "import time; time.sleep(5)"],
+                       timeout=1)
+        assert _t.monotonic() - t0 < 4 and "timeout after 1s" in res["error"]
+        # hard cap clamp: 999 → 60 s cap, quick command still runs
+        res = pc.shell(comp, [sys.executable, "-c", "print('c')"],
+                       timeout=999)
+        assert res["timeout"] == 60 and "c" in res["stdout"]
+        # output cap with truncation marker
+        res = pc.shell(comp, [sys.executable, "-c", "print('x' * 200000)"])
+        assert res["truncated"] and "[output truncated]" in res["stdout"]
+        assert len(res["stdout"]) <= 64 * 1024 + 40
+
+    def test_stop_kills_live_process_t8(self, env):
+        import sys
+        import threading
+        import time as _t
+        dot, comp = self._mk(env, perms={"computer": True},
+                             comp_perms={"shell": True})
+        from dots import computer as pc
+        pc.start(comp["id"])
+        comp = pc.get(comp["id"])
+        result = {}
+
+        def run():
+            result["res"] = pc.shell(
+                comp, [sys.executable, "-c", "import time; time.sleep(30)"])
+
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        _t.sleep(0.5)                    # let the Popen register
+        t0 = _t.monotonic()
+        pc.stop(comp["id"], actor="owner")
+        th.join(timeout=6)
+        assert not th.is_alive(), "stop must kill the live exec"
+        assert _t.monotonic() - t0 < 8
+        assert pc.get(comp["id"])["status"] == "stopped"
+        rows = pc.audit_rows(comp["id"])
+        stop_row = [r for r in rows if r["action"] == "stop"][0]
+        assert stop_row["actor"] == "owner"
+        assert "killed 1" in stop_row["detail"]
+
+    def test_start_stop_persistence_t8(self, env):
+        dot, comp = self._mk(env, perms={"computer": True})
+        from dots import computer as pc
+        pc.files_write(comp, "keep.txt", "persist me")
+        pc.start(comp["id"])
+        assert pc.get(comp["id"])["status"] == "running"
+        pc.stop(comp["id"])
+        pc.start(comp["id"], actor="owner")
+        comp = pc.get(comp["id"])
+        assert pc.files_read(comp, "keep.txt")["content"] == "persist me"
+        assert Path(comp["profile"]).exists()   # browser profile survives
+        pc.stop(comp["id"])
+        rows = pc.audit_rows(comp["id"])
+        assert {r["actor"] for r in rows if r["action"] == "start"} == \
+            {"owner"}
+
+    def test_audit_owner_vs_agent_t8(self, env):
+        # T8: owner's route calls vs the dot's tool calls — both audited
+        dot, comp = self._mk(env, perms={"computer": True},
+                             comp_perms={"shell": True})
+        from dots import computer as pc
+        import sys
+        c = env["client"]
+        pc.start(comp["id"])
+        r = c.post(f"/api/computers/{comp['id']}/exec",
+                   json={"argv": [sys.executable, "-c", "print('own')"]})
+        assert r.status_code == 200 and "own" in r.json()["stdout"]
+        out = pc.run_agent_tool(dot["id"], "exec",
+                                {"argv": [sys.executable, "-c",
+                                          "print('agent')"]})
+        assert "agent" in out
+        rows = pc.audit_rows(comp["id"])
+        execs = [r for r in rows if r["action"] == "exec"]
+        assert {r["actor"] for r in execs} == {"owner", "agent"}
+        assert all(r["ok"] for r in execs)
+        # route shape: audit endpoint returns rows newest-first
+        j = c.get(f"/api/computers/{comp['id']}/audit").json()
+        assert j[0]["id"] >= j[-1]["id"] and j[0]["actor"] in ("owner",
+                                                               "agent")
+        # argv string over HTTP is refused with an honest message
+        bad = c.post(f"/api/computers/{comp['id']}/exec",
+                     json={"argv": "ls -la"})
+        assert bad.status_code == 400 and "JSON list" in bad.json()["error"]
+
+    def test_browser_honest_refusal_without_playwright(self, env, monkeypatch):
+        dot, comp = self._mk(env, perms={"computer": True},
+                             comp_perms={"browser": True})
+        from dots import computer as pc
+        monkeypatch.setattr(pc, "_pw_available", lambda: False)
+        pc.start(comp["id"])
+        res = pc.browser(pc.get(comp["id"]), "navigate", actor="agent",
+                         url="https://x.test")
+        assert "playwright is not installed" in res["error"]
+        assert any(r["action"] == "browser_navigate" and not r["ok"]
+                   for r in pc.audit_rows(comp["id"]))
+
+    def test_browser_fake_engine_flow(self, env, monkeypatch):
+        import json as _json
+        dot, comp = self._mk(env, perms={"computer": True},
+                             comp_perms={"browser": True})
+        from dots import computer as pc
+        made = []
+
+        def factory(cid):
+            e = _FakeEngine(cid)
+            made.append(e)
+            return e
+
+        monkeypatch.setattr(pc, "_engine_factory", factory)
+        monkeypatch.setattr(pc, "_pw_available", lambda: True)  # fake in
+        c = env["client"]
+        comp = pc.get(comp["id"])
+        # gate order: browser permission before anything
+        comp_off = pc.set_perms(comp["id"], {"browser": False})
+        assert pc.browser(comp_off, "navigate", url="https://a")[
+            "error"].startswith("denied:")
+        assert made == []
+        pc.set_perms(comp["id"], {"browser": True})
+        comp_on = pc.get(comp["id"])
+        # must be running
+        assert "stopped" in pc.browser(comp_on, "read")["error"]
+        pc.start(comp["id"])
+        r = c.post(f"/api/computers/{comp['id']}/browser",
+                   json={"op": "navigate", "url": "https://site.test"})
+        assert r.status_code == 200 and r.json()["url"] == "https://site.test"
+        for op, payload in (("click", {"target": "#go"}),
+                            ("type", {"target": "#q", "text": "hello"}),
+                            ("key", {"key": "Enter"}),
+                            ("scroll", {"direction": "down", "amount": 300}),
+                            ("read", {}), ("snapshot", {})):
+            rr = c.post(f"/api/computers/{comp['id']}/browser",
+                        json={"op": op, **payload})
+            assert rr.status_code == 200, (op, rr.text)
+        snap = c.post(f"/api/computers/{comp['id']}/browser",
+                      json={"op": "snapshot"}).json()
+        assert snap["elements"][0]["sel"] == "#go"
+        shot = c.post(f"/api/computers/{comp['id']}/browser",
+                      json={"op": "screenshot"}).json()
+        assert (Path(comp["work"]) / shot["path"]).exists()
+        assert c.post(f"/api/computers/{comp['id']}/browser",
+                      json={"op": "eval"}).status_code == 400
+        ops_done = [o for o, _ in made[0].ops]
+        assert ops_done == ["navigate", "click", "type", "key", "scroll",
+                            "read", "snapshot", "snapshot", "screenshot"]
+        # stop closes the engine (worker joined)
+        pc.stop(comp["id"])
+        assert made[0].closed is True
+        rows = pc.audit_rows(comp["id"])
+        assert any(r["action"].startswith("browser_") and r["actor"] == "owner"
+                   for r in rows)
+
+    def test_brain_loop_with_computer_tools(self, env, monkeypatch):
+        import sys
+        from dots import brain, computer as pc, store, tools
+        dot, comp = self._mk(env, perms={"computer": True},
+                             comp_perms={"shell": True})
+        pc.start(comp["id"])
+        dot = store.get_dot(dot["id"])
+        names = [t["function"]["name"] for t in tools.specs_for(dot)]
+        assert "exec" in names and "computer_click" in names
+        state = {"n": 0}
+
+        def llm(messages, tools):
+            state["n"] += 1
+            if state["n"] == 1:
+                return {"content": "", "tool_calls": [
+                    {"id": "c1", "function": {
+                        "name": "exec",
+                        "arguments": {"argv": [sys.executable, "-c",
+                                               "print(21*2)"]}}}]}
+            return {"content": "the answer is 42", "tool_calls": []}
+
+        brain.set_llm(llm)
+        out = brain.reply(dot, "dot:pc1", "what is 21*2?")
+        assert out == "the answer is 42"
+        rows = pc.audit_rows(comp["id"])
+        agent_exec = [r for r in rows if r["action"] == "exec"
+                      and r["actor"] == "agent"]
+        assert agent_exec and agent_exec[0]["ok"]
+        assert "print(21*2)" in agent_exec[0]["detail"]
+        # computer permission off → no specs, honest denial through router
+        bare = store.create_dot("NoPC")
+        assert tools.specs_for(bare) == []
+        assert tools.run_tool(bare, "exec", {"argv": ["x"]}).startswith(
+            "denied:")
+        # permission on but NO computer yet → honest creation hint
+        ghost = store.create_dot("Ghost", permissions={"computer": True})
+        out = tools.run_tool(ghost, "files_list", {})
+        assert "no computer yet" in out and "pc action=create" in out
+
+    def test_voice_pc_flow(self, env):
+        import sys
+        from actions.pcs import pc as pc_action
+        c = env["client"]
+        c.post("/api/dots", json={"name": "Oper", "role": "r",
+                                  "permissions": {"computer": True}})
+
+        def say(**kw):
+            return pc_action(kw)
+
+        assert "Computer #1 ready" in say(action="create", dot="Oper",
+                                          perms="files,shell")
+        assert "has no computer" not in say(action="show", dot="Oper")
+        assert "started" in say(action="start", dot="Oper")
+        out = say(action="exec", dot="Oper",
+                  argv=f"{sys.executable} -c \"print('voice')\"")
+        assert "voice" in out
+        assert "rc 0" in out
+        w = say(action="files_write", dot="Oper", path="v.txt",
+                content="via voice")
+        assert w.startswith("Wrote")
+        assert "via voice" in say(action="files_read", dot="Oper",
+                                  path="v.txt")
+        assert "v.txt" in say(action="files_list", dot="Oper")
+        assert "perms" in say(action="perms", dot="Oper",
+                              perms="shell=false")
+        assert "denied" in say(action="exec", dot="Oper",
+                               argv=f"{sys.executable} -c 'print(1)'")
+        audit = say(action="audit", dot="Oper")
+        assert "[owner] exec" in audit and "[owner] files_write" in audit
+        assert "#1 for Oper" in say(action="list")
+        assert "Unknown pc action" in say(action="fly", dot="Oper")
+        known = say(action="fly", dot="Oper")
+        for a in ("create", "exec", "browser", "audit"):
+            assert a in known
+        assert "stopped" in say(action="stop", dot="Oper")
+        assert "No Dot named" in say(action="show", dot="Nobody")
+
+    def test_delete_computer(self, env):
+        dot, comp = self._mk(env, perms={"computer": True})
+        from dots import computer as pc
+        c = env["client"]
+        pc.start(comp["id"])
+        work = Path(comp["work"])
+        assert work.exists()
+        r = c.delete(f"/api/computers/{comp['id']}")
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert pc.get(comp["id"]) is None
+        assert not work.exists()
+        assert c.get(f"/api/computers/{comp['id']}").status_code == 404
+        assert c.delete("/api/computers/12345").status_code == 404

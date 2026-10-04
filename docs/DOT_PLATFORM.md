@@ -313,8 +313,16 @@ gates protect agent writes (T10).
   (`core/llm_client` → gemini fallback) + **sources on pages**
   (proposal → approve → `sources_json`, owner saves never clobber) +
   voice `dot_create perms=` parsing
-* **6c** Dot Computers on JARVIS's sandbox/browser stacks (jail,
-  browser/files/exec, audit, takeover, persistence, permissions)
+* **6c** ✅ Dot Computers (`dots/computer.py`): per-computer
+  `memory/dots_pcs/<id>/work` jail + `profile/` persistence, `_jail`
+  via resolve (T7), argv-only exec 30/60 s + output cap + stop kills
+  live procs, browser = optional playwright on ONE worker thread per
+  computer (honest refusal when missing), live perms toggles (read
+  from the row every call), every op → `computer_audit` actor
+  owner|agent (T8). Brain tools (`dots/tools_computer.py`, dot perms
+  `computer`), owner HTTP takeover surface (13 routes: start/stop/
+  perms/exec/files/browser/audit), voice `pc` action (shlex argv —
+  never a shell)
 * **6d** scheduler (90 s runs, pause/retry/cancel, JARVIS patterns) +
   skills learning loop (draft → owner publish)
 * **6e** Slack integration + voice-call session/captions (Gemini Live)
