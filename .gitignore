@@ -80,3 +80,4 @@ memory/events_fired.json
 memory/history.db
 memory/rag.db
 memory/dots_pcs/
+config/dots_slack.json

@@ -498,3 +498,106 @@ def api_archive_skill(sid: int) -> dict:
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(409, str(e))
+
+
+# ── Slack events (mention → Dot thread, allowlists — T10) ────────────────────
+
+@router.post("/api/slack/events")
+def api_slack_events(payload: dict = Body(...)) -> dict:
+    """Slack events API endpoint: handshake echoes the challenge;
+    everything else is gated by allowlists FIRST — a rejected event is
+    acknowledged (200) and NOTHING executes (T10)."""
+    from . import slack
+    if isinstance(payload, dict) and payload.get("type") == \
+            "url_verification":
+        return {"challenge": payload.get("challenge", "")}
+    # fast path for rejections happens inside; allowed work may take a
+    # brain round-trip → background so Slack always gets its 200 fast
+    return slack.handle_event(payload, background=True)
+
+
+# ── voice calls (phase 1 core: session, captions, receipt) ───────────────────
+
+@router.get("/api/calls")
+def api_list_calls(status: str | None = None) -> list[dict]:
+    from . import voice
+    return voice.list_calls(status if status not in ("", "any")
+                            else None)
+
+
+@router.post("/api/calls", status_code=201)
+def api_start_call(payload: dict = Body(...)) -> dict:
+    from . import voice
+    dot_id = payload.get("dot_id")
+    if dot_id is None:
+        raise HTTPException(400, "dot_id required")
+    try:
+        return voice.start(int(dot_id), payload.get("page_id"))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@router.get("/api/calls/{cid}")
+def api_get_call(cid: int) -> dict:
+    from . import voice
+    try:
+        return voice.get(cid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/api/calls/{cid}/captions")
+def api_caption(cid: int, payload: dict = Body(...)) -> dict:
+    from . import voice
+    res = voice.caption(cid, payload.get("speaker", "user"),
+                        payload.get("text"),
+                        generate_reply=bool(
+                            payload.get("generate_reply", True)))
+    if "error" in res:
+        status = 404 if "no call" in res["error"] else 400
+        return _err(status, res["error"])
+    return res
+
+
+@router.post("/api/calls/{cid}/end")
+def api_end_call(cid: int) -> dict:
+    from . import voice
+    try:
+        return voice.end(cid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@router.get("/api/calls/{cid}/transcript")
+def api_call_transcript(cid: int, format: str = "json"):
+    """Receipt: JSON list, or a downloadable text transcript."""
+    from fastapi.responses import PlainTextResponse
+    from . import voice
+    if format not in ("json", "text"):
+        return _err(400, "format must be json or text")
+    try:
+        data = voice.transcript(cid, format=format)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if format == "text":
+        return PlainTextResponse(
+            data, headers={
+                "Content-Disposition":
+                    f"attachment; filename=call-{cid}-transcript.txt"})
+    return data
+
+
+@router.post("/api/calls/{cid}/background")
+def api_call_background(cid: int, payload: dict = Body(...)) -> dict:
+    from . import voice
+    try:
+        return voice.background(cid, payload.get("instruction"),
+                                int(payload.get("every_seconds", 120)))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))

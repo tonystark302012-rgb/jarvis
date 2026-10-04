@@ -1676,3 +1676,297 @@ class TestLearning:
             assert drafts[0]["body_md"].startswith("SUMMARY::")
         finally:
             learning.set_summariser(None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 6e: Slack (T10 allowlists) + voice calls (captions, receipt)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _slack_payload(text="@Researcher hello there", user="U_OWNER",
+                   team="T_WORK", channel="C1", ts="1111.2222",
+                   thread=None):
+    ev = {"type": "message", "text": text, "user": user,
+          "channel": channel, "ts": ts}
+    if thread:
+        ev["thread_ts"] = thread
+    return {"type": "event_callback", "team_id": team, "event": ev}
+
+
+class TestSlackEvents:
+    def _cfg(self, monkeypatch, workspaces=("T_WORK",),
+             users=("U_OWNER",), token="xoxb-test"):
+        from dots import slack
+        monkeypatch.setattr(slack, "_config", lambda: {
+            "bot_token": token,
+            "workspaces": list(workspaces),
+            "users": list(users),
+        })
+        return slack
+
+    def test_url_verification_handshake(self, env):
+        c = env["client"]
+        r = c.post("/api/slack/events",
+                   json={"type": "url_verification",
+                         "challenge": "chall-123"})
+        assert r.status_code == 200 and r.json()["challenge"] == "chall-123"
+
+    def test_t10_non_allowlisted_ack_and_nothing_runs(self, env,
+                                                      monkeypatch):
+        # T10: non-allowlisted Slack user → event acknowledged, nothing
+        # executed (no messages, no brain, no Slack post)
+        slack = self._cfg(monkeypatch)
+        from dots import store
+        calls = {"brain": 0, "post": 0}
+        monkeypatch.setattr(slack, "_post_slack",
+                            lambda *a, **k: calls.__setitem__(
+                                "post", calls["post"] + 1) or {"ok": True})
+        res = slack.handle_event(_slack_payload(user="U_STRANGER"))
+        assert res["ok"] is True and "allowlist" in res["ignored"]
+        res = slack.handle_event(
+            _slack_payload(team="T_EVIL"))
+        assert res["ok"] is True and "allowlist" in res["ignored"]
+        # secure default: EMPTY allowlists deny everything
+        self._cfg(monkeypatch, workspaces=(), users=())
+        res = slack.handle_event(_slack_payload())
+        assert "allowlist" in res["ignored"]
+        assert store.list_messages("slack:C1:1111.2222") == []
+        assert calls["post"] == 0
+        # route acknowledges with 200 too
+        c = env["client"]
+        self._cfg(monkeypatch)
+        r = c.post("/api/slack/events", json=_slack_payload(user="U_BAD"))
+        assert r.status_code == 200 and r.json()["ok"] is True
+
+    def test_mention_runs_brain_and_thread_reply(self, env, monkeypatch):
+        slack = self._cfg(monkeypatch)
+        from dots import store
+        posted = []
+
+        def fake_post(method, payload):
+            posted.append((method, payload))
+            return {"ok": True}
+
+        monkeypatch.setattr(slack, "_post_slack", fake_post)
+        env["client"].post("/api/dots", json={"name": "Researcher",
+                                              "role": "cite sources"})
+        res = slack.handle_event(_slack_payload(
+            text="@Researcher summarise this thread"))
+        assert res["ok"] and res["dot"] == "Researcher"
+        assert res["reply"].startswith("scripted reply to:")
+        assert res["posted"] is True
+        # conversation namespace: slack:<channel>:<thread_ts>
+        msgs = store.list_messages("slack:C1:1111.2222")
+        assert msgs[-2]["role"] == "user" and msgs[-1]["role"] == "dot"
+        assert msgs[-2]["meta"]["slack"]["user"] == "U_OWNER"
+        # reply went into the SAME thread
+        method, body = posted[0]
+        assert method == "chat.postMessage"
+        assert body["channel"] == "C1" and body["thread_ts"] == "1111.2222"
+        # thread continuity row
+        rows = store.list_messages("slack:C1:1111.2222")
+        assert rows and store.find_dot_by_name("researcher")["id"] == 1
+        # background mode → 200 instantly, work in a thread
+        r = env["client"].post("/api/slack/events",
+                               json=_slack_payload(
+                                   text="@Researcher another"))
+        assert r.status_code == 200 and r.json()["processing"] is True
+        got = _wait_for(lambda: len(
+            store.list_messages("slack:C1:1111.2222")) >= 4)
+        assert got
+
+    def test_no_mention_and_bot_messages_ignored(self, env, monkeypatch):
+        slack = self._cfg(monkeypatch)
+        res = slack.handle_event(_slack_payload(text="just chatting"))
+        assert "@mention" in res["ignored"]
+        res = slack.handle_event(_slack_payload(text="@Ghost hey"))
+        assert "no Dot named" in res["ignored"]
+        p = _slack_payload(text="@Researcher hi")
+        p["event"]["bot_id"] = "B1"
+        res = slack.handle_event(p)
+        assert "bot" in res["ignored"]
+        res = slack.handle_event({"type": "event_callback",
+                                  "event": {"type": "app_mention"}})
+        assert "not a message event" in res["ignored"]
+        assert slack.evaluate("garbage")[0] is False
+
+    def test_thread_reply_targets_parent_thread(self, env, monkeypatch):
+        # a reply INSIDE an existing thread keeps the parent thread_ts
+        slack = self._cfg(monkeypatch)
+        from dots import store
+        posted = []
+        monkeypatch.setattr(
+            slack, "_post_slack",
+            lambda m, p: posted.append(p) or {"ok": True})
+        env["client"].post("/api/dots", json={"name": "Researcher",
+                                              "role": "r"})
+        slack.handle_event(_slack_payload(ts="9999.0001",
+                                          thread="1111.2222"))
+        msgs = store.list_messages("slack:C1:1111.2222")
+        assert msgs, "convo keyed by THREAD, not the reply ts"
+        assert posted[0]["thread_ts"] == "1111.2222"
+
+
+class TestVoiceCalls:
+    def _dot(self, env, name="Guide"):
+        r = env["client"].post("/api/dots", json={"name": name,
+                                                  "role": "be helpful"})
+        assert r.status_code == 201
+        return r.json()
+
+    def test_start_end_timer_and_duplicate(self, env):
+        from actions.dots import dots as dots_action
+        from dots import voice
+        self._dot(env)
+        out = dots_action({"action": "call_start", "dot": "Guide"})
+        assert "Call #1 live" in out and "captions-only" in out
+        out = dots_action({"action": "call_start", "dot": "Guide"})
+        assert "already in call" in out
+        c = env["client"]
+        live = c.get("/api/calls?status=active").json()
+        assert len(live) == 1 and live[0]["elapsed_seconds"] >= 0
+        got = c.get(f"/api/calls/{live[0]['id']}").json()
+        assert got["status"] == "active" and got["elapsed_seconds"] >= 0
+        assert c.post("/api/calls", json={"dot_id": 99}).status_code == 404
+        ended = dots_action({"action": "call_end", "dot": "Guide"})
+        assert "ended" in ended and "transcript lines" in ended
+        # honest: caption after end
+        res = voice.caption(1, "user", "hello?")
+        assert "ended" in res["error"]
+        # duplicate call allowed AFTER end
+        assert "Call #2 live" in dots_action({"action": "call_start",
+                                              "dot": "Guide"})
+
+    def test_captions_store_and_generate_reply(self, env):
+        from dots import store, voice
+        d = self._dot(env)
+        c = voice.start(d["id"])
+        res = voice.caption(c["id"], "user", "what is on my page?")
+        assert res["ok"] and res["speaker"] == "user"
+        assert res["dot_caption"].startswith("scripted reply to:")
+        msgs = store.list_messages(f"call:{c['id']}")
+        assert [m["role"] for m in msgs] == ["user", "dot"]
+        assert msgs[0]["meta"]["speaker"] == "user"
+        assert msgs[1]["meta"]["speaker"] == "dot"
+        # dot-side caption (audio path / owner injection) stores directly
+        res = voice.caption(c["id"], "dot", "speaking line",
+                            generate_reply=False)
+        assert res["ok"]
+        # honest input errors
+        assert "speaker must" in voice.caption(c["id"], "alien", "x")["error"]
+        assert voice.caption(c["id"], "user", "  ")["error"] == \
+            "empty caption"
+        voice.end(c["id"])
+        assert "ended" in voice.caption(c["id"], "user", "late")["error"]
+        assert "no call" in voice.caption(999, "user", "x")["error"]
+
+    def test_transcript_receipt(self, env):
+        from dots import voice
+        c = env["client"]
+        d = self._dot(env)
+        call = voice.start(d["id"])
+        voice.caption(call["id"], "user", "hello agent",
+                      generate_reply=False)
+        voice.caption(call["id"], "dot", "hi owner", generate_reply=False)
+        # json receipt (API)
+        j = c.get(f"/api/calls/{call['id']}/transcript?format=json").json()
+        assert [m["speaker"] for m in j] == ["user", "dot"]
+        assert j[0]["content"] == "hello agent"
+        # text receipt = downloadable attachment
+        r = c.get(f"/api/calls/{call['id']}/transcript?format=text")
+        assert r.status_code == 200
+        assert "call-1-transcript.txt" in \
+            r.headers.get("content-disposition", "")
+        body = r.text
+        assert "[user] hello agent" in body and "[dot] hi owner" in body
+        assert "Call #1" in body
+        assert c.get("/api/calls/999/transcript").status_code == 404
+        assert c.get(
+            f"/api/calls/{call['id']}/transcript?format=xml"
+        ).status_code == 400
+        # voice receipt
+        from actions.dots import dots as dots_action
+        out = dots_action({"action": "call_transcript",
+                           "which": str(call["id"])})
+        assert "[user] hello agent" in out
+
+    def test_background_agent_reuses_scheduler(self, env, monkeypatch):
+        from actions.dots import dots as dots_action
+        from dots import scheduler, store, voice
+        d = self._dot(env)
+        call = voice.start(d["id"])
+        out = dots_action({"action": "call_background",
+                           "which": str(call["id"]),
+                           "message": "keep watching the inbox"})
+        assert "Background agent scheduled" in out and "task #1" in out
+        tasks = store.list_tasks()
+        assert len(tasks) == 1
+        assert tasks[0]["dot_id"] == d["id"]     # bound to CALL's dot
+        assert "call-1" in tasks[0]["name"]
+        assert scheduler.is_running()            # ensure_started called
+        # honest validation
+        c = env["client"]
+        assert c.post(f"/api/calls/{call['id']}/background",
+                      json={"instruction": ""}).status_code == 400
+        assert c.post("/api/calls/999/background",
+                      json={"instruction": "x"}).status_code == 404
+        assert "No Dot named" in dots_action(
+            {"action": "call_start", "dot": "NobodyDot"})
+
+    def test_provider_seam(self, env):
+        from dots import voice
+        d = self._dot(env)
+        assert voice.provider_name() == "captions-only"
+        started, stopped = [], []
+
+        class FakeLive:
+            name = "gemini-live"
+
+            def start(self, call):
+                started.append(call["id"])
+
+            def stop(self, call):
+                stopped.append(call["id"])
+
+        try:
+            voice.set_provider(FakeLive())
+            call = voice.start(d["id"])
+            assert call["provider"] == "gemini-live"
+            assert started == [call["id"]]
+            voice.end(call["id"])
+            assert stopped == [call["id"]]
+        finally:
+            voice.set_provider(None)
+        assert voice.provider_name() == "captions-only"
+
+    def test_call_page_context_and_unknown_actions(self, env):
+        from actions.dots import dots as dots_action
+        from actions.pages import pages as pages_action
+        from dots import voice
+        pages_action({"action": "space_create", "name": "S"})
+        pages_action({"action": "page_create", "space": "S",
+                      "title": "Plan", "content": "- ship it"})
+        self._dot(env)
+        out = dots_action({"action": "call_start", "dot": "Guide",
+                           "page": "Plan"})
+        assert "Call #1 live" in out
+        call = voice.list_calls("active")[0]
+        assert call["page_id"] is not None
+        # capture the SYSTEM prompt: proof the PAGE context reached it
+        from dots import brain
+        seen = {}
+
+        def see(system, hist):
+            seen["system"] = system
+            return "page-aware reply"
+
+        brain.set_llm(see)
+        out = dots_action({"action": "call_caption",
+                           "which": str(call["id"]),
+                           "message": "read the page"})
+        assert "page-aware reply" in out
+        assert "ship it" in seen["system"]
+        assert "Unknown dots action" in dots_action(
+            {"action": "call_teleport"})
+        voice.end(call["id"])
+        rows = dots_action({"action": "call_list"})
+        assert "#1 [ended]" in rows

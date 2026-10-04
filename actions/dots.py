@@ -303,6 +303,84 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
             f"#{r['id']} {icon.get(r['status'], '?')} {r['status']}: "
             f"{(r['output'] or '')[:160]}" for r in rows)
 
+    # ── voice calls (captions, timer, receipt, background agent) ──────
+    if action in ("call_start", "call"):
+        d, err = _require_dot(params)
+        if err:
+            return err
+        page = None
+        if params.get("page") not in (None, ""):
+            page = _resolve_page(params)
+            if page is None:
+                return f"No page {params.get('page')!r}."
+        from dots import voice
+        try:
+            c = voice.start(d["id"], page["id"] if page else None)
+        except (ValueError, KeyError) as e:
+            return str(e)
+        return (f"Call #{c['id']} live with Dot '{d['name']}' "
+                f"({voice.provider_name()}) — timer running. "
+                f"Captions: dots action=call_caption which={c['id']} "
+                f"message=… · end: dots action=call_end which={c['id']}")
+
+    if action in ("call_list", "calls"):
+        from dots import voice
+        rows = voice.list_calls()
+        if not rows:
+            return "No calls yet — dots action=call_start dot=…"
+        return "\n".join(
+            f"#{c['id']} [{c['status']}] {round(c['elapsed_seconds'])}s "
+            f"dot #{c['dot_id']}" for c in rows)
+
+    if action in ("call_end", "call_caption", "call_transcript",
+                  "call_background"):
+        cid = str(params.get("which") or params.get("call") or "").strip()
+        if not cid.isdigit():
+            d, err = _require_dot(params)
+            if err:
+                return (err + " (or pass which=#call-id)")
+            from dots import voice
+            live = [c for c in voice.list_calls("active")
+                    if c["dot_id"] == d["id"]]
+            if not live:
+                return f"No active call for '{d['name']}'."
+            cid = str(live[0]["id"])
+        from dots import voice
+        cid_i = int(cid)
+        try:
+            if action == "call_end":
+                c = voice.end(cid_i)
+                return (f"Call #{cid} ended ({round(c['elapsed_seconds'])}s, "
+                        f"{c['transcript_messages']} transcript lines). "
+                        f"Receipt: dots action=call_transcript "
+                        f"which={cid}")
+            if action == "call_caption":
+                text = str(params.get("message") or "").strip()
+                if not text:
+                    return ("call_caption needs message=… (what the "
+                            "caller said)")
+                res = voice.caption(cid_i,
+                                    str(params.get("speaker") or "user"),
+                                    text)
+                if "error" in res:
+                    return res["error"]
+                if res.get("dot_caption"):
+                    return f"{d_name_for(cid_i, params)}: {res['dot_caption']}"
+                return f"[caption stored] {res['text'][:200]}"
+            if action == "call_transcript":
+                return voice.transcript(cid_i, format="text")
+            # call_background
+            instruction = str(params.get("message") or
+                              params.get("instruction") or "").strip()
+            r = voice.background(cid_i, instruction)
+            return (f"Background agent scheduled on the call's Dot: "
+                    f"task #{r['task']['id']} every "
+                    f"{r['task']['every_seconds']}s — {r['note']}")
+        except KeyError as e:
+            return str(e)
+        except ValueError as e:
+            return str(e)
+
     # ── skills (miner drafts → OWNER publishes; T9) ───────────────────
     if action in ("skill_list", "skills"):
         status = str(params.get("status") or "").strip().lower()
@@ -347,7 +425,15 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
             "memory_list | memory_set | memory_delete | task_create | "
             "task_list | task_pause | task_resume | task_cancel | "
             "task_retry | task_runs | skill_list | skill_mine | "
-            "skill_publish | skill_archive")
+            "skill_publish | skill_archive | call_start | call_list | "
+            "call_end | call_caption | call_transcript | "
+            "call_background")
+
+
+def d_name_for(call_id: int, params: dict) -> str:
+    from dots import store, voice
+    c = voice.get(call_id)
+    return (store.get_dot(c["dot_id"]) or {}).get("name", "Dot")
 
 
 def _resolve_page(params: dict):
@@ -389,7 +475,10 @@ TOOL = {
                                       "task_cancel | task_retry | "
                                       "task_runs | skill_list | "
                                       "skill_mine | skill_publish | "
-                                      "skill_archive"},
+                                      "skill_archive | call_start | "
+                                      "call_list | call_end | "
+                                      "call_caption | call_transcript | "
+                                      "call_background"},
             "dot": {"type": "STRING",
                     "description": "Dot name or #id (chat/show/delete)"},
             "name": {"type": "STRING", "description": "New Dot's name"},
@@ -422,6 +511,12 @@ TOOL = {
             "status": {"type": "STRING",
                        "description": "skill_list filter: draft | "
                                       "published | archived"},
+            "call": {"type": "STRING",
+                     "description": "call # for call_* actions"},
+            "speaker": {"type": "STRING",
+                        "description": "call_caption: user (default, "
+                                       "triggers the Dot's reply) or "
+                                       "dot (audio path line)"},
         },
         "required": [],
     },

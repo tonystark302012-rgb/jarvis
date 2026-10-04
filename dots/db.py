@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS pending_changes (
   decided_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_changes(status);
+CREATE TABLE IF NOT EXISTS calls (
+  id INTEGER PRIMARY KEY,
+  dot_id INTEGER NOT NULL,
+  page_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'active',
+  provider TEXT NOT NULL DEFAULT 'none',
+  started_at REAL NOT NULL,
+  ended_at REAL
+);
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY,
   convo_key TEXT NOT NULL,

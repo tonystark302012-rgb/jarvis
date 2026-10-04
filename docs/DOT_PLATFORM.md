@@ -338,6 +338,19 @@ gates protect agent writes (T10).
   `read_skill_file` (jail `memory/dots_skills/`); optional
   `set_summariser` seam. Voice: `task_*` + `skill_*` on the `dots`
   action; auto-mine hook after each chat (drafts only)
-* **6e** Slack integration + voice-call session/captions (Gemini Live)
+* **6e** ✅ Slack (`dots/slack.py`): `POST /api/slack/events` —
+  url_verification handshake; `evaluate()` gates FIRST (workspace ∪
+  user allowlists, EMPTY list = deny-all, T10: rejected → 200 ack +
+  log only, nothing executes); `@DotName` → convo
+  `slack:<channel>:<thread_ts>` → brain → `chat.postMessage` back into
+  the SAME thread (seams `_config`/`_post_slack`, config gitignored).
+  Voice calls phase 1 (`dots/voice.py` + `calls` table): start/end +
+  live timer, per-speaker captions under `call:<id>` (user captions
+  generate the Dot's reply with optional page context), transcript
+  receipt (json list / text download), background agent = scheduler
+  task bound to the call's Dot, provider seam (`set_provider`, honest
+  `captions-only` without phase-2 audio). Mute/minimize = UI-side (6f).
+  Voice: `call_start|call_list|call_end|call_caption|call_transcript|
+  call_background` on the `dots` action
 * **6f** dashboard UI (spaces tree, block editor + slash, approval
   cards, computer panel, call UI)

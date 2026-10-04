@@ -791,3 +791,85 @@ def scan_for_mining(convo_prefixes=("dot:", "page:", "task:")) -> list[dict]:
             f"SELECT id, convo_key, role, content FROM messages"
             f" WHERE {where} ORDER BY id", params).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── voice calls (phase 1: session + captions transcript) ────────────────────
+def start_call(dot_id: int, page_id: int | None = None,
+               provider: str = "none") -> dict:
+    if get_dot(dot_id) is None:
+        raise KeyError(f"no dot #{dot_id}")
+    if page_id is not None and get_page(page_id) is None:
+        raise KeyError(f"no page #{page_id}")
+    with db._LOCK:
+        c = db._conn()
+        live = c.execute(
+            "SELECT id FROM calls WHERE dot_id = ? AND status = 'active'",
+            (int(dot_id),)).fetchone()
+        if live is not None:
+            raise ValueError(
+                f"dot #{dot_id} is already in call #{live['id']} — "
+                "end it first")
+        cur = c.execute(
+            "INSERT INTO calls (dot_id, page_id, status, provider,"
+            " started_at) VALUES (?,?, 'active', ?, ?)",
+            (int(dot_id), page_id, str(provider or "none"), _now()))
+        c.commit()
+        cid = cur.lastrowid
+    return get_call(cid)
+
+
+def get_call(cid: int) -> dict | None:
+    with db._LOCK:
+        r = db._conn().execute("SELECT * FROM calls WHERE id = ?",
+                               (int(cid),)).fetchone()
+    return dict(r) if r else None
+
+
+def list_calls(status: str | None = None) -> list[dict]:
+    with db._LOCK:
+        if status is None:
+            rows = db._conn().execute(
+                "SELECT * FROM calls ORDER BY id DESC").fetchall()
+        else:
+            rows = db._conn().execute(
+                "SELECT * FROM calls WHERE status = ?"
+                " ORDER BY id DESC", (str(status),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def end_call(cid: int) -> dict:
+    call = get_call(cid)
+    if call is None:
+        raise KeyError(f"no call #{cid}")
+    if call["status"] != "active":
+        raise ValueError(f"call #{cid} already ended")
+    with db._LOCK:
+        c = db._conn()
+        c.execute("UPDATE calls SET status='ended', ended_at=? WHERE id=?",
+                  (_now(), int(cid)))
+        c.commit()
+    return get_call(cid)
+
+
+def set_call_provider(cid: int, provider: str) -> dict:
+    with db._LOCK:
+        c = db._conn()
+        c.execute("UPDATE calls SET provider=? WHERE id=?",
+                  (str(provider or "none"), int(cid)))
+        c.commit()
+    return get_call(cid)
+
+
+# ── slack thread continuity (convo_key ↔ channel:thread) ────────────────────
+def upsert_slack_thread(convo_key: str, channel: str,
+                        thread_ts: str) -> None:
+    now = _now()
+    with db._LOCK:
+        c = db._conn()
+        c.execute(
+            "INSERT INTO slack_threads (convo_key, channel, thread_ts,"
+            " updated_at) VALUES (?,?,?,?)"
+            " ON CONFLICT(convo_key) DO UPDATE SET channel=excluded.channel,"
+            " thread_ts=excluded.thread_ts, updated_at=excluded.updated_at",
+            (str(convo_key), str(channel), str(thread_ts), now))
+        c.commit()
