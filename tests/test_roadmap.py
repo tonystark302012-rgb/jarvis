@@ -103,7 +103,8 @@ class TestPrivacy:
                      "actions/web_search.py", "actions/phone_vision.py",
                      "actions/file_processor.py", "actions/flight_finder.py",
                      "actions/background_monitor.py",
-                     "actions/smart_home.py"):
+                     "actions/smart_home.py",
+                     "actions/gui_agent.py"):
             src = Path(path).read_text(encoding="utf-8")
             # gate call exists and precedes any network import in handler
             assert '_privacy.gate(' in src, path
@@ -3717,3 +3718,182 @@ class TestMCPNative:
         assert au.gate("mcp__srv__create_issue", {}, mode="observe")
         assert au.mutating("mcp", {"action": "list"}) is False
         assert au.mutating("mcp", {"action": "call"}) is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 4c — GUI agent (desktop computer-use loop)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestGUIAgent:
+    @pytest.fixture(autouse=True)
+    def _fakes(self, monkeypatch):
+        import actions.gui_agent as ga
+        from core import agent_runtime as rt
+        self.ga, self.rt = ga, rt
+        rt.reset_for_tests()
+        ga._LAST_STATUS.clear()          # module-level: isolate across tests
+        self.captures = []
+        self.acts = []
+        monkeypatch.setattr(ga, "_capture",
+                            lambda: (self.captures.append(1) or b"IMG",
+                                     "image/jpeg"))
+        monkeypatch.setattr(ga, "_perform",
+                            lambda act: self.acts.append(dict(act)) or "ok")
+        # default decide: overridden per test
+        self.script: list = []
+        monkeypatch.setattr(ga, "_decide",
+                            lambda *a, **k: (self.script.pop(0)
+                                             if self.script else None))
+        yield
+        rt.reset_for_tests()
+
+    def _player(self):
+        class P:
+            calls = []
+            def show_content(self, title, body):
+                self.calls.append((title, body))
+        p = P()
+        p.calls = []
+        return p
+
+    def test_missing_goal(self):
+        assert "needs a goal" in self.ga.gui_agent({}, None)
+
+    def test_preview_default_without_confirm(self):
+        self.script = [{"say": "settings icon visible",
+                        "plan": [{"type": "click", "x": 10, "y": 20},
+                                 {"type": "key", "key": "enter"}]}]
+        out = self.ga.gui_agent({"goal": "enable dark mode"}, None)
+        assert "GUI preview" in out and "click" in out
+        assert "confirm=yes" in out
+        assert self.acts == []                 # nothing executed
+        assert len(self.captures) == 1
+
+    def test_execute_with_confirm_done_and_report(self):
+        self.script = [
+            {"say": "clicking settings", "act": {"type": "click",
+                                                 "x": 5, "y": 6}},
+            {"say": "dark mode on", "act": {"type": "done",
+                                            "proof": "Dark mode: ON"}},
+        ]
+        player = self._player()
+        out = self.ga.gui_agent({"goal": "dark mode", "confirm": "yes"},
+                                player)
+        assert "done — Dark mode: ON" in out
+        assert self.acts == [{"type": "click", "x": 5, "y": 6}]
+        assert player.calls and player.calls[0][0].startswith("GUI AGENT —")
+        # status reflects the run
+        st = self.ga.gui_agent({"action": "status"}, None)
+        assert "dark mode" in st and "done" in st
+
+    def test_budget_exhaustion_is_honest(self):
+        self.script = [{"say": f"step {i}", "act": {"type": "click",
+                                                    "x": i, "y": 0}}
+                       for i in range(10)]
+        out = self.ga.gui_agent({"goal": "endless", "confirm": "yes",
+                                 "max_steps": 3}, None)
+        assert "budget exhausted after 3" in out
+        assert len(self.acts) == 3
+
+    def test_stuck_detector(self):
+        same = {"say": "again", "act": {"type": "click", "x": 1, "y": 1}}
+        self.script = [dict(same), dict(same)]
+        out = self.ga.gui_agent({"goal": "x", "confirm": "yes"}, None)
+        assert "stuck" in out
+        assert len(self.acts) == 1             # never repeats a blind act
+
+    def test_garbage_decide_no_acts(self):
+        self.script = [None, None]             # both attempts unusable
+        out = self.ga.gui_agent({"goal": "x", "confirm": "yes"}, None)
+        assert "no usable JSON" in out
+        assert self.acts == []
+
+    def test_capture_failure_immediate(self):
+        import actions.gui_agent as ga
+        def boom():
+            raise RuntimeError("no display")
+        self.ga._capture = boom
+        out = ga.gui_agent({"goal": "x", "confirm": "yes"}, None)
+        assert "capture failed" in out and "no display" in out
+        assert self.script == []               # decide never reached
+
+    def test_privacy_blocks_before_capture(self):
+        import core.privacy as cp
+        cp.set(True)
+        try:
+            out = self.ga.gui_agent({"goal": "x", "confirm": "yes"}, None)
+        finally:
+            cp.set(False)
+        assert "Privacy mode is ON" in out
+        assert self.captures == []             # NOT EVEN ONE FRAME
+
+    def test_observe_forces_preview_even_with_confirm(self, monkeypatch):
+        import core.autonomy as au
+        monkeypatch.setattr(au, "get_mode", lambda: "observe")
+        self.script = [{"say": "plan", "plan": [{"type": "click",
+                                                 "x": 1, "y": 2}]}]
+        out = self.ga.gui_agent({"goal": "x", "confirm": "yes"}, None)
+        assert "GUI preview" in out and "OBSERVE" in out
+        assert self.acts == []
+
+    def test_auto_runs_without_confirm(self, monkeypatch):
+        import core.autonomy as au
+        monkeypatch.setattr(au, "get_mode", lambda: "auto")
+        self.script = [{"say": "done", "act": {"type": "done",
+                                               "proof": "ok"}}]
+        out = self.ga.gui_agent({"goal": "x"}, None)
+        assert "done — ok" in out
+
+    def test_cancel_between_steps(self):
+        ga = self.ga
+
+        def perform(act):
+            self.acts.append(dict(act))
+            ga.gui_agent({"action": "cancel"})   # user cancels mid-run
+        import actions.gui_agent as g2
+        # patch via module attr used by _run
+        self.ga._perform = perform
+        self.script = [{"say": f"s{i}", "act": {"type": "click",
+                                                "x": i, "y": 0}}
+                       for i in range(9)]
+        out = ga.gui_agent({"goal": "x", "confirm": "yes", "max_steps": 9},
+                           None)
+        assert "cancelled" in out
+        assert len(self.acts) == 1             # stopped at the boundary
+
+    def test_concurrent_run_refused(self):
+        self.rt.begin("gui")
+        out = self.ga.gui_agent({"goal": "x", "confirm": "yes"}, None)
+        assert "already active" in out
+        assert "Cancelling" in self.ga.gui_agent({"action": "cancel"}, None)
+
+    def test_cancel_idle(self):
+        assert "No GUI agent run to cancel" in self.ga.gui_agent(
+            {"action": "cancel"}, None)
+
+    def test_status_empty(self):
+        assert "No gui_agent run yet" in self.ga.gui_agent(
+            {"action": "status"}, None)
+
+    def test_parse_decision_contract(self):
+        pd = self.ga._parse_decision
+        good = '{"say": "hi", "act": {"type": "click", "x": 1, "y": 2}}'
+        assert pd(good)["act"]["type"] == "click"
+        assert pd("```json\n" + good + "\n```")["act"]["type"] == "click"
+        assert pd("prose only") is None
+        assert pd('{"say": "no act"}') is None
+        assert pd("") is None
+        plan = pd('{"plan": [1]}', plan_only=True)
+        assert plan == {"plan": [1]}
+        assert pd('{"say": "x"}', plan_only=True) is None
+
+    def test_registers_through_discovery(self):
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions"))
+        assert "gui_agent" in reg.names()
+
+    def test_gui_agent_in_enhance_set(self):
+        import core.autonomy as au
+        assert "gui_agent" in au.ENHANCE_TOOLS
+        assert au.enhancing("gui_agent", {}, mode="auto")["confirm"] == "yes"
+        assert au.enhancing("gui_agent", {}, mode="ask") == {}
