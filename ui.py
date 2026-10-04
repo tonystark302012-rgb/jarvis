@@ -82,8 +82,9 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
     print(f"[Video] playback unavailable ({_e}) — the HUD will not show video.")
 
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QPushButton,
+    QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
@@ -3351,6 +3352,10 @@ class _DashApi(QObject):
     def get(self, key: str, path: str) -> None:
         self._submit(key, "GET", path, None)
 
+    def get_raw(self, key: str, path: str) -> None:
+        """Fetch a binary payload (screenshot PNG) — payload arrives as bytes."""
+        self._submit(key, "GETRAW", path, None)
+
     def post(self, key: str, path: str, payload: dict) -> None:
         self._submit(key, "POST", path, payload)
 
@@ -3390,7 +3395,11 @@ class _DashApi(QObject):
                 })
             with urllib.request.urlopen(
                     req, timeout=25, context=self._ssl_ctx()) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
+                blob = resp.read()
+            if method == "GETRAW":
+                self.done.emit(key, blob)
+                return
+            body = blob.decode("utf-8", errors="replace")
             self.done.emit(key, json.loads(body) if body else None)
         except urllib.error.HTTPError as e:
             msg = f"HTTP {e.code}"
@@ -3503,8 +3512,26 @@ class SpacesPanel(_DashPanel):
     def __init__(self, mw):
         super().__init__(mw)
         self._spaces, self._pages, self._space_id = [], [], None
+        self._page_data: dict | None = None
+        self._editing = False
         self._header("SPACES", "pages · revisions · approvals",
                      refresh=self.refresh)
+
+        # owner toolbar — create content and edit pages right here, the same
+        # API the web block editor uses (PATCH carries base_rev for safety).
+        tb = QHBoxLayout(); tb.setSpacing(6)
+        ns = self._btn("  NEW SPACE", self._new_space)
+        set_icon(ns, "plus", C.TEXT_MED, 13)
+        tb.addWidget(ns)
+        np_ = self._btn("  NEW PAGE", self._new_page)
+        set_icon(np_, "file", C.TEXT_MED, 13)
+        tb.addWidget(np_)
+        tb.addStretch()
+        self._edit_btn = self._btn("  EDIT", self._toggle_edit, primary=True)
+        set_icon(self._edit_btn, "edit", "#ffffff", 13)
+        self._edit_btn.setEnabled(False)
+        tb.addWidget(self._edit_btn)
+        self._root.addLayout(tb)
 
         body = QSplitter(Qt.Orientation.Horizontal)
         # ── left: spaces + pages ─────────────────────────────────────────────
@@ -3590,21 +3617,67 @@ class SpacesPanel(_DashPanel):
             if not data:
                 self._page_lay.addWidget(self._empty("No pages in this space."))
             for pg in data:
-                b = self._btn(f"  {pg.get('title') or 'Untitled'}",
+                n_src = len(pg.get("sources") or [])
+                title = str(pg.get("title") or "Untitled")
+                if n_src:
+                    title += f"   [research · {n_src} src]"
+                b = self._btn(f"  {title}",
                               lambda _=False, p=pg: self._open_page(p["id"]))
                 set_icon(b, "file", C.TEXT_MED, 13)
-                b.setToolTip(f"page #{pg['id']} · rev {pg.get('rev')}")
+                b.setToolTip(f"page #{pg['id']} · rev {pg.get('rev')}"
+                             + (f" · {n_src} sources" if n_src else ""))
                 self._page_lay.addWidget(b)
             self._page_lay.addStretch()
         elif key == f"{self.SEC}:page":
             if isinstance(data, dict):
+                self._page_data = data
+                self._editing = False
+                self._viewer.setReadOnly(True)
+                self._edit_btn.setEnabled(True)
+                self._edit_btn.setText("  EDIT")
                 self._page_title.setText(
                     f"{data.get('title') or 'Untitled'}   (rev {data.get('rev')})")
-                self._viewer.setPlainText(data.get("content_md") or "(empty)")
+                body_md = data.get("content_md") or ""
+                srcs = data.get("sources") or []
+                if srcs:
+                    # Research receipt: every page that came back with sources
+                    # shows them inline so the run is auditable later.
+                    lines = []
+                    for s in srcs:
+                        if isinstance(s, dict):
+                            t = str(s.get("title") or s.get("url") or "").strip()
+                            u = str(s.get("url") or "").strip()
+                            lines.append(f"- [{t}]({u})" if u else f"- {t}")
+                        else:
+                            lines.append(f"- {s}")
+                    body_md += "\n\n---\n**SOURCES**\n\n" + "\n".join(lines)
+                self._viewer.setPlainText(body_md)
+        elif key == f"{self.SEC}:new_space":
+            self.mw.toast("Space created", "ok")
+            self.refresh()
+        elif key == f"{self.SEC}:new_page":
+            self.mw.toast("Page created", "ok")
+            if self._space_id:
+                self.api.get(f"{self.SEC}:pages",
+                             f"/api/spaces/{self._space_id}/pages")
+            if isinstance(data, dict) and data.get("id"):
+                self._open_page(data["id"])
+        elif key == f"{self.SEC}:save":
+            if isinstance(data, dict):
+                self._page_data = data
+                self._editing = False
+                self._viewer.setReadOnly(True)
+                self._edit_btn.setText("  EDIT")
+                self._page_title.setText(
+                    f"{data.get('title') or 'Untitled'}   (rev {data.get('rev')})")
+                self.mw.toast(f"Saved — rev {data.get('rev')}", "ok")
         elif key == f"{self.SEC}:pending" and isinstance(data, list):
             self._render_pending(data)
         elif key.startswith(f"{self.SEC}:approve") or key.startswith(f"{self.SEC}:decline"):
             self._note("proposal decided ✓")
+            self.mw.toast(
+                "Proposal approved" if ":approve" in key
+                else "Proposal declined", "ok")
             self.api.get(f"{self.SEC}:pending", "/api/pending?status=pending")
             self.mw.refresh_pending_badge()
 
@@ -3613,6 +3686,57 @@ class SpacesPanel(_DashPanel):
             self._note(msg, error=True)
             if key.endswith(":pending"):
                 self._render_pending_error(msg)
+            if key.endswith(":save"):
+                self.mw.toast(f"Save failed: {msg}", "err")
+                if "conflict" in msg.lower() or "rev" in msg.lower():
+                    if self._page_data and self._page_data.get("id"):
+                        self._open_page(self._page_data["id"])
+            elif key.endswith(":new_space") or key.endswith(":new_page"):
+                self.mw.toast(msg, "err")
+            elif key.endswith(":approve") or key.endswith(":decline"):
+                self.mw.toast(f"Decision failed: {msg}", "err")
+
+    def _new_space(self):
+        name = prompt_jarvis_text(self, "New space", "Space name:")
+        if not name:
+            return
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        self.api.post(f"{self.SEC}:new_space", "/api/spaces", {"name": name})
+
+    def _new_page(self):
+        if not self._space_id:
+            self.mw.toast("Pick a space first", "warn"); return
+        title = prompt_jarvis_text(self, "New page", "Page title:")
+        if not title:
+            return
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        self.api.post(f"{self.SEC}:new_page",
+                      f"/api/spaces/{self._space_id}/pages",
+                      {"title": title, "content_md": f"# {title}\n"})
+
+    def _toggle_edit(self):
+        """First press unlocks the markdown source; second press saves it
+        back with base_rev, so a concurrent Dot edit can never be clobbered."""
+        if self._page_data is None:
+            return
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        if not self._editing:
+            self._editing = True
+            self._viewer.setReadOnly(False)
+            self._viewer.setFocus()
+            self._edit_btn.setText("  SAVE")
+            self.mw.toast("Editing markdown source — press SAVE", "info", 2400)
+            return
+        pid = self._page_data.get("id")
+        self.api.patch(f"{self.SEC}:save:{pid}", f"/api/pages/{int(pid)}",
+                       {"base_rev": self._page_data.get("rev"),
+                        "content_md": self._viewer.toPlainText()})
+        self._viewer.setReadOnly(True)
+        self._editing = False
+        self._edit_btn.setText("  EDIT")
 
     def _open_page(self, pid: int):
         self._page_title.setText(f"page #{pid} …")
@@ -3680,6 +3804,22 @@ class AgentsPanel(_DashPanel):
         body = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget(); ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 6, 0); ll.setSpacing(6)
+        # owner CRUD — create, re-role and delete Dots right here (the same
+        # /api/dots endpoints the dashboard uses; permissions stay untouched).
+        ctb = QHBoxLayout(); ctb.setSpacing(4)
+        nd = self._btn("  NEW", self._new_dot, primary=True)
+        nd.setToolTip("Create a Dot")
+        set_icon(nd, "plus", "#ffffff", 12)
+        ctb.addWidget(nd)
+        ed = self._btn("EDIT", self._edit_dot)
+        ed.setToolTip("Change the selected Dot's role")
+        set_icon(ed, "edit", C.TEXT_MED, 12)
+        ctb.addWidget(ed)
+        dd = self._btn("DEL", self._del_dot)
+        dd.setToolTip("Delete the selected Dot")
+        set_icon(dd, "trash", C.RED, 12)
+        ctb.addWidget(dd)
+        ll.addLayout(ctb)
         self._dot_list = QScrollArea(); self._dot_list.setWidgetResizable(True)
         self._dot_box = QWidget()
         self._dot_lay = QVBoxLayout(self._dot_box)
@@ -3768,6 +3908,19 @@ class AgentsPanel(_DashPanel):
                     f"<span style='color:{C.PRI}'>— {name}</span><br>"
                     + _html_esc(str(reply)))
                 self._note(f"{name} replied")
+        elif key == f"{self.SEC}:new_dot":
+            self.mw.toast("Dot created", "ok")
+            self.refresh()
+            if isinstance(data, dict) and data.get("id"):
+                self._pick(data)
+        elif key == f"{self.SEC}:edit_dot":
+            self.mw.toast("Dot role updated", "ok")
+            self.refresh()
+        elif key == f"{self.SEC}:del_dot":
+            self.mw.toast("Dot deleted", "ok")
+            self._dot = None
+            self._chat.clear()
+            self.refresh()
         elif key == f"{self.SEC}:mem" and isinstance(data, list):
             self._mem.clear()
             if not data:
@@ -3776,10 +3929,59 @@ class AgentsPanel(_DashPanel):
                 self._mem.append(f"{m.get('key')} = {m.get('value')}")
 
     def _on_fail(self, key: str, msg: str) -> None:
+        if key.endswith(":new_dot") or key.endswith(":edit_dot") \
+                or key.endswith(":del_dot"):
+            self.mw.toast(msg, "err")
         if key.startswith(f"{self.SEC}:send"):
             self._chat_busy = False
             self._send_btn.setEnabled(True)
         super()._on_fail(key, msg)
+
+    def _new_dot(self):
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        name = prompt_jarvis_text(self, "New Dot", "Name:")
+        if not name:
+            return
+        role = prompt_jarvis_text(
+            self, "New Dot",
+            f"Role instructions for {name} (how it should behave):", "")
+        if role is None:
+            return
+        self.api.post(f"{self.SEC}:new_dot", "/api/dots",
+                      {"name": name, "role": role})
+
+    def _edit_dot(self):
+        if self._dot is None:
+            self.mw.toast("Pick a Dot first", "warn"); return
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        cur = str(self._dot.get("role_instructions")
+                  or self._dot.get("role") or "")
+        role = prompt_jarvis_text(
+            self, f"Edit {self._dot.get('name')}",
+            "Role instructions:", cur)
+        if role is None:
+            return
+        self.api.patch(f"{self.SEC}:edit_dot:{self._dot['id']}",
+                       f"/api/dots/{int(self._dot['id'])}", {"role": role})
+
+    def _del_dot(self):
+        if self._dot is None:
+            self.mw.toast("Pick a Dot first", "warn"); return
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            ans = QMessageBox.question(
+                self, "Delete Dot",
+                f"Delete  {self._dot.get('name')}  and its chat history?")
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        except Exception:                               # noqa: BLE001
+            return
+        if not self.api.configured():
+            return
+        self.api.delete(f"{self.SEC}:del_dot:{self._dot['id']}",
+                        f"/api/dots/{int(self._dot['id'])}")
 
     def _pick(self, d: dict):
         self._dot = d
@@ -3832,9 +4034,33 @@ class ComputersPanel(_DashPanel):
         self._root.addLayout(top)
 
         body = QSplitter(Qt.Orientation.Horizontal)
-        # shell column
-        sh = QWidget(); shl = QVBoxLayout(sh)
-        shl.setContentsMargins(0, 0, 6, 0); shl.setSpacing(6)
+        # left column — four sub-surfaces: shell / files / browser / screen
+        leftw = QWidget(); lwv = QVBoxLayout(leftw)
+        lwv.setContentsMargins(0, 0, 6, 0); lwv.setSpacing(6)
+        modes = QHBoxLayout(); modes.setSpacing(5)
+        self._mode_btns: dict[str, QPushButton] = {}
+        for key, text, ico in (("shell", "SHELL", "terminal"),
+                               ("files", "FILES", "folder"),
+                               ("browser", "BROWSER", "globe"),
+                               ("screen", "SCREEN", "eye")):
+            b = QPushButton(f" {text}")
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setFixedHeight(24)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            set_icon(b, ico, C.TEXT_MED, 12)
+            b.clicked.connect(lambda _=False, k=key: self._set_mode(k))
+            self._mode_btns[key] = b
+            modes.addWidget(b)
+        modes.addStretch()
+        lwv.addLayout(modes)
+        stack = QStackedWidget()
+        self._mode_stack = stack
+        lwv.addWidget(stack, stretch=1)
+
+        # SHELL page
+        shw = QWidget(); shl = QVBoxLayout(shw)
+        shl.setContentsMargins(0, 0, 0, 0); shl.setSpacing(6)
         shl.addWidget(self._sec_label("SHELL  (argv-only, allowlisted, audited)"))
         row = QHBoxLayout(); row.setSpacing(6)
         self._sh_in = QLineEdit()
@@ -3847,7 +4073,82 @@ class ComputersPanel(_DashPanel):
         self._sh_out.setFont(QFont("Courier New", 9))
         self._sh_out.setPlaceholderText("Command output appears here.")
         shl.addWidget(self._sh_out, stretch=1)
-        body.addWidget(sh)
+        stack.addWidget(shw)
+
+        # FILES page — jail-scoped list / read / write
+        fsw = QWidget(); fsl = QVBoxLayout(fsw)
+        fsl.setContentsMargins(0, 0, 0, 0); fsl.setSpacing(6)
+        fsl.addWidget(self._sec_label(
+            "FILES  (jail-scoped — paths are inside the PC's work dir)"))
+        frow = QHBoxLayout(); frow.setSpacing(5)
+        self._fs_in = QLineEdit()
+        self._fs_in.setPlaceholderText("path:  .   ·   work/   ·   notes.md")
+        self._fs_in.returnPressed.connect(self._files_list)
+        frow.addWidget(self._fs_in, stretch=1)
+        frow.addWidget(self._btn("LIST", self._files_list, True))
+        frow.addWidget(self._btn("READ", self._files_read))
+        frow.addWidget(self._btn("WRITE", self._files_write))
+        fsl.addLayout(frow)
+        self._fs_out = QTextEdit(); self._fs_out.setReadOnly(True)
+        self._fs_out.setFont(QFont("Courier New", 9))
+        self._fs_out.setPlaceholderText(
+            "LIST shows entries — type a path (dirs end with /) and press "
+            "READ to open it, WRITE to save new content into it.")
+        fsl.addWidget(self._fs_out, stretch=1)
+        stack.addWidget(fsw)
+
+        # BROWSER page — safe agentic browsing, one op per press
+        brw = QWidget(); brl = QVBoxLayout(brw)
+        brl.setContentsMargins(0, 0, 0, 0); brl.setSpacing(6)
+        brl.addWidget(self._sec_label(
+            "BROWSER  (http(s) only · every op is audited)"))
+        brow = QHBoxLayout(); brow.setSpacing(5)
+        self._br_in = QLineEdit()
+        self._br_in.setPlaceholderText("https://example.com  —  or text for TYPE")
+        self._br_in.returnPressed.connect(lambda: self._br_op("navigate"))
+        brow.addWidget(self._br_in, stretch=1)
+        for lbl, op in (("GO", "navigate"), ("READ", "read"),
+                        ("SNAP", "snapshot"), ("SHOT", "screenshot")):
+            brow.addWidget(self._btn(
+                lbl, lambda _=False, o=op: self._br_op(o),
+                primary=(op == "navigate")))
+        brl.addLayout(brow)
+        brow2 = QHBoxLayout(); brow2.setSpacing(5)
+        for lbl, op in (("CLICK", "click"), ("TYPE", "type"),
+                        ("KEY", "key"), ("SCROLL", "scroll")):
+            brow2.addWidget(self._btn(
+                lbl, lambda _=False, o=op: self._br_op(o)))
+        brow2.addStretch()
+        brl.addLayout(brow2)
+        self._br_out = QTextEdit(); self._br_out.setReadOnly(True)
+        self._br_out.setFont(QFont("Courier New", 9))
+        self._br_out.setPlaceholderText(
+            "GO opens the URL above · READ returns page text · SNAP a11y "
+            "snapshot · SHOT captures a screenshot (lands on SCREEN) · "
+            "CLICK/TYPE/KEY/SCROLL use the input above as the target.")
+        brl.addWidget(self._br_out, stretch=1)
+        stack.addWidget(brw)
+
+        # SCREEN page — latest screenshot from the PC
+        scr = QWidget(); scrl = QVBoxLayout(scr)
+        scrl.setContentsMargins(0, 0, 0, 0); scrl.setSpacing(6)
+        srow = QHBoxLayout()
+        srow.addWidget(self._sec_label("SCREEN  (live capture from the PC)"))
+        srow.addStretch()
+        srow.addWidget(self._btn("  REFRESH", self._refresh_screen))
+        scrl.addLayout(srow)
+        self._screen_lbl = QLabel("No screenshot yet — take one in BROWSER > SHOT.")
+        self._screen_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._screen_lbl.setWordWrap(True)
+        self._screen_lbl.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: {C.BG};"
+            f" border: 1px dashed {C.BORDER_B}; border-radius: 8px;"
+            f" padding: 12px;")
+        scrl.addWidget(self._screen_lbl, stretch=1)
+        stack.addWidget(scr)
+
+        self._set_mode("shell")
+        body.addWidget(leftw)
         # audit column
         au = QWidget(); aul = QVBoxLayout(au)
         aul.setContentsMargins(6, 0, 0, 0); aul.setSpacing(6)
@@ -3905,7 +4206,50 @@ class ComputersPanel(_DashPanel):
                     f"[{r.get('actor')}] {r.get('action')}: {r.get('detail')}")
         elif key.startswith(f"{self.SEC}:start") or key.startswith(f"{self.SEC}:stop"):
             self._note("computer state changed")
+            self.mw.toast("Computer " + ("started" if ":start" in key
+                                         else "stopped"), "ok")
             self.api.get(f"{self.SEC}:list", "/api/computers")
+        elif key.startswith(f"{self.SEC}:fl:"):
+            self._fs_out.clear()
+            if isinstance(data, dict) and data.get("ok"):
+                self._fs_out.append(f"[{data.get('path', '.')}]" + "\n")
+                for e in data.get("entries") or []:
+                    self._fs_out.append(f"  {e}")
+                if not data.get("entries"):
+                    self._fs_out.append("  (empty directory)")
+                if self._mode_stack.currentIndex() != 1:
+                    self._set_mode("files")
+        elif key.startswith(f"{self.SEC}:fr:"):
+            if isinstance(data, dict) and "content" in data:
+                self._fs_out.setPlainText(
+                    f"── {data.get('path')} "
+                    f"{'(truncated)' if data.get('truncated') else ''} ──\n"
+                    + str(data.get("content") or ""))
+                self._set_mode("files")
+        elif key.startswith(f"{self.SEC}:fw:"):
+            self.mw.toast("File saved", "ok")
+            self.api.post(f"{self.SEC}:fl:{int(time.time()*1000)}",
+                          f"/api/computers/{self._comp['id']}/files/list",
+                          {"path": self._fs_in.text().strip() or "."})
+        elif key.startswith(f"{self.SEC}:br:"):
+            op = key.split(":")[2]
+            if isinstance(data, dict):
+                self._br_out.setPlainText(json.dumps(data, indent=2)[:8000])
+            if op == "screenshot" and isinstance(data, dict) and data.get("path"):
+                self._br_shot = data["path"]
+                self._set_mode("screen")
+                self._fetch_screen(data["path"])
+            elif op in ("read", "snapshot") and isinstance(data, dict):
+                body = data.get("text") or data.get("body") or ""
+                if body:
+                    self._br_out.setPlainText(str(body)[:8000])
+        elif (key.startswith(f"{self.SEC}:img:")
+              or key.startswith(f"{self.SEC}:screenimg:")):
+            if isinstance(data, (bytes, bytearray)) and data:
+                from PyQt6.QtGui import QPixmap as _QPM
+                pm = _QPM()
+                if pm.loadFromData(bytes(data)):
+                    self._show_screen(pm)
 
     def _audit_path(self) -> str:
         cid = (self._comp or {}).get("id")
@@ -3915,7 +4259,107 @@ class ComputersPanel(_DashPanel):
         # Shell errors must land IN the terminal box, not only the activity log.
         if key.startswith(f"{self.SEC}:exec"):
             self._sh_out.append(f"✗ {msg}")
+        if key.startswith(f"{self.SEC}:fl:") or key.startswith(f"{self.SEC}:fr:"):
+            self._fs_out.append(f"✗ {msg}")
+            self.mw.toast(msg, "err")
+        elif key.startswith(f"{self.SEC}:br:"):
+            self._br_out.append(f"✗ {msg}")
+            self.mw.toast(msg, "err")
+        elif key.startswith(f"{self.SEC}:img:") or key.startswith(f"{self.SEC}:screenimg"):
+            self._screen_lbl.setText(f"Screenshot unavailable: {msg}")
         super()._on_fail(key, msg)
+
+    # ── sub-surface controllers ─────────────────────────────────────────────
+    def _set_mode(self, mode: str) -> None:
+        idx = {"shell": 0, "files": 1, "browser": 2, "screen": 3}.get(mode, 0)
+        self._mode_stack.setCurrentIndex(idx)
+        for k, b in self._mode_btns.items():
+            b.setChecked(k == mode)
+        if mode == "screen" and getattr(self, "_screen_pixmap", None) is None:
+            self._refresh_screen()
+
+    def _cid(self):
+        return int((self._comp or {}).get("id") or 0)
+
+    def _files_list(self):
+        cid = self._cid()
+        if not cid or not self.api.configured():
+            return
+        self.api.post(f"{self.SEC}:fl:{int(time.time()*1000)}",
+                      f"/api/computers/{cid}/files/list",
+                      {"path": self._fs_in.text().strip() or "."})
+
+    def _files_read(self):
+        cid = self._cid()
+        path = self._fs_in.text().strip()
+        if not cid or not path or not self.api.configured():
+            self.mw.toast("Type a file path first", "warn"); return
+        self.api.post(f"{self.SEC}:fr:{int(time.time()*1000)}",
+                      f"/api/computers/{cid}/files/read", {"path": path})
+
+    def _files_write(self):
+        cid = self._cid()
+        path = self._fs_in.text().strip()
+        if not cid or not path or not self.api.configured():
+            self.mw.toast("Type a file path first", "warn"); return
+        content = prompt_jarvis_text(self, f"Write  {path}",
+                                     "New content (whole file):", "")
+        if content is None:
+            return
+        self.api.post(f"{self.SEC}:fw:{int(time.time()*1000)}",
+                      f"/api/computers/{cid}/files/write",
+                      {"path": path, "content": content})
+
+    def _br_op(self, op: str):
+        cid = self._cid()
+        if not cid or not self.api.configured():
+            return
+        text = self._br_in.text().strip()
+        payload: dict = {"op": op}
+        if op == "navigate":
+            if not text:
+                self.mw.toast("Type a URL first", "warn"); return
+            payload["url"] = text
+        elif op in ("click", "type", "key", "scroll"):
+            if not text:
+                self.mw.toast(
+                    f"TYPE a target/parameter for {op.upper()} first", "warn")
+                return
+            payload["target" if op in ("click", "type") else
+                    ("key" if op == "key" else "direction")] = text
+        self._br_out.append(f"→ {op} …")
+        self.api.post(f"{self.SEC}:br:{op}:{int(time.time()*1000)}",
+                      f"/api/computers/{cid}/browser", payload)
+
+    def _refresh_screen(self):
+        cid = self._cid()
+        if not cid or not self.api.configured():
+            return
+        from urllib.parse import quote
+        path = getattr(self, "_br_shot", "") or ""
+        self.api.get_raw(f"{self.SEC}:screenimg:{int(time.time()*1000)}",
+                         f"/api/computers/{cid}/image?path={quote(path)}")
+
+    def _fetch_screen(self, rel_path: str):
+        cid = self._cid()
+        if not cid or not self.api.configured():
+            return
+        from urllib.parse import quote
+        self.api.get_raw(f"{self.SEC}:img:{int(time.time()*1000)}",
+                         f"/api/computers/{cid}/image?path={quote(rel_path)}")
+
+    def _show_screen(self, pm) -> None:
+        self._screen_pixmap = pm
+        avail = self._screen_lbl.parentWidget()
+        w = max((avail.width() if avail else 600) - 40, 200)
+        h = max(w * pm.height() // max(pm.width(), 1), 120)
+        self._screen_lbl.setPixmap(pm.scaled(
+            w, h, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+        self._screen_lbl.setStyleSheet(
+            f"background: {C.BG}; border: 1px solid {C.BORDER_B};"
+            f" border-radius: 8px; padding: 6px;")
+        self._screen_lbl.setText("")
 
     def _load(self, c: dict):
         self._comp = c
@@ -4000,6 +4444,16 @@ class CallsPanel(_DashPanel):
         row.addWidget(self._btn("SEND CAPTION", self._send_caption, True))
         self._root.addLayout(row)
 
+        # Ambient background loop — a standing instruction the call hears
+        # between turns (POST /api/calls/{id}/background).
+        bg = QHBoxLayout(); bg.setSpacing(5)
+        self._bg_in = QLineEdit()
+        self._bg_in.setPlaceholderText(
+            "background instruction, e.g.  play calm music between answers …")
+        bg.addWidget(self._bg_in, stretch=1)
+        bg.addWidget(self._btn("  BACKGROUND", self._set_bg))
+        self._root.addLayout(bg)
+
         hist_hdr = QLabel("◈ RECENT CALLS")
         hist_hdr.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         hist_hdr.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
@@ -4036,11 +4490,15 @@ class CallsPanel(_DashPanel):
                 self._hist.append(
                     f"call #{c.get('id')} · dot #{c.get('dot_id')} · "
                     f"{int(dur)}s · {_fmt_when(c.get('started_at'))}")
+        elif key.startswith(f"{self.SEC}:bg"):
+            self.mw.toast("Background instruction set", "ok")
         elif key.startswith(f"{self.SEC}:start"):
             self._note("call connected")
+            self.mw.toast("Call connected", "ok")
             self.api.get(f"{self.SEC}:list", "/api/calls?status=any")
         elif key.startswith(f"{self.SEC}:end"):
             self._note("call ended")
+            self.mw.toast("Call ended", "info")
             self._set_call(None)
             self.api.get(f"{self.SEC}:list", "/api/calls?status=any")
         elif key.startswith(f"{self.SEC}:caption") and isinstance(data, dict):
@@ -4059,6 +4517,25 @@ class CallsPanel(_DashPanel):
                 self._caps.append(
                     f"<span style='color:{col}'>— {who}</span><br>"
                     + _html_esc(str(m.get("content") or "")))
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if (key.startswith(f"{self.SEC}:start")
+                or key.startswith(f"{self.SEC}:end")
+                or key.startswith(f"{self.SEC}:bg")):
+            self.mw.toast(msg, "err")
+        super()._on_fail(key, msg)
+
+    def _set_bg(self):
+        if self._call is None:
+            self.mw.toast("Start a call first", "warn"); return
+        text = self._bg_in.text().strip()
+        if not text:
+            self.mw.toast("Type a background instruction", "warn"); return
+        if not self.api.configured():
+            return
+        self.api.post(f"{self.SEC}:bg:{int(time.time()*1000)}",
+                      f"/api/calls/{int(self._call['id'])}/background",
+                      {"instruction": text, "every_seconds": 120})
 
     def _dot_name(self) -> str:
         idx = self._dot_box.currentIndex()
@@ -4228,7 +4705,14 @@ class AgendaPanel(_DashPanel):
                     f"{r.get('status')} · {_fmt_when(r.get('started_at'))} · "
                     f"{str(r.get('output') or '')[:180]}")
         elif key.startswith(f"{self.SEC}:action") or key.startswith(f"{self.SEC}:skill"):
-            self._note("done ✓")
+            parts = key.split(":")
+            kind = parts[2] if len(parts) > 2 else ""
+            self.mw.toast({
+                "new": "Task created", "pause": "Task paused",
+                "resume": "Task resumed", "cancel": "Task cancelled",
+                "retry": "Task retried", "run": "Task triggered",
+                "pub": "Skill published", "arc": "Skill archived",
+            }.get(kind, "Done"), "ok")
             self.refresh()
         elif key.startswith(f"{self.SEC}:mine") and isinstance(data, dict):
             n = data.get("created", 0)
@@ -4364,6 +4848,14 @@ class AgendaPanel(_DashPanel):
         self.api.post(f"{self.SEC}:action:new", "/api/tasks",
                       {"name": name, "instruction": ins,
                        "every_seconds": every_n, "dot_id": dot_id})
+
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if key.startswith(f"{self.SEC}:action"):
+            self.mw.toast(f"Task action failed: {msg}", "err")
+        if key.startswith(f"{self.SEC}:skill"):
+            self.mw.toast(f"Skill action failed: {msg}", "err")
+        super()._on_fail(key, msg)
 
 
 def prompt_jarvis_text(parent, title: str, label: str,
@@ -4902,6 +5394,9 @@ class SkillsPanel(_DashPanel):
                 f" border: 1px solid {scol}; border-radius: 8px;"
                 f" padding: 1px 7px;")
             top.addWidget(chip)
+            top.addWidget(self._btn("DETAIL",
+                                    lambda _=False, i=sid: self._detail(i),
+                                    height=22))
             if status == "draft":
                 top.addWidget(self._btn("PUBLISH",
                                         lambda _=False, i=sid: self._act(i, "publish"),
@@ -4923,6 +5418,59 @@ class SkillsPanel(_DashPanel):
                     f"color: {C.TEXT_DIM}; background: transparent;")
                 cl.addWidget(n_lbl)
             self._list_lay.insertWidget(self._list_lay.count() - 1, card)
+
+    def _detail(self, sid) -> None:
+        """Full skill receipt: body, provenance, dates — nothing hidden."""
+        sk = next((s for s in self._all if s.get("id") == sid), None)
+        if not sk:
+            return
+        dlg = QDialog(self.mw)
+        dlg.setWindowTitle(f"Skill #{sid}")
+        dlg.resize(560, 480)
+        v = QVBoxLayout(dlg); v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(8)
+        head = QHBoxLayout()
+        t = QLabel(str(sk.get("title") or f"skill #{sid}"))
+        t.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        t.setStyleSheet(f"color: {C.WHITE};")
+        t.setWordWrap(True)
+        head.addWidget(t, stretch=1)
+        status = str(sk.get("status") or "draft")
+        chip = QLabel(f" {status.upper()} ")
+        chip.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        scol = {"published": C.GREEN, "archived": C.TEXT_DIM}.get(status, C.ACC)
+        chip.setStyleSheet(f"color: {scol}; border: 1px solid {scol};"
+                           f" border-radius: 8px; padding: 1px 7px;")
+        head.addWidget(chip)
+        v.addLayout(head)
+        meta_parts = []
+        if sk.get("created_at"):
+            meta_parts.append(
+                "mined " + time.strftime("%Y-%m-%d %H:%M",
+                                         time.localtime(float(sk["created_at"]))))
+        if sk.get("published_at"):
+            meta_parts.append(
+                "published " + time.strftime(
+                    "%Y-%m-%d %H:%M", time.localtime(float(sk["published_at"]))))
+        note = str(sk.get("source_note") or "")
+        if note:
+            meta_parts.append("source: " + note)
+        if meta_parts:
+            m = QLabel("  ·  ".join(meta_parts))
+            m.setWordWrap(True)
+            m.setStyleSheet(f"color: {C.TEXT_DIM};")
+            v.addWidget(m)
+        body = QTextEdit()
+        body.setReadOnly(True)
+        body.setFont(QFont("Courier New", 9))
+        body.setPlainText(str(sk.get("body_md") or
+                              "(no body — this skill is metadata only.)"))
+        v.addWidget(body, stretch=1)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(self._btn("CLOSE", dlg.accept, primary=True))
+        v.addLayout(row)
+        dlg.exec()
 
     def _mine(self) -> None:
         if not self.api.configured():
@@ -5341,6 +5889,20 @@ class MainWindow(QMainWindow):
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
+
+        # Ctrl+K — command palette (jump to any section, fuzzy filter).
+        sc_pal = QShortcut(QKeySequence("Ctrl+K"), self)
+        sc_pal.activated.connect(self._open_palette)
+        # Ctrl+1..9 / Ctrl+0 — direct section jumps (rail order).
+        self._section_shortcuts: list[QShortcut] = []
+        for _digit in range(1, 10):
+            _sc = QShortcut(QKeySequence(f"Ctrl+{_digit}"), self)
+            _sc.activated.connect(
+                lambda i=_digit - 1: self._jump_section(i))
+            self._section_shortcuts.append(_sc)
+        _sc0 = QShortcut(QKeySequence("Ctrl+0"), self)
+        _sc0.activated.connect(lambda: self._jump_section(9))
+        self._section_shortcuts.append(_sc0)
 
     def _show_camera_frame(self, img_bytes: bytes):
         """Slot — display camera preview overlay (main thread)."""
@@ -6270,6 +6832,68 @@ class MainWindow(QMainWindow):
         except Exception as e:                           # noqa: BLE001
             print(f"[UI] section switch {name}: {e}")
 
+    def _jump_section(self, idx: int) -> None:
+        """Ctrl+N shortcut target — jump to the section at stack index."""
+        names = getattr(self, "_section_names", [])
+        if 0 <= idx < len(names):
+            self._switch_section(names[idx])
+
+    def _open_palette(self) -> None:
+        """Ctrl+K palette: type-to-filter, Enter to jump. Mirrors the web
+        dashboard's quick nav but lives in the desktop chrome."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Go to section  —  Ctrl+K")
+        dlg.setFixedWidth(380)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(6)
+        edit = QLineEdit()
+        edit.setPlaceholderText("Type a section name…  (Enter jumps)")
+        edit.setFont(QFont("Courier New", 10))
+        edit.setStyleSheet(
+            f"QLineEdit {{ background: {C.BG}; color: {C.WHITE};"
+            f" border: 1px solid {C.ACC}; border-radius: 6px;"
+            f" padding: 7px 9px; }}")
+        v.addWidget(edit)
+        lst = QListWidget()
+        lst.setStyleSheet(
+            f"QListWidget {{ background: {C.PANEL}; color: {C.TEXT};"
+            f" border: 1px solid {C.BORDER}; border-radius: 6px;"
+            f" outline: none; }}"
+            f" QListWidget::item {{ padding: 6px 8px; }}"
+            f" QListWidget::item:selected {{ background: {C.PANEL_H};"
+            f" color: {C.WHITE}; }}")
+        names = list(getattr(self, "_section_names", []))
+        actions: dict[str, int] = {n: i for i, n in enumerate(names)}
+
+        def _fill(q: str = "") -> None:
+            lst.clear()
+            q = q.strip().lower()
+            for n in names:
+                if not q or q in n.lower():
+                    it = QListWidgetItem(f"  {n.upper()}")
+                    it.setData(Qt.ItemDataRole.UserRole, actions[n])
+                    lst.addItem(it)
+            if lst.count():
+                lst.setCurrentRow(0)
+
+        def _run() -> None:
+            it = lst.currentItem()
+            if it is None:
+                return
+            self._switch_section(names[int(it.data(
+                Qt.ItemDataRole.UserRole))])
+            dlg.accept()
+
+        edit.textChanged.connect(_fill)
+        edit.returnPressed.connect(_run)
+        lst.itemActivated.connect(lambda _it: _run())
+        v.addWidget(lst, stretch=1)
+        _fill()
+        dlg.exec()
+        edit.setFocus()
+
+
     def refresh_pending_badge(self) -> None:
         """Pull /api/pending and light the SPACES rail badge (has-new)."""
         try:
@@ -6430,6 +7054,26 @@ class MainWindow(QMainWindow):
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         lay.addWidget(sep2)
+
+        lay.addWidget(_sec("QUICK ACTIONS"))
+        qrow = QHBoxLayout(); qrow.setSpacing(5)
+        for _lbl, _prompt in (
+            ("STATUS", "give me a system status report"),
+            ("AGENDA", "what's on my agenda right now?"),
+            ("RESEARCH", "research the latest AI agent frameworks "
+                         "and save the report"),
+            ("REMEMBER", "remember this for later: "),
+            ("SCAN", "run a safe system scan and summarize the results"),
+        ):
+            _b = QPushButton(_lbl)
+            _b.setObjectName("chip")
+            _b.setFixedHeight(24)
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setToolTip(f"sends:  {_prompt}")
+            _b.clicked.connect(lambda _=False, t=_prompt: self._quick_say(t))
+            qrow.addWidget(_b)
+        qrow.addStretch()
+        lay.addLayout(qrow)
 
         lay.addWidget(_sec("COMMAND INPUT"))
         lay.addLayout(self._build_input_row())
@@ -7873,6 +8517,11 @@ class MainWindow(QMainWindow):
                 }}
                 QPushButton:hover {{ background: #001f10; }}
             """)
+
+    def _quick_say(self, prompt: str):
+        """One-press quick action: fill + send through the normal path."""
+        self._input.setText(prompt)
+        self._send()
 
     def _send(self):
         txt = self._input.text().strip()

@@ -21,7 +21,7 @@ root.innerHTML = `
         <div class="sec-head" style="margin-bottom:8px">
           <span class="sec-title">Skills</span>
           <div class="grow"></div>
-          <button class="btn-sm" id="ag-mine">⛏ Mine from history</button>
+          <button class="btn-sm" id="ag-mine">Mine from history</button>
         </div>
         <div id="ag-skills"><div class="pane-empty">Loading…</div></div>
       </div>

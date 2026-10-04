@@ -125,7 +125,7 @@ function renderTree() {
     const srow = document.createElement('div');
     srow.className = 'tree-row tree-space-row' + (S.selSpace === sp.id ? ' sel' : '');
     srow.innerHTML = `<span class="tw">${S.expanded.has(sp.id) || q ? '▾' : '▸'}</span>
-      <span class="ti">📚</span><span class="tn"></span>
+      <span class="ti">${JV.svg('book', 13)}</span><span class="tn"></span>
       <button class="tact" title="New page in this space">＋</button>`;
     srow.querySelector('.tn').textContent = sp.name;
     srow.onclick = (e) => {
@@ -144,7 +144,7 @@ function renderTree() {
           const row = document.createElement('div');
           row.className = 'tree-row' + (S.page && S.page.id === pg.id ? ' sel' : '');
           row.style.paddingLeft = (8 + depth * 10) + 'px';
-          row.innerHTML = `<span class="ti">📄</span><span class="tn"></span>
+          row.innerHTML = `<span class="ti">${JV.svg('file', 13)}</span><span class="tn"></span>
             <button class="tact" title="Sub-page">＋</button>`;
           row.querySelector('.tn').textContent = pg.title || 'Untitled';
           row.onclick = (e) => {
@@ -333,7 +333,7 @@ function showConflict(data) {
   setSaveState('conflict', 'dirty');
   conflictBox.classList.add('show');
   conflictBox.innerHTML = `
-    <b>⚠ Conflict — page moved to rev ${data.current_rev}.</b>
+    <b>Conflict — page moved to rev ${data.current_rev}.</b>
     <span>Your edit was NOT saved (stale base ${S.rev}); nothing was overwritten.</span>
     <div class="grow"></div>
     <button class="btn-sm danger" id="ws-load-latest">Load latest (drop mine)</button>

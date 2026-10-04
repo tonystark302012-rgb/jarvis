@@ -546,3 +546,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
     z-index: 50; box-shadow: var(--shadow); }
   .agenda-2 { grid-template-columns: 1fr; }
 }
+
+/* ── SVG icon alignment (vector icons replaced the old emoji chrome) ──────── */
+.nav-item .ico { display: flex; align-items: center; justify-content: center; }
+.nav-item .ico svg, .btn-attach svg, #mic-btn svg, .btn-wake svg,
+.h-btn svg, .btn-sm svg, .btn svg, .fc-icon svg, .ti svg { vertical-align: -2px; }
+.fc-icon svg, .ti svg { display: inline-block; }

@@ -24,7 +24,7 @@ root.innerHTML = `
       <span class="row" id="pc-perms"></span>
       <div class="grow"></div>
       <button class="btn-sm" id="pc-on">▶ Start</button>
-      <button class="btn-sm danger" id="pc-off">⏹ Stop</button>
+      <button class="btn-sm danger" id="pc-off">■ Stop</button>
     </div>
     <div class="pc-tabs" id="pc-tabs">
       <button data-t="files" class="on">Files</button>
@@ -63,7 +63,7 @@ function renderCards() {
   }
   $('pc-cards').innerHTML = `<div class="agents-grid">` + S.comps.map(c => `
     <div class="agent-card" data-id="${c.id}">
-      <div class="a-n">🖥️ PC #${c.id} <span class="chip ${c.status === 'running' ? 'green' : ''}">${JV.esc(c.status)}</span></div>
+      <div class="a-n">${JV.svg('monitor', 14)} PC #${c.id} <span class="chip ${c.status === 'running' ? 'green' : ''}">${JV.esc(c.status)}</span></div>
       <div class="a-r">for Dot #${c.dot_id}<br><span class="mono muted">${JV.esc(c.root_path || '')}</span></div>
       <div class="a-p"><span class="chip accent" style="font-family:var(--mono);text-transform:none">${JV.esc(permsStr(c.perms))}</span></div>
     </div>`).join('') + `</div>`;
@@ -173,7 +173,7 @@ async function renderFiles() {
   const body = $('pb-files');
   body.innerHTML = `
     <div class="row" style="margin-bottom:10px">
-      <button class="btn-sm" id="fl-up">⬆ Parent</button>
+      <button class="btn-sm" id="fl-up">↑ Parent</button>
       <input class="inp mono" id="fl-path" value="${JV.esc(S.path)}" style="max-width:420px">
       <button class="btn-sm" id="fl-go">Go</button>
       <span class="muted" id="fl-count"></span>
@@ -205,11 +205,11 @@ async function renderFiles() {
     const isDir = raw.endsWith('/');
     const name = isDir ? raw.slice(0, -1) : raw;
     return `<div class="file-row" data-p="${JV.esc(raw)}" data-dir="${isDir ? 1 : 0}">
-      <span>${isDir ? '📁' : (isImg(raw) ? '🖼️' : '📄')}</span>
+      <span>${isDir ? JV.svg('folder', 14) : (isImg(raw) ? JV.svg('image', 14) : JV.svg('file', 14))}</span>
       <span class="grow" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${JV.esc(name)}</span>
-      ${!isDir && isImg(raw) ? '<button class="btn-sm" data-a="view">👁 View</button>' : ''}
+      ${!isDir && isImg(raw) ? '<button class="btn-sm" data-a="view">' + JV.svg('eye', 13) + ' View</button>' : ''}
       ${!isDir ? '<button class="btn-sm" data-a="read">Read</button>' : ''}
-      ${!isDir ? '<button class="btn-sm" data-a="dl">⬇</button>' : ''}
+      ${!isDir ? '<button class="btn-sm" data-a="dl">↓</button>' : ''}
     </div>`;
   }).join('') : '<div class="pane-empty">Empty directory.</div>';
 
@@ -223,7 +223,7 @@ async function renderFiles() {
           <div class="sec-sub" style="margin-top:12px">${JV.esc(p)}</div>
           <img class="shot-img" id="fl-img" alt="loading…">
           <div class="row" style="margin-top:8px">
-            <button class="btn-sm" id="fl-copy">⬇ Save into JARVIS uploads</button>
+            <button class="btn-sm" id="fl-copy">↓ Save into JARVIS uploads</button>
           </div>`;
         $('fl-img').src = `/api/computers/${S.sel}/image?path=${encodeURIComponent(p)}&token=${encodeURIComponent(JV.token)}`;
         $('fl-img').onerror = () => { $('fl-img').alt = 'failed to load (permissions or jail)'; };
@@ -257,7 +257,7 @@ async function renderFiles() {
             ${r.truncated ? '· truncated' : ''}</div>
           <div class="term-out show" style="max-height:300px">${JV.esc(r.content || '')}</div>
           <div class="row" style="margin-top:8px">
-            <button class="btn-sm" id="fl-edit-toggle">✏️ Edit</button>
+            <button class="btn-sm" id="fl-edit-toggle">${JV.svg('pencil', 13)} Edit</button>
           </div>
           <div id="fl-edit" style="display:none;margin-top:8px">
             <textarea class="inp mono" id="fl-text" rows="10">${JV.esc(r.content || '')}</textarea>
@@ -371,7 +371,7 @@ function renderBrowser() {
       <button class="btn-sm primary" data-op="navigate">▶ Navigate</button>
       <button class="btn-sm" data-op="read">Read</button>
       <button class="btn-sm" data-op="snapshot">Snapshot</button>
-      <button class="btn-sm" data-op="screenshot">📸 Screenshot</button>
+      <button class="btn-sm" data-op="screenshot">${JV.svg('camera', 13)} Screenshot</button>
     </div>
     <div class="row" style="margin-bottom:8px">
       <input class="inp" id="bw-sel" placeholder="selector / a11y ref" style="max-width:300px">

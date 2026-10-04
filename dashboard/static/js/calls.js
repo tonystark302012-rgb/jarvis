@@ -60,7 +60,7 @@ $('cl-new').onclick = async () => {
     const c = await JV.api('/api/calls', { method: 'POST',
       body: JSON.stringify({ dot_id: parseInt(pick, 10) }) });
     S.active = c;
-    JV.toast('Call connected 📞');
+    JV.toast('Call connected');
     renderLive(); renderHistory(); startLive();
   } catch (e) { JV.toast(e.message); }
 };
@@ -83,16 +83,16 @@ function renderLive() {
         ${S.active.page_id ? `<span class="chip">page #${S.active.page_id}</span>` : ''}
         <div class="grow"></div>
         <span class="call-timer" id="cl-timer">00:00</span>
-        <button class="btn-sm ${S.recOn ? 'danger' : 'primary'}" id="cl-mic">${S.recOn ? '⏹ Mic off' : '🎤 Mic on'}</button>
+        <button class="btn-sm ${S.recOn ? 'danger' : 'primary'}" id="cl-mic">${S.recOn ? '■ Mic off' : JV.svg('mic', 13) + ' Mic on'}</button>
         <button class="btn-sm danger" id="cl-end">End call</button>
       </div>
-      ${!SpeechRec ? `<div class="sec-sub" style="margin-top:8px">⚠ This browser has no SpeechRecognition — type captions below (still live).</div>` : ''}
+      ${!SpeechRec ? `<div class="sec-sub" style="margin-top:8px">This browser has no SpeechRecognition — type captions below (still live).</div>` : ''}
       <div class="call-caps" id="cl-caps"><div class="pane-empty">Captions appear here — speak or type…</div></div>
       <div class="row cap-composer" style="margin-top:10px">
         <input class="inp" id="cl-inp" placeholder="Say something (or type a caption)…">
         <button class="btn-sm primary" id="cl-send">Send caption</button>
-        <button class="btn-sm" id="cl-bg">⚙ Background agent…</button>
-        <a class="btn-sm" id="cl-dl" href="#" style="text-decoration:none">⬇ Transcript</a>
+        <button class="btn-sm" id="cl-bg">${JV.svg('settings', 13)} Background agent…</button>
+        <a class="btn-sm" id="cl-dl" href="#" style="text-decoration:none">↓ Transcript</a>
       </div>
       <div id="cl-extra"></div>
     </div>`;
@@ -173,7 +173,7 @@ async function sendCaption() {
     JV.refreshPending();
   } catch (e) {
     const think = document.getElementById('cl-think');
-    if (think) think.innerHTML = `<div class="who">Dot</div>${JV.esc('⚠ ' + e.message)}`;
+    if (think) think.innerHTML = `<div class="who">Dot</div>${JV.esc(e.message)}`;
   }
 }
 
@@ -288,7 +288,7 @@ function renderHistory() {
             <td>#${c.dot_id}${c.page_id ? ` · page ${c.page_id}` : ''}</td>
             <td class="mono muted">${new Date(c.started_at * 1000).toLocaleString()}</td>
             <td class="mono">${fmtDur((c.ended_at || c.started_at) - c.started_at)}</td>
-            <td><button class="btn-sm" data-dl="${c.id}">⬇ Transcript</button></td>
+            <td><button class="btn-sm" data-dl="${c.id}">↓ Transcript</button></td>
           </tr>`).join('')}</tbody>
       </table>
     </div>` : '';

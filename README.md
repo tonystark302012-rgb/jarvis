@@ -325,6 +325,28 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 
 ---
 
+## 🖥️ The HUD v2 — the desktop app was rebuilt
+
+The PyQt HUD (`ui.py`) is a complete redesign on one design system — vector
+icons everywhere (zero emoji in the chrome), a five-colour accent that themes
+the whole window, and every panel wired to the **same dashboard API the web UI
+uses**, so both front-ends show live data instead of mockups.
+
+| Area | What it does now |
+|---|---|
+| **Spaces** | Create spaces/pages and **edit page markdown in place** — SAVE carries `base_rev`, so a Dot's proposal can never clobber your typing (409 → toast + reload) |
+| **Agents** | Create, edit and delete Dots from the panel (delete asks for confirmation), full per-Dot chat + memory + monitor feed |
+| **Computers** | Four sub-surfaces: **SHELL** (argv-only audited commands), **FILES** (jail-scoped list/read/write), **BROWSER** (navigate · read · snapshot · shot · click · type · key · scroll), **SCREEN** (live screenshot viewer) |
+| **Calls** | Start/end live calls with toasts, transcript, captions — plus a **background instruction** (`POST /api/calls/{id}/background`) that keeps running between turns |
+| **Research** | Every research result lands as a page; the page list badges `[research · n src]` and the viewer prints the full **SOURCES** receipt at the bottom |
+| **Agenda / Memory / Skills** | Task pause/resume/cancel/retry toasts, memory CRUD toasts, skill **DETAIL** dialog (body, provenance, dates) |
+| **Navigation** | **Ctrl+K** command palette (type-to-filter, Enter jumps), **Ctrl+1…9 / Ctrl+0** for direct section jumps, chat **QUICK ACTIONS** row (status · agenda · research · remember · scan) |
+
+The web dashboard got the same treatment: nav, composer and file chips now
+render inline SVG instead of emoji, through a shared `JV.svg()` registry.
+
+---
+
 ## 🗺️ Mark Roadmap
 
 | Mark | Focus |
@@ -362,6 +384,8 @@ python main.py
 pip install -r requirements-dev.txt   # pytest + ruff + test deps (fast, no PyQt needed)
 ruff check .                          # lint — pyflakes + statement errors, must be clean
 python -m pytest tests/ -q            # full suite — offline, no mic/display/API key
+python tools/ui_smoke.py              # offscreen HUD E2E (needs PyQt6 + a display server stub)
+python tools/ui_preview.py            # bootstrap the dashboard preview on :8712 with a PREVIEW token
 ```
 
 CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`). The suite covers the security invariants: no `shell=True` in `open_app`/`dev_agent`, the run-command allowlist, project-path containment, pip-flag injection, the dashboard AES round-trip, brute-force lockout, memory recall and parallel tool dispatch.
@@ -386,7 +410,7 @@ CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13**
 ```
 jarvis/
 ├── main.py                   # Core loop — Gemini Live session, audio I/O, viseme extraction, tool dispatch
-├── ui.py                     # PyQt6 HUD — avatar canvas, waveform, log panel, settings drawer, camera feed
+├── ui.py                     # PyQt6 HUD v2 — vector-icon design system, live dashboard panels, palette
 ├── setup.py                  # OS-aware installer (skips wrong-OS dependencies, checks your Python)
 ├── pyproject.toml            # ruff + pytest configuration (lint must stay clean in CI)
 ├── requirements.txt          # Runtime dependencies (OS markers filter per platform)
@@ -396,7 +420,11 @@ jarvis/
 ├── tests/
 │   ├── test_roadmap.py       # Biggest suite — every roadmap batch: tools, privacy, presence, agents
 │   ├── test_upgrades.py      # Offline suite — security invariants, memory recall, dispatch, dashboard
-│   └── test_new_features.py  # Mission Control, orchestrator, rules, mirror, layouts, lifecycles
+│   ├── test_new_features.py  # Mission Control, orchestrator, rules, mirror, layouts, lifecycles
+│   └── test_ui_features.py   # source pins for the HUD v2 feature set + dashboard vector icons
+├── tools/
+│   ├── ui_smoke.py           # offscreen E2E smoke — construction, panels, routing, 115 checks
+│   └── ui_preview.py         # dashboard preview bootstrap (token + pin for the test harness)
 ├── plugins/
 │   └── _template.py          # Copy this to write a new skill — one file, drop in, done
 ├── actions/                  # Bundled skills — each self-describes via a TOOL dict + handler
