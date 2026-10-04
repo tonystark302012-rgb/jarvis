@@ -4520,3 +4520,141 @@ class TestGUIProvider:
         hist = [{"say": "clicked", "act": {"type": "click", "x": 1, "y": 2}}]
         p3 = self.ga._prompt_text("g", hist, plan_only=False)
         assert "clicked" in p3 and "click" in p3
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 5g — MCP Streamable HTTP transport (spec 2025-11-25), real wire
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMCPHTTP:
+    @pytest.fixture(autouse=True)
+    def _srv(self, monkeypatch, tmp_path):
+        import actions.mcp as m
+        from tests.fake_mcp_http import make_server
+        self.m = m
+        self.srv = make_server()
+        monkeypatch.setattr(m, "_cfg_path", lambda: tmp_path / "mcp.json")
+        m._TOOLS.clear()
+        m._NATIVE_INDEX = {}
+        m._NATIVE_DECLS = []
+        m._NATIVE_BUILT_AT = 0.0
+        (tmp_path / "mcp.json").write_text(json.dumps(
+            {"servers": {"r": {"url": self.srv.url}}}), encoding="utf-8")
+        yield
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def test_handshake_issues_and_captures_session(self):
+        with self.m._connect("r") as c:
+            assert c._session_id == self.srv.session_id
+            assert self.srv.init_count == 1
+            captured = c._session_id
+        # close() sent DELETE with the (now cleared) session id
+        assert self.srv.deletes and self.srv.deletes[-1] == captured
+
+    def test_tools_list_roundtrip_plain_json(self):
+        tools = self.m._list_tools("r")
+        assert [t["name"] for t in tools] == ["echo-tool"]
+
+    def test_tools_list_roundtrip_over_sse(self):
+        self.srv.sse_mode = True
+        self.m._TOOLS.clear()
+        tools = self.m._list_tools("r")
+        assert tools and tools[0]["name"] == "echo-tool"
+
+    def test_sse_message_parser(self):
+        msgs = self.m._HttpClient._messages(
+            "text/event-stream",
+            b'event: message\ndata: {"jsonrpc":"2.0","id":1,\n'
+            b'data: "result":{"ok":true}}\n\n')
+        assert msgs == [{"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}]
+        # stream cut before the trailing blank line still parses
+        msgs2 = self.m._HttpClient._messages(
+            "text/event-stream", b'data: {"id":9}\n')
+        assert msgs2 == [{"id": 9}]
+        # plain JSON body
+        assert self.m._HttpClient._messages(
+            "application/json", b'{"id":3}') == [{"id": 3}]
+        with pytest.raises(RuntimeError, match="not JSON"):
+            self.m._HttpClient._messages("application/json", b"<html>")
+
+    def test_full_call_through_handler(self):
+        out = self.m.mcp({"action": "call", "name": "r",
+                          "tool": "echo-tool",
+                          "arguments": '{"text": "hi"}'})
+        assert out == "echo:hi"
+
+    def test_stale_session_self_heals_once(self):
+        with self.m._connect("r") as c:
+            first = c._session_id
+            self.srv.session_id = "rotated-away"      # server restarted
+            out = c.request("tools/call",
+                            {"name": "echo-tool",
+                             "arguments": {"text": "back"}})
+            assert out["content"][0]["text"] == "echo:back"
+            assert self.srv.init_count == 2           # transparent re-init
+            assert c._session_id == self.srv.session_id
+            assert c._session_id != first
+
+    def test_http_500_is_honest_not_hang(self):
+        self.srv.fail_next = True
+        out = self.m.mcp({"action": "call", "name": "r",
+                          "tool": "echo-tool", "arguments": "{}"})
+        assert "failed" in out and "500" in out
+
+    def test_garbage_body_reported(self):
+        self.srv.garbage = True
+        with pytest.raises(RuntimeError, match="not JSON"):
+            with self.m._connect("r") as c:
+                c.request("tools/list")
+
+    def test_add_url_server_verified(self):
+        out = self.m.mcp({"action": "add", "name": "r2",
+                          "url": self.srv.url})
+        assert "saved and verified" in out
+        cfg = json.loads(self.m._cfg_path().read_text())
+        assert cfg["servers"]["r2"]["url"] == self.srv.url
+
+    def test_add_url_with_headers(self):
+        out = self.m.mcp({"action": "add", "name": "r3",
+                          "url": self.srv.url,
+                          "headers": '{"Authorization": "Bearer t"}'})
+        assert "saved and verified" in out
+        cfg = json.loads(self.m._cfg_path().read_text())
+        assert cfg["servers"]["r3"]["headers"]["Authorization"] == "Bearer t"
+
+    def test_add_rejects_bad_inputs(self):
+        assert "http" in self.m.mcp(
+            {"action": "add", "name": "x", "url": "ftp://nope"})
+        assert "not both" in self.m.mcp(
+            {"action": "add", "name": "x", "url": self.srv.url,
+             "command": "true"})
+        assert "command or a url" in self.m.mcp(
+            {"action": "add", "name": "x"})
+        assert "JSON object" in self.m.mcp(
+            {"action": "add", "name": "x", "url": self.srv.url,
+             "headers": "not-json"})
+
+    def test_native_flatten_over_http(self):
+        decls = self.m.native_declarations(force=True)
+        names = [d["name"] for d in decls]
+        assert "mcp__r__echo_tool" in names
+        out = self.m.call_native("mcp__r__echo_tool", {"text": "native"})
+        assert out == "echo:native"
+
+    def test_native_stale_index_rebuilds_and_calls(self):
+        assert self.m.call_native("mcp__r__echo_tool",
+                                  {"text": "x"}) == "echo:x"
+        self.m._NATIVE_INDEX = {}                   # simulate TTL expiry
+        self.m._NATIVE_DECLS = []
+        out = self.m.call_native("mcp__r__echo_tool", {"text": "y"})
+        assert out == "echo:y"
+
+    def test_list_action_shows_http_server(self):
+        out = self.m.mcp({"action": "list"})
+        assert "r:" in out and "echo-tool" in out
+
+    def test_tool_schema_documents_url(self):
+        props = self.m.TOOL["parameters"]["properties"]
+        assert "url" in props and "headers" in props
+        assert "Streamable HTTP" in self.m.TOOL["description"]
