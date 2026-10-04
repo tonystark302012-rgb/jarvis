@@ -1,7 +1,7 @@
 # ⚙️ MARK LV (55)
-### The Ultimate Cross-Platform Personal AI Assistant — By FatihMakes
+### The Ultimate Cross-Platform Personal AI Assistant — By Ankit Meena
 
-> 📺 **[Watch the full setup video on YouTube](https://www.youtube.com/@FatihMakes)**
+> 📺 **[Watch the full setup video on YouTube](https://www.youtube.com/@ankitmeena)**
 
 A real-time voice AI that can hear, see, speak, and control your computer — on any OS. Supports Windows, macOS, and Linux. Built on the Gemini Live API for native audio streaming, delivering zero subscriptions and total digital autonomy.
 
@@ -510,5 +510,5 @@ Engineered by a developer building a real-world JARVIS-style assistant.
 
 | Platform | Link |
 | --- | --- |
-| YouTube | [@FatihMakes](https://www.youtube.com/@FatihMakes) |
-| Instagram | [@fatihmakes](https://www.instagram.com/fatihmakes) |
+| YouTube | [@ankitmeena](https://www.youtube.com/@ankitmeena) |
+| Instagram | [@ankitmeena](https://www.instagram.com/ankitmeena) |
