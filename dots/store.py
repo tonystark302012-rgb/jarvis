@@ -586,3 +586,208 @@ def prefs_for_dot(dot: dict) -> list[dict]:
                               name in [str(a).lower() for a in allowed]):
             out.append(p)
     return out
+
+
+# ── tasks (recurring instructions) + runs ───────────────────────────────────
+def create_task(name: str, instruction: str, every_seconds,
+                dot_id: int, next_run_at: float | None = None) -> dict:
+    instruction = str(instruction or "").strip()
+    if not instruction:
+        raise ValueError("task needs an instruction")
+    try:
+        every = int(every_seconds)
+    except (TypeError, ValueError):
+        raise ValueError("every_seconds must be an integer")
+    if every < 1:
+        raise ValueError("every_seconds must be >= 1")
+    if get_dot(dot_id) is None:
+        raise KeyError(f"no dot #{dot_id}")
+    name = str(name or "").strip() or instruction[:40]
+    now = _now()
+    with db._LOCK:
+        c = db._conn()
+        cur = c.execute(
+            "INSERT INTO tasks (name, instruction, every_seconds, dot_id,"
+            " status, next_run_at, created_at) VALUES (?,?,?,?,'active',?,?)",
+            (name, instruction, every, int(dot_id),
+             float(next_run_at if next_run_at is not None else now), now))
+        c.commit()
+        tid = cur.lastrowid
+    return get_task(tid)
+
+
+def get_task(tid: int) -> dict | None:
+    with db._LOCK:
+        r = db._conn().execute("SELECT * FROM tasks WHERE id = ?",
+                               (int(tid),)).fetchone()
+    return dict(r) if r else None
+
+
+def list_tasks() -> list[dict]:
+    with db._LOCK:
+        rows = db._conn().execute(
+            "SELECT * FROM tasks ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def due_tasks(now: float) -> list[dict]:
+    with db._LOCK:
+        rows = db._conn().execute(
+            "SELECT * FROM tasks WHERE status = 'active'"
+            " AND next_run_at <= ? ORDER BY next_run_at",
+            (float(now),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_task_status(tid: int, status: str) -> dict:
+    if status not in ("active", "paused", "cancelled"):
+        raise ValueError(f"bad task status {status!r}")
+    t = get_task(tid)
+    if t is None:
+        raise KeyError(f"no task #{tid}")
+    with db._LOCK:
+        c = db._conn()
+        c.execute("UPDATE tasks SET status = ? WHERE id = ?",
+                  (status, int(tid)))
+        c.commit()
+    return get_task(tid)
+
+
+def advance_next_run(tid: int, base: float, finished_at: float) -> float:
+    """next_run_at += every, skipping missed windows — NO thundering
+    catch-up: jump by whole multiples of `every` until > now."""
+    t = get_task(tid)
+    if t is None:
+        raise KeyError(f"no task #{tid}")
+    every = int(t["every_seconds"])
+    nxt = float(base) + every
+    while nxt <= finished_at:
+        nxt += every
+    with db._LOCK:
+        c = db._conn()
+        c.execute("UPDATE tasks SET next_run_at = ?, last_run_at = ?"
+                  " WHERE id = ?", (nxt, float(finished_at), int(tid)))
+        c.commit()
+    return nxt
+
+
+def record_run(task_id: int, status: str, started_at: float,
+               output: str = "") -> dict:
+    if status not in ("ok", "timeout", "failed", "cancelled"):
+        raise ValueError(f"bad run status {status!r}")
+    now = _now()
+    with db._LOCK:
+        c = db._conn()
+        cur = c.execute(
+            "INSERT INTO task_runs (task_id, started_at, finished_at,"
+            " status, output, created_at) VALUES (?,?,?,?,?,?)",
+            (int(task_id), float(started_at), now, status,
+             str(output or ""), now))
+        c.commit()
+        rid = cur.lastrowid
+        r = c.execute("SELECT * FROM task_runs WHERE id = ?",
+                      (rid,)).fetchone()
+    return dict(r)
+
+
+def list_runs(task_id: int, limit: int = 20) -> list[dict]:
+    limit = max(1, min(200, int(limit)))
+    with db._LOCK:
+        rows = db._conn().execute(
+            "SELECT * FROM task_runs WHERE task_id = ?"
+            " ORDER BY id DESC LIMIT ?", (int(task_id), limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def last_run(task_id: int) -> dict | None:
+    rows = list_runs(task_id, limit=1)
+    return rows[0] if rows else None
+
+
+# ── skills (draft → owner publish → published) ──────────────────────────────
+def create_skill_draft(title: str, body_md: str,
+                       source_note: str = "") -> dict:
+    now = _now()
+    with db._LOCK:
+        c = db._conn()
+        cur = c.execute(
+            "INSERT INTO skills (title, body_md, source_note, status,"
+            " created_at) VALUES (?,?,?,'draft',?)",
+            (str(title or "Untitled skill").strip() or "Untitled skill",
+             str(body_md or ""), str(source_note or ""), now))
+        c.commit()
+        sid = cur.lastrowid
+    return get_skill(sid)
+
+
+def get_skill(sid: int) -> dict | None:
+    with db._LOCK:
+        r = db._conn().execute("SELECT * FROM skills WHERE id = ?",
+                               (int(sid),)).fetchone()
+    return dict(r) if r else None
+
+
+def list_skills(status: str | None = None) -> list[dict]:
+    with db._LOCK:
+        if status is None:
+            rows = db._conn().execute(
+                "SELECT * FROM skills ORDER BY id DESC").fetchall()
+        else:
+            rows = db._conn().execute(
+                "SELECT * FROM skills WHERE status = ? ORDER BY id DESC",
+                (str(status),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def find_skill_by_fp(fp: str) -> dict | None:
+    """Any skill (draft/published/archived) already mined from this
+    shape → miner must not create a duplicate draft."""
+    note = f"fp:{fp}"
+    with db._LOCK:
+        r = db._conn().execute(
+            "SELECT * FROM skills WHERE source_note = ? OR"
+            " source_note LIKE ? LIMIT 1",
+            (note, note + " %")).fetchone()
+    return dict(r) if r else None
+
+
+def publish_skill(sid: int) -> dict:
+    s = get_skill(sid)
+    if s is None:
+        raise KeyError(f"no skill #{sid}")
+    if s["status"] == "published":
+        raise ValueError(f"skill #{sid} is already published")
+    now = _now()
+    with db._LOCK:
+        c = db._conn()
+        c.execute("UPDATE skills SET status='published', published_at=?"
+                  " WHERE id = ?", (now, int(sid)))
+        c.commit()
+    return get_skill(sid)
+
+
+def archive_skill(sid: int) -> dict:
+    s = get_skill(sid)
+    if s is None:
+        raise KeyError(f"no skill #{sid}")
+    if s["status"] == "archived":
+        raise ValueError(f"skill #{sid} is already archived")
+    with db._LOCK:
+        c = db._conn()
+        c.execute("UPDATE skills SET status='archived' WHERE id = ?",
+                  (int(sid),))
+        c.commit()
+    return get_skill(sid)
+
+
+def scan_for_mining(convo_prefixes=("dot:", "page:", "task:")) -> list[dict]:
+    """Ordered (id, convo_key, role, content) rows for the miner —
+    only conversation messages, never system noise."""
+    marks = tuple(str(p) for p in convo_prefixes)
+    where = " OR ".join("convo_key LIKE ?" for _ in marks)
+    params = tuple(p + "%" for p in marks)
+    with db._LOCK:
+        rows = db._conn().execute(
+            f"SELECT id, convo_key, role, content FROM messages"
+            f" WHERE {where} ORDER BY id", params).fetchall()
+    return [dict(r) for r in rows]

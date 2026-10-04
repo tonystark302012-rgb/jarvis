@@ -22,7 +22,9 @@ def env(monkeypatch, tmp_path):
     import dots.db as db
     import dots.brain as brain
     import dots.computer as computer
+    import dots.scheduler as scheduler
     monkeypatch.setattr(db, "_db_path", lambda: tmp_path / "dots.db")
+    scheduler.shutdown()
     monkeypatch.setattr(computer, "_pcs_root", _tmp_pcs_root(tmp_path))
     db.reset_for_tests()
     computer.reset_for_tests()
@@ -38,6 +40,11 @@ def env(monkeypatch, tmp_path):
     yield {"client": client, "brain": brain, "db": db, "tmp": tmp_path}
     brain.set_llm(None)
     computer.reset_for_tests()
+    import time as _t
+    _end = _t.monotonic() + 2.0
+    while scheduler._live and _t.monotonic() < _end:
+        _t.sleep(0.05)              # let spawned task workers finish
+    scheduler.shutdown()
     db.reset_for_tests()
 
 
@@ -555,19 +562,30 @@ class TestBrainTools:
     def test_spec_exposure_by_permission(self, env):
         from dots import store
         from dots.tools import specs_for
+
+        def gated(dot):
+            # skill tools are published-knowledge by design → always on
+            return [t["function"]["name"] for t in specs_for(dot)
+                    if t["function"]["name"] not in
+                    ("load_skill", "read_skill_file")]
+
+        def skill_tools(dot):
+            return [t["function"]["name"] for t in specs_for(dot)
+                    if t["function"]["name"] in
+                    ("load_skill", "read_skill_file")]
+
         bare = store.create_dot("Bare")
-        assert specs_for(bare) == []
+        assert gated(bare) == []
+        assert skill_tools(bare) == ["load_skill", "read_skill_file"]
         res = store.create_dot("Web", permissions={"research": True})
-        names = [t["function"]["name"] for t in specs_for(res)]
-        assert names == ["search_web", "read_public_page"]
+        assert gated(res) == ["search_web", "read_public_page"]
         spa = store.create_dot("Sp", permissions={"space": True})
-        names = [t["function"]["name"] for t in specs_for(spa)]
-        assert names == ["list_authorized_spaces", "list_space_pages",
-                         "read_space_page", "create_space_page",
-                         "edit_space_page"]
+        assert gated(spa) == ["list_authorized_spaces", "list_space_pages",
+                              "read_space_page", "create_space_page",
+                              "edit_space_page"]
         both = store.create_dot("AB",
                                 permissions={"research": True, "space": True})
-        assert len(specs_for(both)) == 7
+        assert len(specs_for(both)) == 9
 
     def test_tool_loop_search_then_answer(self, env, monkeypatch):
         from dots import brain, store, tools_research
@@ -818,7 +836,9 @@ class TestBrainTools:
         bare = store.create_dot("Q")
         sys_txt = brain.system_prompt(bare, [], None)
         assert "PERMISSIONS (owner-granted): none" in sys_txt
-        assert "(none — you cannot call tools)" in sys_txt
+        # skill tools are always available (published = shared)
+        assert "TOOLS available: load_skill, read_skill_file" in sys_txt
+        assert "PUBLISHED SKILLS: (none yet)" in sys_txt
 
     def test_default_path_local_llm_loop(self, env, monkeypatch):
         # no seam → local tool LLM first (doc: local-first), gemini unused
@@ -1220,9 +1240,13 @@ class TestDotComputer:
                       and r["actor"] == "agent"]
         assert agent_exec and agent_exec[0]["ok"]
         assert "print(21*2)" in agent_exec[0]["detail"]
-        # computer permission off → no specs, honest denial through router
+        # computer permission off → no COMPUTER specs, honest denial
         bare = store.create_dot("NoPC")
-        assert tools.specs_for(bare) == []
+        assert not [t for t in tools.specs_for(bare)
+                    if t["function"]["name"].startswith("computer_")
+                    or t["function"]["name"] in ("exec", "files_list",
+                                                 "files_read",
+                                                 "files_write")]
         assert tools.run_tool(bare, "exec", {"argv": ["x"]}).startswith(
             "denied:")
         # permission on but NO computer yet → honest creation hint
@@ -1281,3 +1305,374 @@ class TestDotComputer:
         assert not work.exists()
         assert c.get(f"/api/computers/{comp['id']}").status_code == 404
         assert c.delete("/api/computers/12345").status_code == 404
+
+
+def _wait_for(fn, timeout=4.0, gap=0.05):
+    """Poll until fn() is truthy (async task workers) → last value."""
+    import time as _t
+    end = _t.monotonic() + timeout
+    while _t.monotonic() < end:
+        v = fn()
+        if v:
+            return v
+        _t.sleep(gap)
+    return fn()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 6d: scheduler (90 s runs, pause/retry/cancel) + skill learning (T9)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestScheduler:
+    def test_create_validation_and_voice(self, env):
+        from actions.dots import dots as dots_action
+        from dots import scheduler, store
+        c = env["client"]
+        # no dot yet → honest "which Dot"
+        out = dots_action({"action": "task_create",
+                           "instruction": "check mail", "every": "60"})
+        assert "Which Dot" in out
+        c.post("/api/dots", json={"name": "Worker", "role": "r"})
+        out = dots_action({"action": "task_create", "dot": "Worker",
+                           "instruction": "check mail every hour",
+                           "every": "60"})
+        assert "scheduled every 60s" in out and "90s" in out
+        # invalid every → honest
+        out = dots_action({"action": "task_create", "dot": "Worker",
+                           "instruction": "x", "every": "abc"})
+        assert "every_seconds" in out
+        tasks = store.list_tasks()
+        assert len(tasks) == 1 and tasks[0]["status"] == "active"
+        store.set_task_status(tasks[0]["id"], "paused")  # keep ticker off
+        listed = dots_action({"action": "task_list"})
+        assert "every 60s on Worker" in listed and "paused" in listed
+        # route shapes
+        r = c.post("/api/tasks", json={"instruction": "via http",
+                                       "every_seconds": 120,
+                                       "dot_id": 1})
+        assert r.status_code == 201 and r.json()["every_seconds"] == 120
+        assert c.post("/api/tasks", json={"instruction": "y",
+                                          "every_seconds": 0,
+                                          "dot_id": 1}).status_code == 400
+        assert c.post("/api/tasks", json={"instruction": "y",
+                                          "every_seconds": 60,
+                                          "dot_id": 99}).status_code == 404
+        assert c.get("/api/tasks/999").status_code == 404
+        # honest unknown task references
+        assert "No task" in dots_action({"action": "task_cancel",
+                                         "which": "nope"})
+        assert "which=#task-id" in dots_action({"action": "task_runs",
+                                                "which": "abc"})
+
+    def test_run_ok_flow_and_convo_history(self, env):
+        from dots import scheduler, store
+        c = env["client"]
+        c.post("/api/dots", json={"name": "Relay", "role": "r"})
+        t = store.create_task("ping", "run the ping", 3600, 1)
+        assert scheduler.tick() == 1                  # due now → spawn
+        run = _wait_for(lambda: store.last_run(t["id"]))
+        assert run is not None and run["status"] == "ok"
+        assert "scripted reply to:" in run["output"]
+        # history accumulates on the task convo for the NEXT run
+        msgs = store.list_messages(f"task:{t['id']}")
+        assert msgs[-2]["role"] == "user" and msgs[-1]["role"] == "dot"
+        # next_run advanced by exactly one window here (no missed slots)
+        fresh = store.get_task(t["id"])
+        assert fresh["next_run_at"] >= t["next_run_at"] + 3600
+        assert fresh["last_run_at"] is not None
+        assert scheduler.tick() == 0                  # nothing due now
+
+    def test_skip_missed_windows(self, env):
+        import time
+        from dots import scheduler, store
+        c = env["client"]
+        c.post("/api/dots", json={"name": "M", "role": "r"})
+        base = time.time() - 35                       # 3.5 windows missed
+        t = store.create_task("m", "do the thing", 10, 1, next_run_at=base)
+        assert scheduler.tick() == 1
+        assert _wait_for(lambda: store.last_run(t["id"]))
+        fresh = store.get_task(t["id"])
+        jump = fresh["next_run_at"] - base
+        assert jump % 10 == 0 and 30 <= jump <= 70    # whole multiples only
+        assert fresh["next_run_at"] > time.time()     # no thundering catch-up
+
+    def test_pause_resume_cancel_state(self, env):
+        import time
+        from dots import scheduler, store
+        c = env["client"]
+        c.post("/api/dots", json={"name": "P", "role": "r"})
+        t = store.create_task("p", "stay alive", 5, 1)
+        scheduler.pause(t["id"])
+        assert store.get_task(t["id"])["status"] == "paused"
+        assert store.due_tasks(time.time()) == []     # paused = not due
+        assert scheduler.tick() == 0
+        assert store.last_run(t["id"]) is None        # state kept, no runs
+        scheduler.resume(t["id"])
+        assert store.get_task(t["id"])["status"] == "active"
+        assert len(store.due_tasks(time.time())) == 1
+        scheduler.cancel(t["id"])
+        assert store.get_task(t["id"])["status"] == "cancelled"
+        assert store.due_tasks(time.time()) == []
+        assert scheduler.tick() == 0
+        import pytest as _pt
+        with _pt.raises(ValueError):
+            scheduler.resume(t["id"])                 # cancelled is final
+        with _pt.raises(ValueError):
+            scheduler.pause(t["id"])
+
+    def test_cancel_aborts_live_run(self, env):
+        import time as _t
+        from dots import brain, scheduler, store
+        c = env["client"]
+        c.post("/api/dots", json={"name": "Slow", "role": "r"})
+
+        def slow(system, hist):
+            _t.sleep(1.5)
+            return "too late"
+
+        brain.set_llm(slow)
+        t = store.create_task("slowjob", "take your time", 9999, 1)
+        nxt_before = t["next_run_at"]
+        scheduler._spawn(t, trigger="test")
+        assert _wait_for(lambda: t["id"] in scheduler._live, timeout=2)
+        res = scheduler.cancel(t["id"])
+        assert res["aborted_live_run"] is True
+        run = _wait_for(lambda: store.last_run(t["id"]))
+        assert run is not None and run["status"] == "cancelled"
+        assert "cancelled by owner" in run["output"]
+        fresh = store.get_task(t["id"])
+        assert fresh["status"] == "cancelled"
+        assert fresh["next_run_at"] == nxt_before      # never reschedules
+        # live registry drains
+        assert _wait_for(lambda: t["id"] not in scheduler._live, timeout=4)
+
+    def test_retry_failed_then_ok(self, env, monkeypatch):
+        import pytest as _pt
+        from actions.dots import dots as dots_action
+        from dots import brain, scheduler, store
+        c = env["client"]
+        c.post("/api/dots", json={"name": "Flaky", "role": "r"})
+        t = store.create_task("flaky", "try this", 9999, 1)
+        # run 1: no brain anywhere → honest failure (not a fake answer)
+        brain.set_llm(None)
+        monkeypatch.setattr(brain, "_local_ready", lambda: False)
+        import core.gemini as gemini
+        monkeypatch.setattr(gemini, "call",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("no key")))
+        assert scheduler.tick() == 1
+        run = _wait_for(lambda: store.last_run(t["id"]))
+        assert run["status"] == "failed"
+        assert run["output"].startswith("No brain reachable")
+        # retry with brain fixed → ok
+        brain.set_llm(lambda system, hist: "recovered now")
+        out = dots_action({"action": "task_retry", "which": str(t["id"])})
+        assert "Retrying task" in out
+        run2 = _wait_for(
+            lambda: [r for r in store.list_runs(t["id"])
+                     if r["id"] != run["id"] and r["status"] == "ok"])
+        assert run2, store.list_runs(t["id"])
+        # honest retry refusals
+        out = dots_action({"action": "task_retry", "which": str(t["id"])})
+        assert "nothing to retry" in out
+        scheduler.pause(t["id"])
+        out = dots_action({"action": "task_retry", "which": str(t["id"])})
+        assert "paused" in out
+        with _pt.raises(KeyError):
+            scheduler.retry(4242)
+
+    def test_hard_deadline_timeout(self, env, monkeypatch):
+        import time as _t
+        from dots import brain, scheduler, store
+        c = env["client"]
+        c.post("/api/dots", json={"name": "Hang", "role": "r"})
+
+        def hang(system, hist):
+            _t.sleep(2.0)
+            return "done late"
+
+        brain.set_llm(hang)
+        monkeypatch.setattr(scheduler, "DEADLINE_SECONDS", 0.5)
+        t = store.create_task("h", "hang please", 9999, 1)
+        assert scheduler.tick() == 1
+        run = _wait_for(lambda: store.last_run(t["id"]), timeout=3)
+        assert run["status"] == "timeout"
+        assert "hard deadline" in run["output"]
+        # timeout still reschedules (only cancel stops the series)
+        fresh = store.get_task(t["id"])
+        assert fresh["status"] == "active"
+        assert fresh["next_run_at"] > t["next_run_at"]
+        assert _wait_for(lambda: t["id"] not in scheduler._live, timeout=4)
+
+    def test_runs_endpoint_and_statuses(self, env):
+        from dots import scheduler, store
+        c = env["client"]
+        c.post("/api/dots", json={"name": "R", "role": "r"})
+        t = store.create_task("r1", "one", 9999, 1)
+        scheduler.tick()
+        assert _wait_for(lambda: store.last_run(t["id"]))
+        rows = c.get(f"/api/tasks/{t['id']}/runs").json()
+        assert rows and rows[0]["status"] == "ok"
+        assert c.get("/api/tasks/999/runs").status_code == 404
+        assert c.get(f"/api/tasks/{t['id']}").json()["name"] == "r1"
+        # store refuses bogus run/task statuses (schema contract)
+        with pytest.raises(ValueError):
+            store.record_run(t["id"], "weird", 1.0)
+        with pytest.raises(ValueError):
+            store.set_task_status(t["id"], "weird")
+
+    def test_ticker_lifecycle(self, env, monkeypatch):
+        from dots import scheduler, store
+        c = env["client"]
+        assert not scheduler.is_running()
+        c.post("/api/dots", json={"name": "Tick", "role": "r"})
+        monkeypatch.setattr(scheduler, "TICK_SECONDS", 0.1)
+        c.post("/api/tasks", json={"instruction": "tick me",
+                                   "every_seconds": 9999, "dot_id": 1})
+        assert scheduler.is_running()                 # POST ensured it
+        tid = store.list_tasks()[0]["id"]
+        run = _wait_for(lambda: store.last_run(tid), timeout=4)
+        assert run is not None and run["status"] == "ok"
+        scheduler.shutdown()
+        assert not scheduler.is_running()
+
+
+class TestLearning:
+    def _seed(self, n=3, ok=True, texts=None):
+        from dots import store
+        texts = texts or [
+            "summarize https://ex.com/a{i} into my notes".replace(
+                "{i}", str(i))
+            for i in range(n)
+        ]
+        for i, txt in enumerate(texts):
+            store.add_message("dot:77", "user", txt)
+            store.add_message("dot:77", "dot",
+                              "Brain error: boom" if not ok
+                              else f"done with step {i}")
+
+    def test_mine_repeated_shapes_idempotent(self, env):
+        from dots import learning, store
+        assert learning.mine() == []                  # nothing yet
+        self._seed(3)
+        drafts = learning.mine()
+        assert len(drafts) == 1
+        d = drafts[0]
+        assert d["status"] == "draft"                 # NEVER auto-publish
+        assert "summarize" in d["title"]
+        assert d["source_note"].startswith("fp:")
+        assert "Observed requests" in d["body_md"]
+        assert learning.mine() == []                  # fingerprint dedupe
+        assert len(store.list_skills("draft")) == 1
+
+    def test_needs_completed_ok_answers(self, env):
+        from dots import learning, store
+        self._seed(3, ok=False)                       # honest failures
+        assert learning.mine() == []
+        # too few occurrences
+        self._seed(2, texts=["compile the quarterly report deck now",
+                             "compile the quarterly report deck again"])
+        assert learning.mine() == []
+        # trivial chit-chat is not a skill (shape too small)
+        self._seed(3, texts=["hi", "hi there", "hi"])
+        assert learning.mine() == []
+
+    def test_t9_drafts_invisible_until_published(self, env):
+        import json as _json
+        from dots import brain, learning, store
+        self._seed(3)
+        assert len(learning.mine()) == 1
+        sid = store.list_skills("draft")[0]["id"]
+        dot = store.create_dot("Reader")
+        # draft invisible: prompt + tool
+        sys_txt = brain.system_prompt(dot, [], None)
+        assert "summarize" not in sys_txt
+        from dots.tools import run_tool
+        assert "owner-only" not in run_tool(dot, "load_skill",
+                                            {"query": "summarize"})
+        out = run_tool(dot, "load_skill", {"query": "summarize"})
+        # honest: either "no published skills yet" or "no match" — never
+        # the draft's content
+        assert "no published skill" in out and "Observed requests" not in out
+        # publish (owner endpoint) → visible
+        c = env["client"]
+        r = c.post(f"/api/skills/{sid}/publish")
+        assert r.status_code == 200 and r.json()["status"] == "published"
+        sys_txt = brain.system_prompt(dot, [], None)
+        assert "PUBLISHED SKILLS" in sys_txt and "summarize" in sys_txt
+        out = run_tool(dot, "load_skill", {"query": "summarize"})
+        assert "Observed requests" in out
+        # double publish → 409 honest; drafts list empty; archive hides
+        assert c.post(f"/api/skills/{sid}/publish").status_code == 409
+        assert store.list_skills("draft") == []
+        assert c.post(f"/api/skills/{sid}/archive").status_code == 200
+        assert "summarize" not in brain.system_prompt(dot, [], None)
+        # archived fingerprint still blocks re-mining (no dup drafts)
+        assert learning.mine() == []
+        assert c.post("/api/skills/999/publish").status_code == 404
+        # load_skill no-arg lists ONLY published
+        assert run_tool(dot, "load_skill", {}) == \
+            "no published skills yet — drafts exist only for the owner " \
+            "until they publish them"
+
+    def test_voice_skill_actions(self, env):
+        from actions.dots import dots as dots_action
+        from dots import learning, store
+        out = dots_action({"action": "skill_mine"})
+        assert "No new skill drafts" in out
+        self._seed(3)
+        out = dots_action({"action": "skill_mine"})
+        assert "New DRAFT skill(s)" in out and "auto-published" in out
+        sid = store.list_skills("draft")[0]["id"]
+        out = dots_action({"action": "skill_list"})
+        assert f"#{sid} [draft]" in out
+        out = dots_action({"action": "skill_publish", "which": str(sid)})
+        assert "PUBLISHED — every Dot now sees it" in out
+        out = dots_action({"action": "skill_publish", "which": str(sid)})
+        assert "already published" in out
+        out = dots_action({"action": "skill_publish", "which": "zz"})
+        assert "which=#skill-id" in out
+        out = dots_action({"action": "skill_archive", "which": str(sid)})
+        assert "archived" in out
+        out = dots_action({"action": "skill_list", "status": "archived"})
+        assert f"#{sid} [archived]" in out
+
+    def test_chat_triggers_mining_automatic(self, env):
+        from actions.dots import dots as dots_action
+        from dots import store
+        store.create_dot("Auto", permissions={"research": False})
+        for i in range(3):
+            dots_action({"action": "chat", "dot": "Auto",
+                         "message": f"draft a status email for day {i}"})
+        drafts = store.list_skills("draft")
+        assert len(drafts) == 1
+        assert "draft a status email" in drafts[0]["title"]
+
+    def test_skill_file_jail(self, env, monkeypatch, tmp_path):
+        from dots import tools_learning
+        root = tmp_path / "skills"
+        root.mkdir()
+        monkeypatch.setattr(tools_learning, "_skills_dir", lambda: root)
+        (root / "checklist.md").write_text("# how to check",
+                                           encoding="utf-8")
+        from dots import store
+        from dots.tools import run_tool
+        dot = store.create_dot("S")
+        out = run_tool(dot, "read_skill_file", {"path": "checklist.md"})
+        assert out == "# how to check"
+        assert run_tool(dot, "read_skill_file",
+                        {"path": "../x"}).startswith("denied:")
+        assert "no such skill file" in run_tool(dot, "read_skill_file",
+                                                {"path": "nope.md"})
+
+    def test_summariser_seam(self, env):
+        from dots import learning, store
+        try:
+            learning.set_summariser(
+                lambda sh, ex: f"SUMMARY::{sh}::{len(ex)}")
+            self._seed(3)
+            drafts = learning.mine()
+            assert len(drafts) == 1
+            assert drafts[0]["body_md"].startswith("SUMMARY::")
+        finally:
+            learning.set_summariser(None)

@@ -323,8 +323,21 @@ gates protect agent writes (T10).
   `computer`), owner HTTP takeover surface (13 routes: start/stop/
   perms/exec/files/browser/audit), voice `pc` action (shlex argv —
   never a shell)
-* **6d** scheduler (90 s runs, pause/retry/cancel, JARVIS patterns) +
-  skills learning loop (draft → owner publish)
+* **6d** ✅ scheduler (`dots/scheduler.py`): lazy daemon ticker (5 s
+  tick), runs on convo `task:<id>` with HARD 90 s deadline →
+  `task_runs` (ok|timeout|failed|cancelled, honest failure prefixes),
+  next_run skips missed windows (whole multiples, no catch-up),
+  pause keeps state / resume / cancel aborts the live worker
+  cooperatively (result discarded, never reschedules) / retry re-runs
+  only failed|timeout runs; visibility `GET /api/tasks/{id}/runs`.
+  Skill learning (`dots/learning.py`): deterministic miner (≥3
+  same-shape user messages with completed dot replies, fingerprint in
+  `source_note` → idempotent), drafts NEVER auto-publish (T9) —
+  owner `POST /api/skills/{id}/publish|archive`; published-only
+  injection into the brain prompt + tools `load_skill` /
+  `read_skill_file` (jail `memory/dots_skills/`); optional
+  `set_summariser` seam. Voice: `task_*` + `skill_*` on the `dots`
+  action; auto-mine hook after each chat (drafts only)
 * **6e** Slack integration + voice-call session/captions (Gemini Live)
 * **6f** dashboard UI (spaces tree, block editor + slash, approval
   cards, computer panel, call UI)

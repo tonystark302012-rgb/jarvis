@@ -181,6 +181,11 @@ def pages(parameters: dict = None, player=None, session_memory=None) -> str:
         store.add_message(convo, "user", message)
         answer = brain.reply(d, convo, message, page=p)
         store.add_message(convo, "dot", answer)
+        try:
+            from dots import learning
+            learning.mine()          # drafts only — never auto-publish
+        except Exception:
+            pass
         return answer
 
     return ("Unknown pages action — use: space_list | space_create | "

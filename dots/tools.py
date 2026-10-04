@@ -9,9 +9,11 @@ tries, it gets an honest owner-only answer (T5 family).
 """
 from __future__ import annotations
 
-from . import tools_computer, tools_research, tools_spaces
+from . import (tools_computer, tools_learning, tools_research,
+                tools_spaces)
 
-_MODULES = (tools_spaces, tools_research, tools_computer)
+_MODULES = (tools_spaces, tools_research, tools_computer,
+            tools_learning)
 
 # tool name → owning module (spec exposure + dispatch share this index)
 _OWNERS: dict = {spec["function"]["name"]: m

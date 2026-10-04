@@ -132,6 +132,11 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
         store.add_message(convo, "user", message)
         answer = brain.reply(d, convo, message, page=page)
         store.add_message(convo, "dot", answer)
+        try:
+            from dots import learning
+            learning.mine()          # drafts only — never auto-publish
+        except Exception:
+            pass
         return answer
 
     # ── human-in-the-loop review (owner side; Dots cannot self-approve)
@@ -207,9 +212,142 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
                 return f"Deleted {p['key']}."
         return f"No preference {which!r}."
 
+    # ── background/scheduled tasks (recurring, 90 s cap per run) ─────
+    if action in ("task_create", "task"):
+        instruction = str(params.get("instruction") or
+                          params.get("message") or "").strip()
+        if not instruction:
+            return ("Give the recurring command — dots action=task_create "
+                    "instruction=\"…\" every=3600 dot=…")
+        raw_dot = str(params.get("dot") or "").strip()
+        if raw_dot:
+            d, err = _require_dot(params)
+            if err:
+                return err
+        else:
+            ds = store.list_dots()
+            if len(ds) != 1:
+                return ("Which Dot should run it? Add dot=… Known: "
+                        + (", ".join(x["name"] for x in ds) or "(none)"))
+            d = ds[0]
+        every = params.get("every") or params.get("every_seconds") or 3600
+        try:
+            t = store.create_task(params.get("task") or instruction[:40],
+                                  instruction, every, d["id"])
+        except (ValueError, KeyError) as e:
+            return str(e)
+        from dots import scheduler
+        scheduler.ensure_started()
+        return (f"Task '{t['name']}' scheduled every {t['every_seconds']}s "
+                f"on Dot '{d['name']}' (first run on the next tick, "
+                f"hard cap {scheduler.DEADLINE_SECONDS}s per run). "
+                f"List: dots action=task_list")
+
+    if action in ("task_list", "tasks"):
+        from dots import scheduler
+        scheduler.ensure_started()
+        rows = store.list_tasks()
+        if not rows:
+            return ("No scheduled tasks — dots action=task_create "
+                    "instruction=… every=…")
+        lines = []
+        for t in rows:
+            dn = (store.get_dot(t["dot_id"]) or {}).get("name", "?")
+            lines.append(f"#{t['id']} [{t['status']}] every "
+                         f"{t['every_seconds']}s on {dn}: {t['name']}")
+        return "\n".join(lines)
+
+    if action in ("task_pause", "task_resume", "task_cancel",
+                  "task_retry"):
+        tid = str(params.get("which") or params.get("task") or "").strip()
+        if not tid.isdigit():
+            for t in store.list_tasks():
+                if t["name"].lower() == tid.lower():
+                    tid = str(t["id"])
+                    break
+            else:
+                return (f"No task {tid!r} — list: dots action=task_list "
+                        f"(or pass which=#id)")
+        from dots import scheduler
+        try:
+            tid_i = int(tid)
+            if action == "task_pause":
+                t = scheduler.pause(tid_i)
+                return (f"Task #{tid} paused — state kept; resume: "
+                        f"dots action=task_resume which={tid}")
+            if action == "task_resume":
+                t = scheduler.resume(tid_i)
+                return f"Task #{tid} active again."
+            if action == "task_cancel":
+                t = scheduler.cancel(tid_i)
+                extra = (" (live run aborted)" if t.get("aborted_live_run")
+                         else "")
+                return f"Task #{tid} cancelled permanently{extra}."
+            r = scheduler.retry(tid_i)
+            return (f"Retrying task #{tid} now (previous run "
+                    f"#{r['retried_run']} failed).")
+        except KeyError as e:
+            return str(e)
+        except ValueError as e:
+            return str(e)
+
+    if action in ("task_runs", "runs"):
+        which = str(params.get("which") or params.get("task") or "")
+        if not which.isdigit():
+            return "task_runs needs which=#task-id (dots action=task_list)"
+        rows = store.list_runs(int(which))
+        if not rows:
+            return f"No runs yet for task #{which}."
+        icon = {"ok": "✓", "failed": "✗", "timeout": "⏱", "cancelled": "⊘"}
+        return "\n".join(
+            f"#{r['id']} {icon.get(r['status'], '?')} {r['status']}: "
+            f"{(r['output'] or '')[:160]}" for r in rows)
+
+    # ── skills (miner drafts → OWNER publishes; T9) ───────────────────
+    if action in ("skill_list", "skills"):
+        status = str(params.get("status") or "").strip().lower()
+        rows = store.list_skills(status if status in (
+            "draft", "published", "archived") else None)
+        if not rows:
+            return ("No skills yet — the miner creates DRAFTS from "
+                    "repeated conversations (dots action=skill_mine).")
+        return "\n".join(
+            f"#{s['id']} [{s['status']}] {s['title']}" for s in rows)
+
+    if action == "skill_mine":
+        from dots import learning
+        drafts = learning.mine()
+        if not drafts:
+            return ("No new skill drafts — I look for a task shape "
+                    "repeated 3+ times with completed answers.")
+        return ("New DRAFT skill(s): "
+                + "; ".join(f"#{d['id']} {d['title']!r}"
+                            for d in drafts)
+                + " — publish them yourself (dots action=skill_publish "
+                  "which=…); nothing is ever auto-published.")
+
+    if action in ("skill_publish", "skill_archive"):
+        which = str(params.get("which") or params.get("skill") or "").strip()
+        if not which.isdigit():
+            return "skill action needs which=#skill-id (skill_list shows ids)"
+        try:
+            if action == "skill_publish":
+                s = store.publish_skill(int(which))
+                return (f"Skill #{s['id']} PUBLISHED — every Dot now "
+                        f"sees it: {s['title']!r}")
+            s = store.archive_skill(int(which))
+            return f"Skill #{s['id']} archived (kept for the miner, not shown)."
+        except KeyError as e:
+            return str(e)
+        except ValueError as e:
+            return str(e)
+
     return ("Unknown dots action — use: dot_create | dot_list | dot_show | "
             "dot_delete | chat | pending_list | approve | decline | "
-            "memory_list | memory_set | memory_delete")
+            "memory_list | memory_set | memory_delete | task_create | "
+            "task_list | task_pause | task_resume | task_cancel | "
+            "task_retry | task_runs | skill_list | skill_mine | "
+            "skill_publish | skill_archive")
 
 
 def _resolve_page(params: dict):
@@ -245,7 +383,13 @@ TOOL = {
                        "description": "dot_create | dot_list | dot_show | "
                                       "dot_delete | chat | pending_list | "
                                       "approve | decline | memory_list | "
-                                      "memory_set | memory_delete"},
+                                      "memory_set | memory_delete | "
+                                      "task_create | task_list | "
+                                      "task_pause | task_resume | "
+                                      "task_cancel | task_retry | "
+                                      "task_runs | skill_list | "
+                                      "skill_mine | skill_publish | "
+                                      "skill_archive"},
             "dot": {"type": "STRING",
                     "description": "Dot name or #id (chat/show/delete)"},
             "name": {"type": "STRING", "description": "New Dot's name"},
@@ -267,6 +411,17 @@ TOOL = {
             "allowed": {"type": "STRING",
                         "description": "memory_set: '*' (default) or comma "
                                        "list of Dot names"},
+            "instruction": {"type": "STRING",
+                            "description": "task_create: the recurring "
+                                           "command to run"},
+            "every": {"type": "STRING",
+                      "description": "task_create: seconds between runs "
+                                     "(e.g. 3600)"},
+            "task": {"type": "STRING",
+                     "description": "task name or #id for task_* actions"},
+            "status": {"type": "STRING",
+                       "description": "skill_list filter: draft | "
+                                      "published | archived"},
         },
         "required": [],
     },

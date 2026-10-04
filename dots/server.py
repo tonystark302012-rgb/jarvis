@@ -380,3 +380,121 @@ def api_computer_browser(cid: int, payload: dict = Body(...)) -> dict:
         return _err(400, f"op must be one of {sorted(_BROWSER_OPS)}")
     kw = {k: v for k, v in payload.items() if k != "op"}
     return _op_result(computer.browser(comp, op, actor="owner", **kw))
+
+
+# ── tasks (recurring background instructions) ───────────────────────────────
+
+@router.get("/api/tasks")
+def api_list_tasks() -> list[dict]:
+    from . import scheduler
+    scheduler.ensure_started()          # opening the list resumes ticks
+    return store.list_tasks()
+
+
+@router.post("/api/tasks", status_code=201)
+def api_create_task(payload: dict = Body(...)) -> dict:
+    from . import scheduler
+    scheduler.ensure_started()
+    try:
+        return store.create_task(payload.get("name"),
+                                 payload.get("instruction"),
+                                 payload.get("every_seconds", 3600),
+                                 int(payload.get("dot_id")))
+    except (ValueError, KeyError, TypeError) as e:
+        status = 404 if isinstance(e, KeyError) else 400
+        raise HTTPException(status, str(e))
+
+
+@router.get("/api/tasks/{tid}")
+def api_get_task(tid: int) -> dict:
+    t = store.get_task(tid)
+    if t is None:
+        raise HTTPException(404, f"no task #{tid}")
+    return t
+
+
+@router.post("/api/tasks/{tid}/pause")
+def api_pause_task(tid: int) -> dict:
+    from . import scheduler
+    try:
+        return scheduler.pause(tid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/api/tasks/{tid}/resume")
+def api_resume_task(tid: int) -> dict:
+    from . import scheduler
+    try:
+        return scheduler.resume(tid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/api/tasks/{tid}/cancel")
+def api_cancel_task(tid: int) -> dict:
+    from . import scheduler
+    try:
+        return scheduler.cancel(tid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/api/tasks/{tid}/retry")
+def api_retry_task(tid: int) -> dict:
+    from . import scheduler
+    scheduler.ensure_started()
+    try:
+        return scheduler.retry(tid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/api/tasks/{tid}/runs")
+def api_task_runs(tid: int, limit: int = 20) -> list[dict]:
+    if store.get_task(tid) is None:
+        raise HTTPException(404, f"no task #{tid}")
+    return store.list_runs(tid, limit)
+
+
+# ── skills (miner → draft → OWNER publishes) ────────────────────────────────
+
+@router.get("/api/skills")
+def api_list_skills(status: str | None = None) -> list[dict]:
+    return store.list_skills(status if status not in ("", "any")
+                             else None)
+
+
+@router.post("/api/skills/mine")
+def api_mine_skills() -> dict:
+    from . import learning
+    drafts = learning.mine()
+    return {"created": len(drafts),
+            "drafts": [{"id": d["id"], "title": d["title"]}
+                       for d in drafts]}
+
+
+@router.post("/api/skills/{sid}/publish")
+def api_publish_skill(sid: int) -> dict:
+    try:
+        return store.publish_skill(sid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@router.post("/api/skills/{sid}/archive")
+def api_archive_skill(sid: int) -> dict:
+    try:
+        return store.archive_skill(sid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(409, str(e))

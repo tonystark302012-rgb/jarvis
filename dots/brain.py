@@ -24,6 +24,15 @@ import json
 
 MAX_ROUNDS = 8
 
+# Honest "the brain did not answer" prefixes — scheduler treats these as
+# failed runs; the skill miner treats them as NOT-successful markers.
+HONEST_FAILURES = (
+    "Brain error",
+    "No brain reachable",
+    "No brain configured",
+    "(the brain returned an empty reply)",
+)
+
 # Test/integration seam: legacy fn(system, hist) -> str,
 # or tool-loop fn(messages, tools) -> str | {"content", "tool_calls"}
 _llm = None
@@ -55,6 +64,21 @@ def _page_context(page: dict | None) -> str:
             f"{page.get('content_md') or '(empty)'}")
 
 
+def _skills_context() -> str:
+    """Published skills only — drafts/archived never reach a dot (T9)."""
+    from . import store
+    try:
+        pub = store.list_skills("published")[:20]
+    except Exception:
+        pub = []
+    if not pub:
+        return "PUBLISHED SKILLS: (none yet)"
+    lines = "\n".join(
+        f"- [{s['id']}] {s['title']}: "
+        f"{(s.get('body_md') or '')[:400]}" for s in pub)
+    return f"PUBLISHED SKILLS (follow when relevant):\n{lines}"
+
+
 def system_prompt(dot: dict, prefs: list[dict], page: dict | None
                   ) -> str:
     from .tools import specs_for
@@ -75,7 +99,8 @@ def system_prompt(dot: dict, prefs: list[dict], page: dict | None
         f"TOOLS available: {tool_names}\n"
         "A tool result starting 'denied:' means the owner has NOT granted "
         "it — tell the owner that honestly, never pretend you did it.\n\n"
-        f"OWNER PREFERENCES you may use:\n{prefs_txt}\n"
+        f"OWNER PREFERENCES you may use:\n{prefs_txt}\n\n"
+        + _skills_context() + "\n"
         + _page_context(page)
     )
 
