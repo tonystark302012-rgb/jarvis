@@ -14,6 +14,8 @@ import webbrowser
 from pathlib import Path
 from typing import Optional
 
+from core import agent_runtime as _rt          # shared cooperative-cancel keys
+
 # Playwright is only needed for INTERACTIVE actions (click/type/…). Native
 # go_to/search use the user's own browser and keep working without it, and
 # the agentic loop's core (parse/format/verify/driver) stays importable in
@@ -993,6 +995,12 @@ def browser_control(
     browser = params.get("browser", "").lower().strip() or None
     result  = "Unknown action."
 
+    if action == "cancel":
+        if "browser" not in _rt.active():
+            return "No browser agent run to cancel."
+        _rt.cancel("browser")
+        return "Cancelling the browser agent — it stops at the next step."
+
     if action == "switch":
         target = browser or params.get("target", "").lower().strip()
         result = _registry.switch(target) if target else "Please specify a browser."
@@ -1262,6 +1270,10 @@ def agent_loop(goal: str, extract, reason, act, *, max_steps: int = 8,
     history: list[str] = []
     act_fails = 0
     for step in range(1, max(1, int(max_steps)) + 1):
+        # cooperative cancel — honoured between steps, never mid-action
+        if _rt.is_cancelled("browser"):
+            return (f"AGENT CANCELLED at step {step}/{max_steps}: "
+                    f"stopped by user request.")
         # ── EXTRACT ──
         try:
             state = extract()
@@ -1369,14 +1381,18 @@ def _run_agent(sess, params: dict, player=None) -> str:
     except (TypeError, ValueError):
         max_steps = 8
     reason = _make_llm_reason()
-    return agent_loop(
-        goal,
-        extract=lambda: sess.run(sess.snapshot(), timeout=30),
-        reason=reason,
-        act=lambda d: sess.run(sess.agent_act(d), timeout=30),
-        max_steps=max_steps,
-        log=lambda m: _log(player, f"agent {m}"),
-    )
+    _rt.begin("browser")                      # clears any stale cancel flag
+    try:
+        return agent_loop(
+            goal,
+            extract=lambda: sess.run(sess.snapshot(), timeout=30),
+            reason=reason,
+            act=lambda d: sess.run(sess.agent_act(d), timeout=30),
+            max_steps=max_steps,
+            log=lambda m: _log(player, f"agent {m}"),
+        )
+    finally:
+        _rt.finish("browser")
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
@@ -1388,7 +1404,7 @@ TOOL = {
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | agent | switch | list_browsers | close | close_all"
+                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | agent | cancel | switch | list_browsers | close | close_all"
             },
             "browser": {
                 "type": "STRING",

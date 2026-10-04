@@ -4262,3 +4262,97 @@ class TestHistoryRecency:
             self._insert(f"deploy target number {i}", now - i * 60)
         out = self.h.search("target", limit=3)
         assert "Found 3 turn(s)" in out
+
+
+class TestBrowserRuntime:
+    """Batch 5e — browser agent on shared agent_runtime cancel keys."""
+
+    @pytest.fixture(autouse=True)
+    def _rt(self, monkeypatch):
+        from core import agent_runtime as rt
+        import actions.browser_control as bc
+        self.rt, self.bc = rt, bc
+        rt.reset_for_tests()
+        yield
+        rt.reset_for_tests()
+
+    def test_cancel_without_run_is_honest(self):
+        out = self.bc.browser_control({"action": "cancel"}, None)
+        assert "No browser agent run to cancel" in out
+
+    def test_cancel_active_run_sets_flag(self):
+        self.rt.begin("browser")
+        out = self.bc.browser_control({"action": "cancel"}, None)
+        assert "Cancelling" in out
+        assert self.rt.is_cancelled("browser")
+
+    def test_loop_stops_at_next_boundary(self):
+        self.rt.begin("browser")
+        calls = []
+
+        def extract():
+            return {"url": "x", "elements": []}
+
+        def reason(goal, state, history):
+            return {"action": "click", "i": 1}
+
+        def act(decision):
+            calls.append(1)
+            if len(calls) == 1:
+                # user cancels WHILE the agent is mid-run (parallel call)
+                self.bc.browser_control({"action": "cancel"}, None)
+            return "clicked"
+
+        out = self.bc.agent_loop("keep going", extract, reason, act,
+                                 max_steps=9)
+        assert "CANCELLED at step 2/9" in out
+        assert len(calls) == 1                # never ran step 2's act
+
+    def test_loop_untouched_without_flag(self):
+        def extract():
+            return {"url": "x", "elements": []}
+
+        def reason(goal, state, history):
+            return {"action": "fail", "reason": "nope"}
+
+        out = self.bc.agent_loop("g", extract, reason, lambda d: "x",
+                                 max_steps=4)
+        assert "AGENT FAILED" in out          # existing behaviour intact
+
+    def test_run_agent_begin_finish_and_stale_clear(self):
+        import actions.browser_control as bc
+        # an odd stale flag while "active" (defensive contract): begin()
+        # inside _run_agent must clear it or the loop would cancel instantly
+        self.rt.begin("browser")
+        self.rt.cancel("browser")
+        assert self.rt.is_cancelled("browser")
+        seen = {}
+
+        class FakeSess:
+            def run(self, *a, **k):
+                raise AssertionError("fake agent_loop must not drive sess")
+
+        def fake_loop(*a, **k):
+            seen["active"] = list(self.rt.active())
+            return "AGENT DONE"
+
+        orig = bc.agent_loop
+        bc.agent_loop = fake_loop
+        try:
+            out = bc._run_agent(FakeSess(), {"goal": "x"}, None)
+        finally:
+            bc.agent_loop = orig
+        assert out == "AGENT DONE"
+        assert seen["active"] == ["browser"]      # begin() held the key
+        assert "browser" not in self.rt.active()  # finally: finish()
+        assert not self.rt.is_cancelled("browser")  # begin() cleared stale
+
+    def test_tool_enum_has_cancel(self):
+        desc = self.bc.TOOL["parameters"]["properties"]["action"]["description"]
+        assert " cancel " in f" {desc} "
+
+    def test_source_wiring(self):
+        src = Path("actions/browser_control.py").read_text(encoding="utf-8")
+        assert '_rt.begin("browser")' in src
+        assert '_rt.finish("browser")' in src
+        assert '_rt.is_cancelled("browser")' in src
