@@ -4240,7 +4240,10 @@ class TestHistoryRecency:
         # first result = the newer row (60 seconds ago, not 40 days)
         first = out.splitlines()[1]
         assert "target alpha zap" in first
-        assert "10:" in first or "09:" in first      # today's clock time
+        # clock hour of the NEWER insert (now-60) — computed, never
+        # hardcoded: the old "10:/09:" check only passed 09:00-10:59
+        hour = time.strftime("%H", time.localtime(now - 60))
+        assert f"{hour}:" in first
 
     def test_strong_old_beats_weak_new(self):
         now = time.time()
