@@ -2474,6 +2474,16 @@ class JarvisLive:
             asyncio.create_task(self._dashboard.serve())
             # Runs for the whole lifetime, not just inside an active session
             asyncio.create_task(self._process_dashboard_commands())
+            # Merge the dashboard workspace INTO the desktop HUD: the rail's
+            # Spaces/Agents/Computers/Calls/Agenda panels call this loopback
+            # API with a token minted right here (one server, one origin).
+            try:
+                from dashboard import server as _dsrv
+                self.ui.set_dashboard_api(
+                    f"http://127.0.0.1:{_dsrv.PORT}",
+                    self._dashboard.ui_session())
+            except Exception as _e:
+                print(f"[HUD] workspace API not wired: {_e}")
         except Exception as e:
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None

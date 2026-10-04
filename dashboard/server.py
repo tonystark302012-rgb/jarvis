@@ -556,6 +556,15 @@ class DashboardServer:
         self._pending_keys[key] = now + expiry_secs
         return key
 
+    def ui_session(self) -> str:
+        """Mint a long-lived bearer token for the desktop HUD's workspace
+        panels (Spaces/Agents/Computers/Calls/Agenda). Same process, loopback
+        only — the token dies with the server, never written to disk."""
+        tok = secrets.token_urlsafe(32)
+        self._tokens.add(tok)
+        self._token_keys[tok] = "hud"
+        return tok
+
     @staticmethod
     def _ssl_enabled() -> bool:
         certs = BASE_DIR / "config" / "certs"
