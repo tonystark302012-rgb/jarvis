@@ -93,7 +93,10 @@ def add_rule(trigger: dict, tool: str, args: dict | None = None,
     when present. `tool` may be empty for scenes — label or first step names it."""
     _load()
     if not isinstance(trigger, dict) or not trigger.get("type"):
-        return "Trigger needs a type: time | file | phrase | usb."
+        return "Trigger needs a type: time | interval | file | phrase | usb."
+    if str(trigger.get("type")) == "interval" and \
+            _parse_interval(trigger.get("value")) is None:
+        return "Interval needs a value like 30m, 2h, 1d or 1w."
     clean_steps: list[dict] = []
     if isinstance(steps, list):
         for st in steps:
@@ -335,8 +338,51 @@ def _due_phrase(r: dict) -> bool:
     return False
 
 
+def _parse_interval(value) -> int | None:
+    """'30m' | '2h' | '1d' | '1w' | bare minutes → seconds. None = invalid."""
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+    unit = raw[-1]
+    num = raw[:-1] if unit in "mhdw" else raw
+    try:
+        n = float(num)
+    except ValueError:
+        return None
+    if n <= 0:
+        return None
+    secs = {"m": 60, "h": 3600, "d": 86400, "w": 604800}.get(unit, 60)
+    return int(n * secs)
+
+
+def _due_interval(r: dict, now: float) -> bool:
+    """Repeating rule: fires every N seconds since the arm/baseline tick.
+    First tick only arms (same contract as file triggers); the anchor
+    survives in _STATE while the process runs and in `last_fired` on disk."""
+    secs = _parse_interval((r.get("trigger") or {}).get("value"))
+    if secs is None:
+        return False
+    rid = r.get("id")
+    state = _STATE.get(rid, r.get("last_fired"))
+    if state is None:
+        _STATE[rid] = now            # arm: no fire on the very first tick
+        r["last_fired"] = now        # …and persist the anchor (restart-safe)
+        with _LOCK:
+            _save()
+        return False
+    if now - float(state) >= secs:
+        _STATE[rid] = now
+        r["last_fired"] = now        # persisted by the caller's _save path
+        with _LOCK:
+            _save()
+        _LAST_FIRE[rid] = now
+        return True
+    return False
+
+
 _DUE = {"time": _due_time, "file": _due_file, "usb": lambda r: False,
-        "phrase": _due_phrase}
+        "phrase": _due_phrase, "interval": _due_interval}
+_DUE_ARGS = {"time", "interval"}     # these need (r, now[, today])
 
 
 def fire_phrase(text: str) -> list[str]:
@@ -403,7 +449,8 @@ def tick(now: float | None = None) -> list[str]:
         if fn is None:
             continue
         try:
-            if fn(r, now, today) if t == "time" else fn(r):
+            if fn(r, now, today) if t == "time" else (
+                    fn(r, now) if t == "interval" else fn(r)):
                 ok, out = _exec_rule(r, t)
                 if _RUNNER is not None:
                     _note_health(r, ok, out, now)
@@ -425,10 +472,10 @@ _KEYWORD_TOOL = {
     # unmapped patterns still get reported, just without copy-paste params)
     "weather": ("weather_report", {}),
     "mausam": ("weather_report", {}),
-    "battery": ("system_monitor", {}),
-    "cpu": ("system_monitor", {}),
-    "ram": ("system_monitor", {}),
-    "memory": ("system_monitor", {}),
+    "battery": ("scan", {"what": "system"}),
+    "cpu": ("scan", {"what": "system"}),
+    "ram": ("scan", {"what": "system"}),
+    "memory": ("scan", {"what": "system"}),
     "scan": ("scan", {}),
     "health": ("scan", {}),
 }
@@ -638,8 +685,9 @@ TOOL = {
         "properties": {
             "action": {"type": "STRING",
                        "description": "list | add | remove | tick | health | suggest"},
-            "trigger_type": {"type": "STRING", "description": "time | file | phrase"},
-            "value": {"type": "STRING",
+            "trigger_type": {"type": "STRING",
+                             "description": "time | interval | file | phrase | usb"},
+            "value": {"type": "STRING",  # time=HH:MM, interval=30m/2h/1d, phrase=keyword
                       "description": "HH:MM for time, keyword for phrase, appears/removed for file"},
             "path": {"type": "STRING", "description": "Folder/file path for file trigger"},
             "tool": {"type": "STRING", "description": "Tool to run when triggered"},

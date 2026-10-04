@@ -4024,3 +4024,99 @@ class TestRuleSuggest:
         assert self.rl._map_keyword_tool("weather today") == (
             "weather_report", {})
         assert self.rl._map_keyword_tool("zoo facts") == (None, None)
+
+
+class TestRuleInterval:
+    """Batch 5b — interval (every Nh/m) triggers + suggest tool-mapping fix."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, monkeypatch, tmp_path):
+        import actions.rules as rl
+        self.rl = rl
+        monkeypatch.setattr(rl, "_path", lambda: tmp_path / "rules.json")
+        rl._RULES.clear()
+        rl._STATE.clear()
+        rl._HEALTH.clear()
+        rl._LAST_FIRE.clear()
+        yield
+
+    def test_parse_interval(self):
+        p = self.rl._parse_interval
+        assert p("30m") == 1800
+        assert p("2h") == 7200
+        assert p("1d") == 86400
+        assert p("1w") == 604800
+        assert p("90") == 5400          # bare number = minutes
+        assert p("1.5h") == 5400
+        assert p("") is None and p(None) is None
+        assert p("0m") is None and p("abc") is None and p("soon") is None
+
+    def test_add_rejects_bad_interval(self):
+        out = self.rl.add_rule({"type": "interval", "value": "whenever"},
+                               "weather_report", {})
+        assert "like 30m" in out
+        assert self.rl.list_rules()  # no crash
+        import json
+        fp = self.rl._path()
+        assert not fp.exists() or json.loads(fp.read_text()) == []
+
+    def test_interval_fires_once_per_period(self):
+        rule = {"id": "r1", "trigger": {"type": "interval", "value": "2h"},
+                "tool": "weather_report", "args": {}, "enabled": True}
+        with self.rl._LOCK:
+            self.rl._RULES.append(rule)
+        assert self.rl._due_interval(rule, 1_000_000.0) is False   # arms
+        assert rule["last_fired"] == 1_000_000.0
+        assert self.rl._due_interval(rule, 1_000_000.0 + 7199) is False
+        assert self.rl._due_interval(rule, 1_000_000.0 + 7200) is True
+        assert rule["last_fired"] == 1_000_000.0 + 7200
+        # immediately after firing → not due again
+        assert self.rl._due_interval(rule, 1_000_000.0 + 7201) is False
+        # second period elapses → due again
+        assert self.rl._due_interval(rule, 1_000_000.0 + 14_400) is True
+
+    def test_interval_resumes_from_persisted_anchor(self):
+        rule = {"id": "r2", "trigger": {"type": "interval", "value": "30m"},
+                "tool": "weather_report", "args": {}, "enabled": True,
+                "last_fired": 1_000_000.0}       # loaded from disk
+        with self.rl._LOCK:
+            self.rl._RULES.append(rule)
+        assert self.rl._due_interval(rule, 1_000_000.0 + 1800) is True
+
+    def test_invalid_interval_never_fires(self):
+        rule = {"id": "r3", "trigger": {"type": "interval", "value": "??"},
+                "tool": "weather_report", "args": {}, "enabled": True}
+        with self.rl._LOCK:
+            self.rl._RULES.append(rule)
+        assert self.rl._due_interval(rule, 1_000_000.0) is False
+
+    def test_manage_rules_dispatch_adds_interval(self):
+        out = self.rl.manage_rules({"action": "add",
+                                    "trigger_type": "interval",
+                                    "value": "1h", "tool": "scan",
+                                    "tool_args": '{"what": "system"}'},
+                                   None, None)
+        assert "Rule added" in out and "interval" in out
+        assert "1h" in self.rl.list_rules()
+
+    def test_tick_passes_now_to_interval(self):
+        import json
+        rid = self.rl.add_rule({"type": "interval", "value": "1h"},
+                               "weather_report", {})
+        assert "Rule added" in rid
+        # no runner installed → _exec_rule returns empty; we only assert the
+        # due-path doesn't crash when tick() evaluates it with explicit now
+        self.rl.tick(now=1_000_000.0)     # arms
+        self.rl.tick(now=1_000_000.0 + 3600)   # would fire → runner path
+        data = json.loads(self.rl._path().read_text())
+        assert data[0]["trigger"]["type"] == "interval"
+        assert data[0]["last_fired"] == 1_000_000.0 + 3600
+
+    def test_suggest_keyword_maps_to_registered_tool(self):
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions"))
+        tool, args = self.rl._map_keyword_tool("battery level check")
+        assert (tool, args) == ("scan", {"what": "system"})
+        assert tool in reg.names()          # the 4d bug can't come back
+        tool2, _ = self.rl._map_keyword_tool("cpu temperature today")
+        assert tool2 in reg.names()
