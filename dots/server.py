@@ -11,7 +11,7 @@ dependency; tests mount the router on a bare FastAPI.
 from __future__ import annotations
 
 from fastapi import APIRouter, Body, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from . import brain, store
 
@@ -601,3 +601,25 @@ def api_call_background(cid: int, payload: dict = Body(...)) -> dict:
         raise HTTPException(404, str(e))
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
+
+
+@router.get("/api/computers/{cid}/image")
+def api_computer_image(cid: int, path: str = "") -> FileResponse:
+    """Screenshot/image INSIDE the computer's work dir — served for the
+    dashboard <img> tag (auth via header or ?token=, jailed path)."""
+    from . import computer
+    comp = computer.get(cid)
+    if comp is None:
+        raise HTTPException(404, f"no computer #{cid}")
+    work = computer.dirs(cid)[0]
+    try:
+        target = computer._jail(path, work)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not target.is_file():
+        raise HTTPException(404, f"no image {path!r}")
+    media = {"png": "image/png", "jpg": "image/jpeg",
+             "jpeg": "image/jpeg", "gif": "image/gif",
+             "webp": "image/webp"}.get(
+                 target.suffix.lower().lstrip("."), "application/octet-stream")
+    return FileResponse(str(target), media_type=media)

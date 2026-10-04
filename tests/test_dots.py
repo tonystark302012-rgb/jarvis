@@ -1498,8 +1498,13 @@ class TestScheduler:
         run = _wait_for(lambda: store.last_run(t["id"]), timeout=3)
         assert run["status"] == "timeout"
         assert "hard deadline" in run["output"]
-        # timeout still reschedules (only cancel stops the series)
-        fresh = store.get_task(t["id"])
+        # the run row is written BEFORE next_run_at advances (worker order) —
+        # poll for the reschedule instead of racing it
+        def _advanced():
+            f = store.get_task(t["id"])
+            return f if f and f["next_run_at"] > t["next_run_at"] else None
+        fresh = _wait_for(_advanced, timeout=3)
+        assert fresh is not None, "timeout run never rescheduled next_run_at"
         assert fresh["status"] == "active"
         assert fresh["next_run_at"] > t["next_run_at"]
         assert _wait_for(lambda: t["id"] not in scheduler._live, timeout=4)

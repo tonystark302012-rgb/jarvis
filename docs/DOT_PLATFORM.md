@@ -352,5 +352,20 @@ gates protect agent writes (T10).
   `captions-only` without phase-2 audio). Mute/minimize = UI-side (6f).
   Voice: `call_start|call_list|call_end|call_caption|call_transcript|
   call_background` on the `dots` action
-* **6f** dashboard UI (spaces tree, block editor + slash, approval
-  cards, computer panel, call UI)
+* **6f** ✅ full dashboard UI redesign (`dashboard/static/`): shared
+  design system `css/jarvis.css` (dark indigo tokens, rail nav, panes,
+  tree/blocks/slash/approval/call components) + shell `app.html`
+  (ported core intact: session redirect, AES-256-CBC, WS handlers,
+  `showTab`/`_renderSurface`/`_onContent`/`_onMotion`, upload XHR,
+  mic AudioWorklet → `/ws/phone-audio`, mirror + camera) with an
+  11-section rail; JS modules register via `window.JV` —
+  `workspaces.js` (spaces tree, page gallery, block editor with `/`
+  slash menu + source mode + debounced autosave, 409 conflict banner
+  that never overwrites, revisions restore, approval cards, per-page
+  Dot chat), `agents.js` (Dots CRUD + conversations/dot chat +
+  permission grants + owner memory), `computers.js` (jail-scoped file
+  browser with image preview/edit, argv-only shell, agentic browser
+  ops, perms toggles, audit trail), `calls.js` (live timer, speech →
+  captions → Dot reply, transcript download, background agent),
+  `agenda.js` (tasks pause/resume/cancel/retry + runs, skill mining →
+  publish/archive)

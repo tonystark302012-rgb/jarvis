@@ -689,7 +689,11 @@ class DashboardServer:
         app = FastAPI(docs_url=None, redoc_url=None)
 
         def _auth(req: Request) -> bool:
+            # Header first; ?token= fallback for <img>/<a download> —
+            # they cannot send custom headers (same rule /uploads uses).
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            if not tok:
+                tok = str(req.query_params.get("token") or "").strip()
             return bool(tok) and tok in self._tokens
 
         # serve CryptoJS from local cache, fallback to CDN redirect
@@ -1055,6 +1059,13 @@ class DashboardServer:
                 self._clients.discard(websocket)
 
         # ── Dots workspace (specialist agents, pages, approvals, memory)
+        # Redesigned UI assets: css/ + js/ (+ crypto.js falls through to
+        # the explicit route above, registered first). Registered before
+        # the dots router include so route order stays deterministic.
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)),
+                  name="static")
+
         # mounted on THIS app: one server, one login, one origin — the
         # routes ride the same bearer-token auth as the rest of the API.
         try:

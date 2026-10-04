@@ -21,6 +21,8 @@ config/whatsapp_web/
 # ── Personal data the assistant accumulates about you ─────────────────────────
 memory/long_term.json
 memory/*.db
+memory/*.db-shm
+memory/*.db-wal
 # meeting recordings + transcripts (WAV can be 100 MB/hour)
 meetings/*.wav
 meetings/*.txt
