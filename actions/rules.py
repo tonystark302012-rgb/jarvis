@@ -414,6 +414,163 @@ def tick(now: float | None = None) -> list[str]:
     return results
 
 
+# ── self-improvement: mine history + task runs → rule suggestions ───────────
+# NEVER installs anything — it prints exact `rules action=add` lines the
+# user (or the model, after asking) can copy. Thresholds are deliberately
+# conservative: 3+ occurrences across 3+ distinct days / a 1-hour cluster
+# of 3+ runs,7-day window for history, 14 days for task runs.
+
+_KEYWORD_TOOL = {
+    # token in the recurring question → tool + args (kept tiny + honest;
+    # unmapped patterns still get reported, just without copy-paste params)
+    "weather": ("weather_report", {}),
+    "mausam": ("weather_report", {}),
+    "battery": ("system_monitor", {}),
+    "cpu": ("system_monitor", {}),
+    "ram": ("system_monitor", {}),
+    "memory": ("system_monitor", {}),
+    "scan": ("scan", {}),
+    "health": ("scan", {}),
+}
+
+
+def _map_keyword_tool(key: str) -> tuple[str, dict] | tuple[None, None]:
+    tokens = set(key.split())
+    for kw, (tool, args) in _KEYWORD_TOOL.items():
+        if kw in tokens:
+            return tool, dict(args)
+    return None, None
+
+
+def _hhmm(hour_float: float) -> str:
+    hh = int(hour_float) % 24
+    mm = int(round((hour_float % 1) * 60))
+    if mm >= 60:
+        hh, mm = (hh + 1) % 24, 0
+    return f"{hh:02d}:{mm:02d}"
+
+
+def _existing_time_rule(tool: str, hhmm: str) -> bool:
+    """Skip suggesting something the user already has (within 20 min)."""
+    try:
+        _load()
+    except Exception:
+        return False
+    try:
+        a = int(hhmm[:2]) * 60 + int(hhmm[3:])
+    except (ValueError, IndexError):
+        return False
+    with _LOCK:
+        rules = list(_RULES)
+    for r in rules:
+        trig = r.get("trigger") or {}
+        if trig.get("type") != "time" or r.get("tool") != tool:
+            continue
+        v = str(trig.get("value") or "")
+        try:
+            b = int(v[:2]) * 60 + int(v[3:])
+        except (ValueError, IndexError):
+            continue
+        if abs(a - b) <= 20:
+            return True
+    return False
+
+
+def _suggest(now: float | None = None) -> str:
+    import re as _re
+    from datetime import datetime as _dt
+
+    now = time.time() if now is None else now
+    suggestions: list[str] = []
+
+    # ── Detector B: the same tool keeps appearing at the same hour ──
+    try:
+        from core import taskstore
+        runs = taskstore.list_runs(50)
+    except Exception:
+        runs = []
+    hits: dict[str, list[tuple[float, float, dict]]] = {}
+    for r in runs:
+        ts = float(r.get("created") or 0)
+        if ts <= 0 or now - ts > 14 * 86400:
+            continue
+        dt = _dt.fromtimestamp(ts)
+        hour = dt.hour + dt.minute / 60.0
+        seen: set[str] = set()
+        for step in (r.get("plan") or []):
+            tool = str(step.get("tool") or "")
+            if not tool or tool in seen or tool == "task_agent":
+                continue
+            seen.add(tool)
+            hits.setdefault(tool, []).append(
+                (hour, ts, dict(step.get("args") or {})))
+    for tool in sorted(hits):
+        items = sorted(hits[tool])
+        if len(items) < 3:
+            continue
+        best = None
+        for anchor, _, _ in items:
+            cluster = [x for x in items if abs(x[0] - anchor) <= 1.0]
+            if len(cluster) >= 3 and (best is None or len(cluster) > len(best)):
+                best = cluster
+        if not best:
+            continue
+        hhmm = _hhmm(sorted(h[0] for h in best)[len(best) // 2])
+        if _existing_time_rule(tool, hhmm):
+            continue
+        args = json.dumps(best[0][2], ensure_ascii=False)
+        suggestions.append(
+            f"• You kept using '{tool}' around {hhmm} "
+            f'({len(best)} runs in 14 days) →\n'
+            f'    rules action=add trigger_type=time value={hhmm} '
+            f'tool={tool} tool_args=\'{args}\'')
+
+    # ── Detector A: the same question asked across different days ──
+    try:
+        from actions import history_search as _hs
+        turns = _hs.recent_user_turns(now - 7 * 86400)
+    except Exception:
+        turns = []
+    groups: dict[str, list[tuple[float, int]]] = {}
+    for ts, text in turns:
+        norm = _re.sub(r"[^a-z0-9 ]", " ", (text or "").lower())
+        key = " ".join(norm.split()[:8])
+        if len(key) < 6:
+            continue
+        groups.setdefault(key, []).append((ts, int(ts // 86400)))
+    for key in sorted(groups, key=lambda k: -len({d for _, d in groups[k]}))[:5]:
+        entries = groups[key]
+        days = {d for _, d in entries}
+        if len(days) < 3:
+            continue
+        tool, targs = _map_keyword_tool(key)
+        hours = sorted(
+            _dt.fromtimestamp(ts).hour + _dt.fromtimestamp(ts).minute / 60.0
+            for ts, _ in entries)
+        hhmm = _hhmm(hours[len(hours) // 2])
+        if tool and not _existing_time_rule(tool, hhmm):
+            args = json.dumps(targs, ensure_ascii=False)
+            suggestions.append(
+                f'• You asked about "{key.strip()[:60]}" on {len(days)} '
+                f'different days (usually ~{hhmm}) →\n'
+                f'    rules action=add trigger_type=time value={hhmm} '
+                f'tool={tool} tool_args=\'{args}\'')
+        elif not tool:
+            suggestions.append(
+                f'• You asked "{key.strip()[:60]}" on {len(days)} days — '
+                f'I can\'t map that to a tool automatically. Pick one: '
+                f'rules action=add trigger_type=phrase value=<keyword> '
+                f'tool=<tool>')
+
+    if not suggestions:
+        return ("No recurring patterns yet — I look at the last 7 days of "
+                "conversation and 14 days of task runs, and need at least "
+                "3 repeats before suggesting anything.")
+    return (f"{len(suggestions)} automation suggestion(s) — NOTHING "
+            f"installed:\n" + "\n".join(suggestions) +
+            "\nCopy any line above (or say \'add suggestion 1\') to install.")
+
+
 # ── tool entry ───────────────────────────────────────────────────────────────
 
 def manage_rules(parameters: dict = None, player=None, session_memory=None) -> str:
@@ -449,6 +606,8 @@ def manage_rules(parameters: dict = None, player=None, session_memory=None) -> s
         result = "\n".join(fired) if fired else "No rules due."
     elif action == "health":
         result = health_report()
+    elif action == "suggest":
+        result = _suggest()
     else:
         result = list_rules()
 
@@ -478,7 +637,7 @@ TOOL = {
         "type": "OBJECT",
         "properties": {
             "action": {"type": "STRING",
-                       "description": "list | add | remove | tick | health"},
+                       "description": "list | add | remove | tick | health | suggest"},
             "trigger_type": {"type": "STRING", "description": "time | file | phrase"},
             "value": {"type": "STRING",
                       "description": "HH:MM for time, keyword for phrase, appears/removed for file"},

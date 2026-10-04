@@ -3897,3 +3897,130 @@ class TestGUIAgent:
         assert "gui_agent" in au.ENHANCE_TOOLS
         assert au.enhancing("gui_agent", {}, mode="auto")["confirm"] == "yes"
         assert au.enhancing("gui_agent", {}, mode="ask") == {}
+
+
+class TestRuleSuggest:
+    """Batch 4d — self-improvement: mine history + task runs → suggest."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, monkeypatch, tmp_path):
+        import actions.rules as rl
+        import actions.history_search as hs
+        from core import taskstore
+        self.rl, self.hs, self.ts = rl, hs, taskstore
+        global _t, _dtm
+        import time as _t
+        import datetime as _dtm
+        # history → temp db
+        monkeypatch.setattr(hs, "_db_path", lambda: tmp_path / "h.db")
+        monkeypatch.setattr(hs, "_CONN", None)
+        monkeypatch.setattr(hs, "DB_PATH", tmp_path / "h.db", raising=False)
+        # taskstore → temp db
+        monkeypatch.setattr(taskstore, "_db_path", lambda: tmp_path / "t.db")
+        taskstore._CONN = None
+        # rules → temp file
+        monkeypatch.setattr(rl, "_path", lambda: tmp_path / "rules.json")
+        rl._RULES.clear()
+        hs._conn()                # ensure schema exists in the tmp db
+        taskstore._conn()         # ditto
+        yield
+
+    def test_empty_sources(self):
+        assert "No recurring patterns yet" in self.rl._suggest()
+
+    def _seed_history(self, days_back, text, hour=9, minute=5):
+        import time as _t
+        import sqlite3
+        now = _t.time()
+        for d in days_back:
+            dt = _dtm.datetime.fromtimestamp(now - d * 86400)
+            when = dt.replace(hour=hour, minute=minute).timestamp()
+            with sqlite3.connect(self.hs._db_path()) as c:
+                c.execute("INSERT INTO turns (ts, speaker, text)"
+                          " VALUES (?, 'user', ?)", (when, text))
+                c.commit()
+        self.hs._CONN = None
+
+    def test_history_cluster_maps_to_tool(self):
+        self._seed_history([1, 2, 3], "what's the weather today?")
+        out = self.rl._suggest()
+        assert "different days" in out
+        assert ("rules action=add trigger_type=time value=" in out
+                and "tool=weather_report" in out)
+        assert "NOTHING installed" in out
+
+    def test_history_threshold_not_met(self):
+        self._seed_history([1, 2], "what's the weather today?")
+        assert "No recurring patterns yet" in self.rl._suggest()
+
+    def test_history_unmapped_is_honest(self):
+        self._seed_history([1, 2, 3], "review the quarterly roadmap plan")
+        out = self.rl._suggest()
+        assert "can't map that to a tool" in out
+        assert "trigger_type=time" not in out   # no fabricated params
+
+    def test_task_cluster_suggests_time_rule(self):
+        now = _t.time()
+        for i in range(3):
+            rid = self.ts.create(f"go {i}", plan=[{"tool": "weather_report",
+                                                   "args": {"mode": "daily"},
+                                                   "desc": ""}])
+            # backdate to the same clock hour, 3 different days
+            self.ts._CONN.execute(
+                "UPDATE runs SET created=? WHERE id=?",
+                (now - (i + 1) * 86400, rid))
+            self.ts._CONN.commit()
+        out = self.rl._suggest()
+        assert "weather_report" in out and "14 runs" not in out
+        assert "rules action=add trigger_type=time value=" in out
+
+    def test_task_hours_scattered_no_suggestion(self):
+        now = _t.time()
+        for delta_h, i in ((0, 0), (72, 1), (140, 2)):
+            rid = self.ts.create(f"go {i}", plan=[{"tool": "weather_report",
+                                                   "args": {}, "desc": ""}])
+            self.ts._CONN.execute(
+                "UPDATE runs SET created=? WHERE id=?",
+                (now - delta_h * 3600, rid))
+            self.ts._CONN.commit()
+        assert "No recurring patterns yet" in self.rl._suggest()
+
+    def test_existing_rule_suppressed(self):
+        now = _t.time()
+        # pin every backdated run to :00 so the cluster's median = HH:00
+        base = _dtm.datetime.fromtimestamp(now).replace(
+            minute=0, second=0, microsecond=0).timestamp()
+        hour = _dtm.datetime.fromtimestamp(base).strftime("%H:00")
+        self.rl.add_rule({"type": "time", "value": hour}, "weather_report",
+                         {})
+        for i in range(3):
+            rid = self.ts.create(f"go {i}", plan=[{"tool": "weather_report",
+                                                   "args": {}, "desc": ""}])
+            self.ts._CONN.execute(
+                "UPDATE runs SET created=? WHERE id=?",
+                (base - (i + 1) * 86400, rid))
+            self.ts._CONN.commit()
+        assert "No recurring patterns yet" in self.rl._suggest()
+
+    def test_suggest_never_mutates(self):
+        self._seed_history([1, 2, 3], "what's the weather today?")
+        before = len(self.rl.list_rules())
+        self.rl._suggest()
+        assert len(self.rl.list_rules()) == before
+
+    def test_dispatch_through_manage_rules(self):
+        out = self.rl.manage_rules({"action": "suggest"}, None, None)
+        assert "No recurring patterns yet" in out
+
+    def test_recent_user_turns_reader(self):
+        self._seed_history([1], "hello there")
+        rows = self.hs.recent_user_turns(_t.time() - 86400 * 2)
+        assert rows and rows[0][1] == "hello there"
+        assert self.hs.recent_user_turns(_t.time() + 999) == []
+
+    def test_hhmm_and_map_helpers(self):
+        assert self.rl._hhmm(9.5) == "09:30"
+        assert self.rl._hhmm(23.999) == "00:00"
+        assert self.rl._map_keyword_tool("weather today") == (
+            "weather_report", {})
+        assert self.rl._map_keyword_tool("zoo facts") == (None, None)

@@ -90,6 +90,20 @@ def record(speaker: str, text: str) -> None:
         print(f"[History] record failed: {e}")
 
 
+def recent_user_turns(since_ts: float, limit: int = 500) -> list:
+    """(ts, text) of user turns at/after since_ts, newest first.
+    For the rules suggest miner — local only, never raises."""
+    try:
+        with _LOCK:
+            rows = _conn().execute(
+                "SELECT ts, text FROM turns WHERE ts >= ? AND speaker ="
+                " 'user' ORDER BY ts DESC LIMIT ?",
+                (float(since_ts), max(1, min(2000, int(limit))))).fetchall()
+        return [(float(r[0]), str(r[1] or "")) for r in rows]
+    except Exception:
+        return []
+
+
 def _fmt_row(row) -> str:
     ts, speaker, text = row
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
