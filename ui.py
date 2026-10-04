@@ -4608,6 +4608,7 @@ class StudioPanel(QWidget):
                 bd = self.mw._rail_badges.get(surface)
                 if bd is not None and not self.mw._rail_btns[surface].isChecked():
                     bd.setText("\u25cf")
+                    self.mw._style_badge(bd, "dot")
                     bd.show()
             except Exception:                           # noqa: BLE001
                 pass
@@ -6056,18 +6057,25 @@ class MainWindow(QMainWindow):
         lay.addSpacing(4)
         lay.addWidget(self._ctrl_btn)
 
-        # Live state pill — icon + text, tinted per state.
-        self._state_icon = _icon_label("power", C.TEXT_DIM, 12)
+        # Live state pill — one container: icon + text, tinted per state.
         lay.addSpacing(10)
-        lay.addWidget(self._state_icon)
+        pill_wrap = QWidget()
+        pill_wrap.setObjectName("statePillWrap")
+        self._state_wrap = pill_wrap
+        pill_wrap.setStyleSheet(
+            f"background: {C.PANEL}; border: 1px solid {C.BORDER};"
+            f" border-radius: 11px;")
+        ph = QHBoxLayout(pill_wrap)
+        ph.setContentsMargins(9, 3, 12, 3)
+        ph.setSpacing(5)
+        self._state_icon = _icon_label("power", C.TEXT_DIM, 12)
+        ph.addWidget(self._state_icon)
         self._state_pill = QLabel("SLEEPING")
-        self._state_pill.setObjectName("statePill")
         self._state_pill.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self._state_pill.setStyleSheet(
-            f"color: {C.TEXT_DIM}; background: {C.PANEL};"
-            f" border: 1px solid {C.BORDER}; border-radius: 10px;"
-            f" padding: 4px 11px;")
-        lay.addWidget(self._state_pill)
+            f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        ph.addWidget(self._state_pill)
+        lay.addWidget(pill_wrap)
         lay.addStretch()
 
         # Centred brand — light wordmark, accent subtitle.
@@ -6279,9 +6287,31 @@ class MainWindow(QMainWindow):
         if badge is not None:
             if self._pending_n:
                 badge.setText(str(min(self._pending_n, 99)))
+                self._style_badge(badge, "count")
                 badge.show()
             else:
                 badge.hide()
+
+    def _style_badge(self, badge, mode: str) -> None:
+        """Badges have two shapes: a count pill (pending approvals) and a
+        compact has-new dot (studio surfaces) — restyle on every mode switch
+        so a dot never reads like a toggle."""
+        try:
+            if mode == "dot":
+                badge.setFixedWidth(18)
+                badge.setStyleSheet(
+                    f"color: {C.WHITE}; background: {C.PRI};"
+                    f" border-radius: 9px; padding: 0;"
+                    f" font-size: 9px;")
+            else:                                   # count pill
+                badge.setMinimumWidth(14)
+                badge.setMaximumWidth(200)
+                badge.setStyleSheet(
+                    f"color: {C.WHITE}; background: {C.PRI};"
+                    f" border-radius: 9px; padding: 0 6px;"
+                    f" font-size: 10px;")
+        except Exception:                               # noqa: BLE001
+            pass
 
     def toast(self, msg: str, kind: str = "info", ms: int = 3200) -> None:
         """Floating status chip, top-right — action results land here so the
@@ -7867,9 +7897,13 @@ class MainWindow(QMainWindow):
                    "ERROR": "alert"}.get(state, "activity")
             pill.setText(f"  {state}")
             pill.setStyleSheet(
-                f"color: {col}; background: {C.PANEL};"
-                f" border: 1px solid {C.BORDER}; border-radius: 10px;"
-                f" padding: 4px 11px; font-weight: bold;")
+                f"color: {col}; background: transparent;"
+                f" border: none; font-weight: bold;")
+            wrap = getattr(self, "_state_wrap", None)
+            if wrap is not None:
+                wrap.setStyleSheet(
+                    f"background: {C.PANEL};"
+                    f" border: 1px solid {col}; border-radius: 11px;")
             ip = getattr(self, "_state_icon", None)
             if ip is not None:
                 ip.setPixmap(icon_pm(ico, col, 12))
