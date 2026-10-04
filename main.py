@@ -2718,6 +2718,15 @@ def main():
 
     def runner():
         ui.wait_for_api_key()
+        # boot recovery: runs interrupted by a crash/kill become resumable
+        try:
+            from core import taskstore as _ts
+            swept = _ts.sweep_stale()
+            if swept:
+                print(f"[Taskstore] {len(swept)} interrupted run(s) "
+                      f"marked resumable — say 'resume'.")
+        except Exception as _e:
+            print(f"[Taskstore] sweep skipped: {_e}")
         jarvis = JarvisLive(ui)
         try:
             asyncio.run(jarvis.run())

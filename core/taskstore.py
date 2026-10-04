@@ -161,5 +161,31 @@ def mark_running(run_id: int) -> None:
         c.commit()
 
 
+def sweep_stale(max_age_hours: float = 24.0,
+                now: float | None = None) -> list[dict]:
+    """Boot recovery: a run still marked `running` whose last touch is
+    older than `max_age_hours` cannot actually be running — the process
+    died mid-goal. Flip those to `cancelled` (resumable by design) and
+    return them so the caller can tell the user. Live runs are safe:
+    every executed step refreshes `updated`."""
+    now = time.time() if now is None else float(now)
+    cutoff = now - max(60.0, float(max_age_hours) * 3600.0)
+    with _LOCK:
+        c = _conn()
+        rows = c.execute(
+            "SELECT id, goal, status, plan_json, results_json,"
+            " created, updated FROM runs"
+            " WHERE status = 'running' AND updated < ?",
+            (cutoff,)).fetchall()
+        out = [_row_to_run(r) for r in rows]
+        if out:
+            c.execute(
+                "UPDATE runs SET status = 'cancelled', updated = ?"
+                " WHERE status = 'running' AND updated < ?",
+                (now, cutoff))
+            c.commit()
+    return out
+
+
 __all__ = ["create", "update", "get", "list_runs", "resumable",
-           "mark_running", "replace_plan", "MAX_RETAINED"]
+           "mark_running", "replace_plan", "sweep_stale", "MAX_RETAINED"]

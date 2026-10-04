@@ -4120,3 +4120,79 @@ class TestRuleInterval:
         assert tool in reg.names()          # the 4d bug can't come back
         tool2, _ = self.rl._map_keyword_tool("cpu temperature today")
         assert tool2 in reg.names()
+
+
+class TestStaleSweep:
+    """Batch 5c — boot recovery for runs interrupted by a crash."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, monkeypatch, tmp_path):
+        from core import taskstore
+        self.ts = taskstore
+        monkeypatch.setattr(taskstore, "_db_path", lambda: tmp_path / "t.db")
+        taskstore._CONN = None
+        taskstore._conn()
+        yield
+
+    def _mk(self, created, updated, status="running", plan=None):
+        rid = self.ts.create("goal", plan or [{"tool": "scan", "args": {},
+                                               "why": ""}])
+        with self.ts._LOCK:
+            self.ts._conn().execute(
+                "UPDATE runs SET status=?, created=?, updated=? WHERE id=?",
+                (status, created, updated, rid))
+            self.ts._conn().commit()
+        return rid
+
+    def test_old_running_swept_to_cancelled_resumable(self):
+        now = 1_000_000.0
+        rid = self._mk(now - 3 * 86400, now - 2 * 86400)
+        swept = self.ts.sweep_stale(now=now)
+        assert [r["id"] for r in swept] == [rid]
+        run = self.ts.get(rid)
+        assert run["status"] == "cancelled"
+        assert any(r["id"] == rid for r in self.ts.resumable())
+        assert run["plan"]                      # plan preserved for resume
+
+    def test_fresh_running_untouched(self):
+        now = 1_000_000.0
+        rid = self._mk(now - 600, now - 30)
+        assert self.ts.sweep_stale(now=now) == []
+        assert self.ts.get(rid)["status"] == "running"
+
+    def test_old_finished_untouched(self):
+        now = 1_000_000.0
+        rid = self._mk(now - 3 * 86400, now - 3 * 86400, status="done")
+        assert self.ts.sweep_stale(now=now) == []
+        assert self.ts.get(rid)["status"] == "done"
+
+    def test_results_preserved_for_resume_indexing(self):
+        now = 1_000_000.0
+        rid = self._mk(now - 86400 * 2, now - 86400 * 2,
+                       plan=[{"tool": "scan", "args": {}, "why": ""},
+                             {"tool": "weather_report", "args": {}, "why": ""}])
+        self.ts.update(rid, "running", [{"index": 0, "ok": True,
+                                         "output": "fine"}])
+        with self.ts._LOCK:
+            self.ts._conn().execute(
+                "UPDATE runs SET created=?, updated=? WHERE id=?",
+                (now - 86400 * 2, now - 86400 * 2, rid))
+            self.ts._conn().commit()
+        swept = self.ts.sweep_stale(now=now)
+        assert len(swept) == 1
+        run = self.ts.get(rid)
+        assert run["results"][0]["ok"] is True
+        pending = self.ts._pending_indices(run)
+        assert pending == [1]                   # only unfinished step pending
+
+    def test_boundary_exactly_cutoff_not_swept(self):
+        now = 1_000_000.0
+        cutoff = now - 24 * 3600
+        rid = self._mk(cutoff, cutoff)          # updated == cutoff
+        assert self.ts.sweep_stale(now=now) == []
+        assert self.ts.get(rid)["status"] == "running"
+
+    def test_main_wires_boot_sweep(self):
+        src = Path("main.py").read_text(encoding="utf-8")
+        assert "sweep_stale()" in src
+        assert src.index("sweep_stale()") < src.index("JarvisLive(ui)")
