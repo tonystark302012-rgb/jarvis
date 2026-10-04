@@ -68,6 +68,7 @@ _POWER_ACTIONS = frozenset({
 
 MUTATING_ARGS: dict[str, set[str]] = {
     "desktop_control": {"clean"},
+    "mcp": {"call", "add", "remove"},     # external side effects / config
     "smart_home": {"pub", "publish", "send"},
     "vault": {"set", "del", "delete"},
     "rules": {"add", "remove"},
@@ -174,6 +175,9 @@ def mutating(tool: str, args: dict | None = None) -> bool:
     args = args or {}
     if tool in SELF_GATING:
         return False
+    # native MCP tools act on EXTERNAL systems — always mutating
+    if tool.startswith("mcp__"):
+        return True
     # whole-tool mutating
     if tool in MUTATING_TOOLS:
         return True

@@ -1165,9 +1165,19 @@ class JarvisLive:
         # the host, the capability list from the registries that were just
         # discovered. Rename the assistant, add a plugin or move to another OS
         # and this follows without anyone editing a prompt.
+        # MCP tools are flattened into first-class session tools
+        # (mcp__srv__tool) — one hop for the model instead of the two-hop
+        # `mcp action=call` dance. Down servers are skipped, never fatal.
+        try:
+            from actions import mcp as _mcp_mod
+            _mcp_decls = _mcp_mod.native_declarations()
+        except Exception as _e:
+            print(f"[MCP] native declarations unavailable: {_e}")
+            _mcp_decls = []
         _all_decls = (TOOL_DECLARATIONS
                       + self._action_registry.get_tool_declarations()
-                      + self._plugin_registry.get_tool_declarations())
+                      + self._plugin_registry.get_tool_declarations()
+                      + _mcp_decls)
         _names = {(d.get("name") if isinstance(d, dict) else getattr(d, "name", ""))
                   for d in _all_decls}
         sys_prompt = _render_prompt(sys_prompt, {
@@ -1510,6 +1520,12 @@ class JarvisLive:
                     import os as _os
                     _os._exit(0)
                 asyncio.create_task(_do_shutdown())
+
+            elif name.startswith("mcp__"):
+                # native MCP tool — dispatch straight to the server
+                from actions import mcp as _mcp_mod
+                result = await loop.run_in_executor(
+                    None, lambda: _mcp_mod.call_native(name, args))
 
             elif self._action_registry.has(name):
                 # file_processor: fall back to the currently-uploaded file when none is given

@@ -290,16 +290,7 @@ def mcp(parameters: dict = None, player=None, session_memory=None) -> str:
                                        params.get("timeout") or _DEFAULT_TIMEOUT))
         except Exception as e:
             return f"MCP '{name}.{tool}' failed: {e}"
-        # result.content = [{type: text|image|…, text: …}]; keep it speakable
-        content = result.get("content") or []
-        texts = [b.get("text", "") for b in content
-                 if isinstance(b, dict) and b.get("type") == "text"]
-        body = "\n".join(t for t in texts if t).strip()
-        if result.get("isError"):
-            return f"MCP '{name}.{tool}' returned an error: {body or 'no detail'}"
-        if not body:
-            return f"MCP '{name}.{tool}' ok (no text content)."
-        return body if len(body) <= 4000 else body[:4000] + "\n…(truncated)"
+        return _format_call_result(result, f"{name}.{tool}")
 
     return f"Unknown mcp action {action!r} — use list|call|add|remove."
 
@@ -331,6 +322,109 @@ TOOL = {
     },
     "handler": mcp,
 }
+
+
+# ── shared result formatting ─────────────────────────────────────────────
+
+def _format_call_result(result: dict, label: str) -> str:
+    """result.content = [{type: text|image|…, text: …}] → speakable text."""
+    content = (result or {}).get("content") or []
+    texts = [b.get("text", "") for b in content
+             if isinstance(b, dict) and b.get("type") == "text"]
+    body = "\n".join(t for t in texts if t).strip()
+    if (result or {}).get("isError"):
+        return f"MCP '{label}' returned an error: {body or 'no detail'}"
+    if not body:
+        return f"MCP '{label}' ok (no text content)."
+    return body if len(body) <= 4000 else body[:4000] + "\n…(truncated)"
+
+
+# ── NATIVE flatten: every MCP tool as a first-class session tool ─────────
+# The model calls mcp__<server>__<tool> directly (one hop instead of the
+# two-hop `mcp action=call` JSON dance). Declarations are built at session
+# config time (main._build_config) and refreshed on a TTL; dispatch happens
+# in main._execute_tool's `mcp__` branch. Servers that are down are simply
+# absent from the tool list — `mcp list` still shows them as unreachable.
+
+_NATIVE_TTL = 300.0
+_NATIVE_INDEX: dict[str, tuple[str, str]] = {}   # full name → (server, tool)
+_NATIVE_DECLS: list[dict] = []
+_NATIVE_BUILT_AT = 0.0
+
+
+def _sanitize(name: str) -> str:
+    import re
+    s = re.sub(r"[^A-Za-z0-9_]", "_", str(name))[:48]
+    if not s:
+        s = "tool"
+    if s[0].isdigit():
+        s = "t_" + s
+    return s
+
+
+def native_declarations(force: bool = False) -> list[dict]:
+    """Flatten configured servers' tools into function declarations.
+    Unreachable servers are skipped (never break session start)."""
+    global _NATIVE_INDEX, _NATIVE_DECLS, _NATIVE_BUILT_AT
+    now = time.monotonic()
+    if (not force and _NATIVE_DECLS and
+            now - _NATIVE_BUILT_AT < _NATIVE_TTL):
+        return list(_NATIVE_DECLS)
+    decls: list[dict] = []
+    index: dict[str, tuple[str, str]] = {}
+    cfg = _load_cfg()
+    for server in sorted(cfg.get("servers", {})):
+        try:
+            tools = _list_tools(server, force=force)
+        except Exception:
+            continue                              # down → absent, honestly
+        for t in tools if isinstance(tools, list) else []:
+            if not isinstance(t, dict) or not t.get("name"):
+                continue
+            base = f"mcp__{_sanitize(server)}__{_sanitize(t['name'])}"
+            name, n = base, 2
+            while name in index:
+                name, n = f"{base}_{n}", n + 1
+            index[name] = (server, str(t["name"]))
+            params = t.get("inputSchema") or {
+                "type": "object", "properties": {}}
+            desc = str(t.get("description") or
+                       f"MCP tool '{t['name']}' on server '{server}'")
+            decls.append({"name": name, "description": desc[:1024],
+                          "parameters": params})
+    _NATIVE_INDEX, _NATIVE_DECLS = index, decls
+    _NATIVE_BUILT_AT = now
+    return list(decls)
+
+
+def call_native(full_name: str, args: dict | None = None,
+                timeout: float | None = None) -> str:
+    """Dispatch mcp__srv__tool → tools/call. Re-spawns the server per call
+    (sessions are short-lived by design), so a crash since declaration time
+    self-heals on the next call."""
+    args = dict(args or {})
+    pair = _NATIVE_INDEX.get(full_name)
+    if pair is None:
+        native_declarations(force=True)           # stale index → rebuild once
+        pair = _NATIVE_INDEX.get(full_name)
+    if pair is None:
+        return (f"Unknown MCP tool '{full_name}'. Say 'mcp list' to see "
+                f"configured servers and their tools.")
+    server, tool = pair
+    try:
+        argv = _server_argv(server)
+    except KeyError:
+        return f"MCP server '{server}' was removed from config."
+    except ValueError as e:
+        return str(e)
+    try:
+        with _session(argv) as c:
+            result = c.request(
+                "tools/call", {"name": tool, "arguments": args},
+                timeout=float(timeout or _DEFAULT_TIMEOUT))
+    except Exception as e:
+        return f"MCP '{server}.{tool}' failed: {e}"
+    return _format_call_result(result, f"{server}.{tool}")
 
 
 def run(params: dict, ctx: dict | None = None) -> str:

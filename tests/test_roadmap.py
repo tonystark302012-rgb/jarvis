@@ -3584,3 +3584,136 @@ class TestAgentWiring:
         assert "_autonomy.gate(tool, tool_args)" in seg
         assert seg.index("_autonomy.gate") < seg.index(
             "self._action_registry.run")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 4b — MCP native flatten (real subprocess stdio server)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMCPNative:
+    """mcp__srv__tool declarations + dispatch through the REAL MCP wire
+    (initialize → tools/list → tools/call) against tests/fake_mcp_server.py."""
+
+    @pytest.fixture(autouse=True)
+    def _cfg(self, tmp_path, monkeypatch):
+        import sys as _sys
+        import actions.mcp as m
+        self.m = m
+        fake = Path(__file__).parent / "fake_mcp_server.py"
+        self.cfg = {"servers": {"fake srv": {        # space → sanitised
+            "command": [_sys.executable, str(fake)]}}}
+        monkeypatch.setattr(m, "_load_cfg", lambda: self.cfg)
+        monkeypatch.setattr(m, "_server_argv",
+                            lambda name: self.cfg["servers"][name]["command"])
+        # cold cache every test
+        monkeypatch.setattr(m, "_NATIVE_INDEX", {})
+        monkeypatch.setattr(m, "_NATIVE_DECLS", [])
+        monkeypatch.setattr(m, "_NATIVE_BUILT_AT", 0.0)
+        yield
+
+    def test_declarations_over_real_wire(self):
+        decls = self.m.native_declarations(force=True)
+        names = [d["name"] for d in decls]
+        assert "mcp__fake_srv__echo_tool" in names
+        assert "mcp__fake_srv__add" in names
+        echo = next(d for d in decls
+                    if d["name"] == "mcp__fake_srv__echo_tool")
+        # inputSchema passes through unchanged (JSON schema, not OBJECT)
+        assert echo["parameters"]["type"] == "object"
+        assert "text" in echo["parameters"]["properties"]
+        assert echo["description"] == "Echo the text back"
+
+    def test_sanitisation_collision_gets_suffix(self):
+        decls = self.m.native_declarations(force=True)
+        names = [d["name"] for d in decls]
+        # echo-tool and echo.tool both sanitise to echo_tool
+        assert "mcp__fake_srv__echo_tool" in names
+        assert "mcp__fake_srv__echo_tool_2" in names
+
+    def test_call_native_round_trip(self):
+        self.m.native_declarations(force=True)
+        out = self.m.call_native("mcp__fake_srv__echo_tool",
+                                 {"text": "hello"})
+        assert out == "ECHO:hello"
+        out = self.m.call_native("mcp__fake_srv__add", {"a": 2, "b": 40})
+        assert out == "SUM:42"
+
+    def test_collision_both_dispatch_correctly(self):
+        self.m.native_declarations(force=True)
+        assert self.m.call_native("mcp__fake_srv__echo_tool",
+                                  {"text": "x"}) == "ECHO:x"
+        assert self.m.call_native("mcp__fake_srv__echo_tool_2",
+                                  {"text": "x"}) == "DOT:x"
+
+    def test_unknown_native_tool_honest(self):
+        self.m.native_declarations(force=True)
+        out = self.m.call_native("mcp__nope__gone", {})
+        assert "Unknown MCP tool" in out and "mcp list" in out
+
+    def test_down_server_skipped_not_fatal(self, monkeypatch):
+        import sys as _sys
+        self.cfg["servers"]["dead"] = {
+            "command": [_sys.executable, "-c", "raise SystemExit(1)"]}
+        self.m._TOOLS.clear()
+        decls = self.m.native_declarations(force=True)   # must not raise
+        assert any(d["name"].startswith("mcp__fake_srv__") for d in decls)
+        assert not any(d["name"].startswith("mcp__dead__") for d in decls)
+
+    def test_cache_ttl_avoids_respawn(self):
+        import actions.mcp as m
+        self.m.native_declarations(force=True)
+        built = m._NATIVE_BUILT_AT
+        orig = m._list_tools
+        monkey_called = []
+
+        def counting(name, force=False):
+            monkey_called.append(name)
+            return orig(name, force=False)
+
+        m._list_tools = counting
+        try:
+            m.native_declarations()          # warm — TTL hit, no respawn
+            assert monkey_called == []
+        finally:
+            m._list_tools = orig
+        assert m._NATIVE_BUILT_AT == built
+
+    def test_format_call_result_paths(self):
+        f = self.m._format_call_result
+        assert f({"content": [{"type": "text", "text": "a"},
+                              {"type": "text", "text": "b"}]},
+                 "s.t") == "a\nb"
+        assert "returned an error" in f({"content": [
+            {"type": "text", "text": "bad"}], "isError": True}, "s.t")
+        assert "no text content" in f({}, "s.t")
+        long = "x" * 5000
+        assert len(f({"content": [{"type": "text", "text": long}]},
+                     "s.t")) < 4100
+        assert "truncated" in f({"content": [{"type": "text",
+                                              "text": long}]}, "s.t")
+
+    def test_sanitize(self):
+        s = self.m._sanitize
+        assert s("echo-tool") == "echo_tool"
+        assert s("9lives") == "t_9lives"
+        assert s("") == "tool"
+        assert len(s("x" * 90)) == 48
+
+    def test_wiring_main_source_index(self):
+        src = Path("main.py").read_text(encoding="utf-8")
+        seg = src.split("def _build_config", 1)[1][:4000]
+        assert "native_declarations()" in seg
+        assert "+ _mcp_decls" in seg
+        dseg = src.split("async def _execute_tool", 1)[1]
+        assert 'elif name.startswith("mcp__"):' in dseg
+        assert "call_native(name, args)" in dseg
+        # dispatch branch must come BEFORE the registry check
+        assert dseg.index('name.startswith("mcp__")') < dseg.index(
+            "self._action_registry.has(name)")
+
+    def test_mcp_native_is_mutating_for_observe(self):
+        import core.autonomy as au
+        assert au.mutating("mcp__srv__create_issue", {}) is True
+        assert au.gate("mcp__srv__create_issue", {}, mode="observe")
+        assert au.mutating("mcp", {"action": "list"}) is False
+        assert au.mutating("mcp", {"action": "call"}) is True
