@@ -47,11 +47,33 @@ def _capture() -> tuple[bytes, str]:
     return _capture_screen()
 
 
-def _decide(goal: str, image: bytes, history: list[dict],
-            plan_only: bool = False) -> dict | None:
-    """Provider seam: Gemini SMART + image → parsed decision dict or None.
-    A local VLM (Ollama vision model) can replace this whole function."""
-    from core import gemini
+_LAST_DECIDE_ERR = ""      # honest failure reason from the last _decide
+
+
+def _provider() -> str:
+    """'gemini' (default) or 'ollama' — config key `gui_provider`.
+    Ollama runs fully local (free, no key, nothing leaves the machine)."""
+    try:
+        from config import get_config
+        p = str(get_config().get("gui_provider") or "gemini").lower().strip()
+        return "ollama" if p in ("ollama", "local") else "gemini"
+    except Exception:
+        return "gemini"
+
+
+def _ollama_cfg() -> tuple[str, str]:
+    try:
+        from config import get_config
+        cfg = get_config()
+    except Exception:
+        cfg = {}
+    url = str(cfg.get("ollama_url") or "http://127.0.0.1:11434").strip()
+    model = str(cfg.get("gui_vlm_model") or "qwen2.5vl").strip()
+    return url, model
+
+
+def _prompt_text(goal: str, history: list[dict], plan_only: bool) -> str:
+    """The decision protocol — shared by every provider verbatim."""
     hist_txt = "\n".join(
         f"- {h.get('say', '')} → {json.dumps(h.get('act') or {})}"
         for h in history[-5:]) or "- (first step)"
@@ -59,7 +81,7 @@ def _decide(goal: str, image: bytes, history: list[dict],
                  "under key 'plan' (array), do NOT act."
                  if plan_only else
                  "Choose the NEXT single action.")
-    prompt = (
+    return (
         "You are a desktop GUI agent controlling this computer. The attached "
         "image is the CURRENT full screen (screenshot).\n\n"
         f"GOAL: {goal}\n\n"
@@ -80,6 +102,55 @@ def _decide(goal: str, image: bytes, history: list[dict],
         "If the goal is already achieved, reply done with visible proof. "
         "Never invent pixels that are not in the image."
     )
+
+
+def _decide_ollama(prompt: str, image: bytes, plan_only: bool = False
+                   ) -> dict | None:
+    """Local vision model via Ollama's HTTP API (stdlib urllib — no new
+    deps, nothing leaves the machine). Returns parsed decision or None;
+    _LAST_DECIDE_ERR carries the honest reason."""
+    global _LAST_DECIDE_ERR
+    import urllib.error
+    import urllib.request
+    url, model = _ollama_cfg()
+    endpoint = url.rstrip("/") + "/api/generate"
+    body = json.dumps({
+        "model": model,
+        "prompt": prompt,
+        "images": [base64.b64encode(image).decode("ascii")],
+        "stream": False,
+        "options": {"temperature": 0},
+    }).encode("utf-8")
+    req = urllib.request.Request(endpoint, data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        _LAST_DECIDE_ERR = (
+            f"ollama not reachable at {endpoint} ({e}) — install from "
+            f"ollama.com, then: ollama serve && ollama pull {model}")
+        return None
+    text = str(data.get("response") or "")
+    decision = _parse_decision(text, plan_only=plan_only)
+    if decision is None:
+        _LAST_DECIDE_ERR = (f"ollama ({model}) replied but not with usable "
+                            f"JSON: {text[:160]!r}")
+        return None
+    _LAST_DECIDE_ERR = ""
+    return decision
+
+
+def _decide(goal: str, image: bytes, history: list[dict],
+            plan_only: bool = False) -> dict | None:
+    """Provider seam: routes by config `gui_provider` —
+    gemini (SMART, cloud) or ollama (local VLM, free/offline).
+    Never raises; _LAST_DECIDE_ERR explains any failure."""
+    global _LAST_DECIDE_ERR
+    prompt = _prompt_text(goal, history, plan_only)
+    if _provider() == "ollama":
+        return _decide_ollama(prompt, image, plan_only)
+    from core import gemini
     contents = [
         prompt,
         {"inline_data": {"mime_type": "image/jpeg",
@@ -87,11 +158,19 @@ def _decide(goal: str, image: bytes, history: list[dict],
     ]
     try:
         reply = gemini.call(contents, tier=gemini.SMART, timeout_ms=30_000)
-    except Exception:
+    except Exception as e:
+        _LAST_DECIDE_ERR = f"gemini: {e}"
         return None
     if reply is None or not getattr(reply, "text", None):
+        _LAST_DECIDE_ERR = "gemini: empty reply"
         return None
-    return _parse_decision(reply.text, plan_only=plan_only)
+    decision = _parse_decision(reply.text, plan_only=plan_only)
+    if decision is None:
+        _LAST_DECIDE_ERR = (f"gemini replied but not with usable JSON: "
+                            f"{reply.text[:160]!r}")
+        return None
+    _LAST_DECIDE_ERR = ""
+    return decision
 
 
 def _parse_decision(text: str, plan_only: bool = False) -> dict | None:
@@ -168,6 +247,8 @@ def _run(goal: str, max_steps: int, player) -> str:
                 _decide(goal, image, history)
             if not isinstance(decision, dict):
                 outcome = "decision unavailable (model returned no usable JSON)"
+                if _LAST_DECIDE_ERR:
+                    outcome += f" — {_LAST_DECIDE_ERR}"
                 break
             act = decision.get("act") or {}
             kind = str(act.get("type") or "").lower()
@@ -275,7 +356,9 @@ def gui_agent(parameters: dict, player=None) -> str:
         decision = _decide(goal, image, [], plan_only=True) or \
             _decide(goal, image, [], plan_only=False)
         if not isinstance(decision, dict):
-            return "Preview unavailable: the decision model returned no usable JSON."
+            note = f" — {_LAST_DECIDE_ERR}" if _LAST_DECIDE_ERR else ""
+            return ("Preview unavailable: the decision model returned "
+                    f"no usable JSON.{note}")
         plan = decision.get("plan")
         if isinstance(plan, list) and plan:
             steps_txt = "\n".join(f"  {i + 1}. {json.dumps(s)[:140]}"

@@ -3732,6 +3732,7 @@ class TestGUIAgent:
         self.ga, self.rt = ga, rt
         rt.reset_for_tests()
         ga._LAST_STATUS.clear()          # module-level: isolate across tests
+        ga._LAST_DECIDE_ERR = ""
         self.captures = []
         self.acts = []
         monkeypatch.setattr(ga, "_capture",
@@ -4356,3 +4357,166 @@ class TestBrowserRuntime:
         assert '_rt.begin("browser")' in src
         assert '_rt.finish("browser")' in src
         assert '_rt.is_cancelled("browser")' in src
+
+
+class TestGUIProvider:
+    """Batch 5f — gui_agent provider routing: gemini (default) | ollama local."""
+
+    @pytest.fixture(autouse=True)
+    def _f(self, monkeypatch):
+        import actions.gui_agent as ga
+        from core import agent_runtime as rt
+        self.ga = ga
+        rt.reset_for_tests()
+        ga._LAST_DECIDE_ERR = ""
+        monkeypatch.setattr(ga, "_capture",
+                            lambda: (b"IMG", "image/jpeg"))
+        yield
+        ga._LAST_DECIDE_ERR = ""
+        rt.reset_for_tests()
+
+    @staticmethod
+    def _cfg(values, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "get_config", lambda: dict(values))
+
+    def test_default_provider_is_gemini(self, monkeypatch):
+        self._cfg({}, monkeypatch)
+        assert self.ga._provider() == "gemini"
+
+    def test_provider_from_config(self, monkeypatch):
+        self._cfg({"gui_provider": "ollama"}, monkeypatch)
+        assert self.ga._provider() == "ollama"
+        self._cfg({"gui_provider": "local"}, monkeypatch)
+        assert self.ga._provider() == "ollama"
+        self._cfg({"gui_provider": "gpt"}, monkeypatch)   # unknown → safe
+        assert self.ga._provider() == "gemini"
+
+    def test_ollama_cfg_defaults_and_override(self, monkeypatch):
+        self._cfg({}, monkeypatch)
+        url, model = self.ga._ollama_cfg()
+        assert url == "http://127.0.0.1:11434" and model == "qwen2.5vl"
+        self._cfg({"ollama_url": "http://gpubox:11434",
+                   "gui_vlm_model": "llava"}, monkeypatch)
+        assert self.ga._ollama_cfg() == ("http://gpubox:11434", "llava")
+
+    def test_decide_routes_to_ollama(self, monkeypatch):
+        self._cfg({"gui_provider": "ollama"}, monkeypatch)
+        seen = {}
+
+        def fake_ollama(prompt, image, plan_only=False):
+            seen["prompt"] = prompt
+            seen["img"] = image
+            return {"say": "hi", "act": {"type": "click", "x": 1, "y": 2}}
+
+        monkeypatch.setattr(self.ga, "_decide_ollama", fake_ollama)
+        out = self.ga._decide("goal", b"IMG", [], plan_only=True)
+        assert out["act"]["type"] == "click"
+        assert seen["img"] == b"IMG" and "GOAL: goal" in seen["prompt"]
+        assert "PLAN ONLY" in seen["prompt"]
+
+    def test_decide_routes_to_gemini_when_default(self, monkeypatch):
+        seen = {}
+
+        class FakeReply:
+            text = '{"say":"x","act":{"type":"key","key":"enter"}}'
+
+        import core.gemini as g
+
+        def fake_call(contents, tier=None, timeout_ms=None):
+            seen["n"] = len(contents)
+            return FakeReply()
+
+        monkeypatch.setattr(g, "call", fake_call)
+        self._cfg({}, monkeypatch)
+        out = self.ga._decide("g", b"IMG", [])
+        assert out["act"]["key"] == "enter"
+        assert seen["n"] == 2                      # prompt + image part
+
+    def test_gemini_failure_recorded_honest(self, monkeypatch):
+        import core.gemini as g
+
+        def boom(*a, **k):
+            raise RuntimeError("quota exceeded")
+
+        monkeypatch.setattr(g, "call", boom)
+        self._cfg({}, monkeypatch)
+        assert self.ga._decide("g", b"IMG", []) is None
+        assert "gemini: quota exceeded" in self.ga._LAST_DECIDE_ERR
+
+    def test_ollama_down_honest_with_fix_hint(self, monkeypatch):
+        import urllib.error
+        self._cfg({"gui_provider": "ollama"}, monkeypatch)
+
+        def boom(req, timeout=0):
+            raise urllib.error.URLError("connection refused")
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        assert self.ga._decide_ollama("p", b"IMG") is None
+        err = self.ga._LAST_DECIDE_ERR
+        assert "ollama not reachable" in err
+        assert "ollama pull qwen2.5vl" in err      # free local fix
+
+    def test_ollama_success_parses_decision(self, monkeypatch):
+        self._cfg({"gui_provider": "ollama"}, monkeypatch)
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "response": '{"say":"ok","act":{"type":"scroll",'
+                                '"direction":"down","amount":3}}'}).encode()
+
+        monkeypatch.setattr("urllib.request.urlopen",
+                            lambda req, timeout=0: FakeResp())
+        out = self.ga._decide_ollama("p", b"IMG")
+        assert out["act"]["type"] == "scroll"
+        assert self.ga._LAST_DECIDE_ERR == ""
+
+    def test_ollama_garbage_json_recorded(self, monkeypatch):
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"response": "sure, click somewhere"}).encode()
+
+        monkeypatch.setattr("urllib.request.urlopen",
+                            lambda req, timeout=0: FakeResp())
+        assert self.ga._decide_ollama("p", b"IMG") is None
+        assert "not with usable JSON" in self.ga._LAST_DECIDE_ERR
+
+    def test_provider_error_surfaces_in_run_report(self, monkeypatch):
+        monkeypatch.setattr(self.ga, "_decide",
+                            lambda *a, **k: None)
+        self.ga._LAST_DECIDE_ERR = "ollama not reachable (test)"
+        out = self.ga.gui_agent({"goal": "x", "confirm": "yes"}, None)
+        assert "no usable JSON" in out
+        assert "ollama not reachable (test)" in out
+
+    def test_provider_error_surfaces_in_preview(self, monkeypatch):
+        monkeypatch.setattr(self.ga, "_decide",
+                            lambda *a, **k: None)
+        self.ga._LAST_DECIDE_ERR = "gemini: quota exceeded (test)"
+        out = self.ga.gui_agent({"action": "preview", "goal": "x"}, None)
+        assert "no usable JSON" in out
+        assert "gemini: quota exceeded (test)" in out
+
+    def test_prompt_builder_contract(self):
+        p1 = self.ga._prompt_text("open settings", [], plan_only=False)
+        p2 = self.ga._prompt_text("open settings", [], plan_only=True)
+        assert "GOAL: open settings" in p1
+        assert "Choose the NEXT single action." in p1
+        assert "PLAN ONLY" in p2 and "PLAN ONLY" not in p1
+        assert '"type": "click"' in p1 and "Never invent pixels" in p1
+        hist = [{"say": "clicked", "act": {"type": "click", "x": 1, "y": 2}}]
+        p3 = self.ga._prompt_text("g", hist, plan_only=False)
+        assert "clicked" in p3 and "click" in p3
