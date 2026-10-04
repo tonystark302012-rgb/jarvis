@@ -82,7 +82,7 @@ def create(goal: str, plan: list[dict]) -> int:
 
 def update(run_id: int, status: str, results: list[dict]) -> None:
     """Finalize/refresh a run. results = one entry per EXECUTED step."""
-    if status not in ("running", "done", "failed", "partial"):
+    if status not in ("running", "done", "failed", "partial", "cancelled"):
         raise ValueError(f"bad status {status!r}")
     with _LOCK:
         c = _conn()
@@ -120,7 +120,7 @@ def resumable() -> list[dict]:
         rows = _conn().execute(
             "SELECT id, goal, status, plan_json, results_json,"
             " created, updated FROM runs"
-            " WHERE status IN ('partial', 'failed')"
+            " WHERE status IN ('partial', 'failed', 'cancelled')"
             " ORDER BY updated DESC LIMIT 20").fetchall()
     out = []
     for row in rows:
@@ -142,6 +142,17 @@ def _pending_indices(run: dict) -> list[int]:
     return pending
 
 
+def replace_plan(run_id: int, plan: list[dict]) -> None:
+    """Atomically swap a run's plan (replan flow: the failed chunk's tail
+    is superseded by the new plan; completed prefix stays)."""
+    with _LOCK:
+        c = _conn()
+        c.execute(
+            "UPDATE runs SET plan_json = ?, updated = ? WHERE id = ?",
+            (json.dumps(plan, ensure_ascii=False), time.time(), run_id))
+        c.commit()
+
+
 def mark_running(run_id: int) -> None:
     with _LOCK:
         c = _conn()
@@ -151,4 +162,4 @@ def mark_running(run_id: int) -> None:
 
 
 __all__ = ["create", "update", "get", "list_runs", "resumable",
-           "mark_running", "MAX_RETAINED"]
+           "mark_running", "replace_plan", "MAX_RETAINED"]

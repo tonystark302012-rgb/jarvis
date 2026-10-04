@@ -664,6 +664,16 @@ class JarvisLive:
                 ctx = {"player": self.ui, "speak": self.speak,
                        "response": None, "session_memory": None}
                 ev = _act_mod.begin("tool", tool, tool_args)
+                # Autonomy: agent steps and rule firings honour observe mode
+                # too (they bypass _execute_tool by design).
+                try:
+                    from core import autonomy as _autonomy
+                    blocked = _autonomy.gate(tool, tool_args)
+                except Exception:
+                    blocked = None
+                if blocked:
+                    _act_mod.finish(ev, False, blocked)
+                    return blocked
                 try:
                     out = self._action_registry.run(tool, tool_args, ctx)
                 except Exception as _e:
@@ -1373,6 +1383,24 @@ class JarvisLive:
         # so the timeline never shows a phantom "running" entry.
         from core import activity as _activity
         _act_ev = _activity.begin("tool", name, args)
+
+        # ── Autonomy gate: ONE choke point for model tool calls. Observe
+        # refuses mutating calls honestly BEFORE anything runs; auto injects
+        # interface-level confirm/allow for the undo-protected set only —
+        # the model cannot reach this code (core/autonomy.py trust model).
+        try:
+            from core import autonomy as _autonomy
+            _blocked = _autonomy.gate(name, args)
+            if _blocked:
+                _activity.finish(_act_ev, False, _blocked)
+                if not self.ui.muted:
+                    self.ui.set_state("LISTENING")
+                return types.FunctionResponse(
+                    id=fc.id, name=name, response={"result": _blocked}
+                )
+            args = _autonomy.enhancing(name, args)
+        except Exception:
+            pass
 
         if name == "save_memory":
             category = args.get("category", "notes")

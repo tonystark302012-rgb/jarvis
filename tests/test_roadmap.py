@@ -3143,3 +3143,444 @@ class TestCodeOutline:
         out = reg.run("code_outline", {"code": "def z(): pass",
                                        "language": "python"}, {})
         assert "def z" in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch 4a — agent architecture: autonomy modes + cancel + replan brain
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestAutonomy:
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        import core.autonomy as au
+        monkeypatch.setattr(au, "_path",
+                            lambda: tmp_path / "api_keys.json")
+        self.au = au
+        yield
+
+    def test_default_is_ask(self):
+        assert self.au.get_mode() == "ask"
+
+    def test_set_and_read(self):
+        self.au.set_mode("observe")
+        assert self.au.get_mode() == "observe"
+        st = self.au.status()
+        assert st["mode"] == "observe" and st["expires"] is None
+
+    def test_ttl_expiry_falls_back_to_ask(self):
+        now = 1000.0
+        self.au.set_mode("auto", minutes=30, now=now)
+        assert self.au.get_mode(now=now + 60) == "auto"
+        assert self.au.get_mode(now=now + 31 * 60) == "ask"   # expired
+
+    def test_invalid_mode_raises(self):
+        with pytest.raises(ValueError):
+            self.au.set_mode("yolo")
+
+    def test_corrupt_config_fails_safe(self, tmp_path):
+        (tmp_path / "api_keys.json").write_text("{not json",
+                                                encoding="utf-8")
+        assert self.au.get_mode() == "ask"
+
+    @pytest.mark.parametrize("tool,args,mut", [
+        ("web_search", {"query": "x"}, False),
+        ("file_controller", {"action": "list"}, False),
+        ("file_controller", {"action": "delete"}, True),
+        ("terminal", {"command": "ls"}, True),
+        ("send_message", {"to": "x"}, True),
+        ("procman", {"action": "kill"}, True),
+        # orchestrator.DESTRUCTIVE lists procman as a WHOLE — one source of
+        # truth, so observe blocks list too (conservative by design)
+        ("procman", {"action": "list"}, True),
+        ("smart_home", {"action": "pub"}, True),
+        ("smart_home", {"action": "status"}, False),
+        ("rules", {"action": "add"}, True),
+        ("rules", {"action": "list"}, False),
+        ("task_agent", {"action": "history"}, False),
+        ("gui_agent", {"action": "preview"}, False),
+        ("computer_settings", {"action": "shutdown"}, True),
+        ("computer_settings", {"action": "volume_up"}, False),
+        ("research", {"topic": "ai"}, False),
+    ])
+    def test_mutating_classification(self, tool, args, mut):
+        assert self.au.mutating(tool, args) is mut
+
+    def test_gate_observe_blocks_mutating(self):
+        out = self.au.gate("file_controller", {"action": "delete"},
+                           mode="observe")
+        assert out and "OBSERVE" in out and "file_controller" in out
+
+    def test_gate_passes_reads_and_non_observe(self):
+        assert self.au.gate("web_search", {}, mode="observe") is None
+        assert self.au.gate("file_controller", {"action": "delete"},
+                            mode="ask") is None
+        assert self.au.gate("file_controller", {"action": "delete"},
+                            mode="auto") is None
+
+    def test_gate_self_gating_tools_pass(self):
+        # task_agent/gui_agent handlers implement observe→preview themselves
+        assert self.au.gate("task_agent", {"description": "x"},
+                            mode="observe") is None
+        assert self.au.gate("gui_agent", {"goal": "x"},
+                            mode="observe") is None
+
+    def test_enhance_ask_changes_nothing(self):
+        assert self.au.enhancing("task_agent", {"description": "x"},
+                                 mode="ask") == {"description": "x"}
+
+    def test_enhance_auto_agent_scoped(self):
+        out = self.au.enhancing("task_agent", {}, mode="auto")
+        assert out["allow_destructive"] is True
+
+    def test_enhance_auto_never_auto_set(self):
+        for tool, args in (("send_message", {"to": "x"}),
+                           ("vault", {"action": "set"}),
+                           ("macro", {"action": "replay"}),
+                           ("procman", {"action": "kill"}),
+                           ("shutdown_jarvis", {})):
+            assert self.au.enhancing(tool, dict(args),
+                                     mode="auto") == args
+
+    @pytest.mark.parametrize("cmd,enhanced", [
+        ("git commit -m x", True),
+        ("git add .", True),
+        ("git push", False),
+        ("git push --force", False),
+        ("pytest -q", False),
+    ])
+    def test_enhance_auto_git_scope(self, cmd, enhanced):
+        out = self.au.enhancing("terminal", {"command": cmd}, mode="auto")
+        assert ("confirm" in out) is enhanced
+
+    def test_tool_status_and_set(self):
+        import actions.autonomy as at
+        assert "ASK" in at.autonomy({}, None)
+        out = at.autonomy({"action": "set", "mode": "auto",
+                           "minutes": 15}, None)
+        assert "AUTO" in out and "15 min" in out
+        assert "OBSERVE" in at.autonomy({"mode": "observe"}, None)
+        assert "Bad mode" in at.autonomy({"action": "set",
+                                          "mode": "zzz"}, None)
+
+    def test_tool_registers(self):
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions"))
+        assert "autonomy" in reg.names()
+
+
+class TestAgentRuntime:
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        from core import agent_runtime as rt
+        self.rt = rt
+        rt.reset_for_tests()
+        yield
+        rt.reset_for_tests()
+
+    def test_lifecycle(self):
+        self.rt.begin("42")
+        assert self.rt.active() == ["42"]
+        assert self.rt.cancel("42") is True
+        assert self.rt.is_cancelled("42") is True
+        self.rt.finish("42")
+        assert self.rt.is_cancelled("42") is False
+        assert self.rt.active() == []
+
+    def test_cancel_unknown_or_finished_is_false(self):
+        assert self.rt.cancel("nope") is False
+        self.rt.begin("7")
+        self.rt.finish("7")
+        assert self.rt.cancel("7") is False
+
+    def test_begin_clears_stale_flag(self):
+        self.rt.begin("k")
+        self.rt.cancel("k")
+        self.rt.begin("k")          # re-run same key
+        assert self.rt.is_cancelled("k") is False
+
+
+class TestOrchestratorCancelAndReplan:
+    def test_should_stop_halts_at_boundary(self):
+        from core import orchestrator as ob
+        ran = []
+        flag = {"stop": False}
+
+        def runner(t, a):
+            ran.append(t)
+            if t == "scan":
+                flag["stop"] = True     # fires AFTER step 1
+            return "ok"
+
+        report = ob.run_task("g", [ob.Step("scan"), ob.Step("scan"),
+                                   ob.Step("scan")], runner,
+                             should_stop=lambda: flag["stop"])
+        assert len(ran) == 1
+        assert report.cancelled is True and report.stopped_early is True
+        assert "cancelled by user" in report.text()
+        # report.ok means "every step that RAN succeeded" — cancellation
+        # is carried by .cancelled (checked first by task_agent/_resume)
+        assert report.ok is True and len(report.steps) == 1
+
+    def test_should_stop_exception_is_survivable(self):
+        from core import orchestrator as ob
+
+        def boom():
+            raise RuntimeError("bad predicate")
+
+        report = ob.run_task("g", [ob.Step("scan")],
+                             lambda t, a: "ok", should_stop=boom)
+        assert report.cancelled is False and len(report.steps) == 1
+
+    def test_cancelled_field_defaults_false(self):
+        from core import orchestrator as ob
+        r = ob.run_task("g", [ob.Step("scan")], lambda t, a: "ok")
+        assert r.cancelled is False
+        assert "cancelled" not in r.text()
+
+    def test_replan_prompt_shape(self):
+        from core import orchestrator as ob
+        p = ob.replan_prompt(
+            "clean downloads",
+            [{"tool": "scan", "ok": True, "result": "listed 9 files"}],
+            "file_controller", {"action": "delete"}, "permission denied",
+            ["scan", "file_controller", "weather_report"])
+        assert "clean downloads" in p
+        assert "permission denied" in p
+        assert "file_controller" in p
+        assert "JSON array" in p and "max 5 steps" in p
+        assert "weather_report" in p
+
+
+class TestTaskAgentReplanAndCancel:
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        import core.taskstore as ts
+        from core import agent_runtime as rt
+        from actions import task_agent as ta
+        monkeypatch.setattr(ts, "_db_path", lambda: tmp_path / "tasks.db")
+        monkeypatch.setattr(ts, "_CONN", None)
+        rt.reset_for_tests()
+        self.ta, self.ts, self.rt = ta, ts, rt
+        yield
+        ts._CONN = None
+        ta.set_runner(None)
+        ta.set_runner_names([])
+        rt.reset_for_tests()
+
+    def test_clarify_flow_never_runs(self, monkeypatch):
+        from core.orchestrator import Step
+        ta = self.ta
+        monkeypatch.setattr(ta, "_plan_with_llm",
+                            lambda g, n: ([], "Which folder exactly?"))
+        ta.set_runner(lambda t, a: (_ for _ in ()).throw(
+            AssertionError("must not run")))
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"description": "clean it"})
+        assert "[NEEDS CLARIFY]" in out and "Which folder" in out
+        assert self.ts.list_runs() == []          # nothing persisted
+
+    def test_clarify_parser_tolerates_fences(self):
+        from actions.task_agent import _parse_clarify
+        txt = '```json\n{"clarify": "Sabse pehle kya?"}\n```'
+        assert _parse_clarify(txt) == "Sabse pehle kya?"
+        assert _parse_clarify('[{"tool":"scan"}]') == ""
+        assert _parse_clarify("") == ""
+
+    def test_replan_after_failure_then_done(self, monkeypatch):
+        from core.orchestrator import Step
+        ta = self.ta
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: (
+            [Step("scan", {"what": "system"}),
+             Step("scan", {"what": "ports"})], ""))
+        monkeypatch.setattr(ta, "_replan_llm",
+                            lambda g, d, f, r, n: [
+                                Step("scan", {"what": "temp"})])
+        calls = []
+
+        def runner(t, a):
+            calls.append(a.get("what"))
+            if a.get("what") == "ports":
+                raise RuntimeError("boom")
+            return "ok"
+
+        ta.set_runner(runner)
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"description": "check"})
+        assert "replan #1 after scan failed" in out
+        # system + temp ran; the superseded 'ports' step was dropped from
+        # the plan entirely (replace_plan), so the count is 2/2.
+        assert "2/2 steps completed" in out
+        run = self.ts.list_runs(1)[0]
+        assert run["status"] == "done"
+        # failed 'ports' step was superseded: plan = [system, temp]
+        assert [r["tool"] for r in run["plan"]] == ["scan", "scan"]
+        assert len(run["plan"]) == 2
+        assert calls == ["system", "ports", "temp"]
+
+    def test_replan_unavailable_reports_partial(self, monkeypatch):
+        from core.orchestrator import Step
+        ta = self.ta
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: (
+            [Step("scan", {"what": "system"}),
+             Step("scan", {"what": "ports"})], ""))
+        monkeypatch.setattr(ta, "_replan_llm", lambda *a: [])
+
+        def runner(t, a):
+            if a.get("what") == "ports":
+                raise RuntimeError("boom")
+            return "ok"
+
+        ta.set_runner(runner)
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"description": "check"})
+        assert "replan unavailable" in out
+        assert "resume task" in out
+        assert self.ts.list_runs(1)[0]["status"] == "partial"
+
+    def test_same_plan_detection_stops(self, monkeypatch):
+        from core.orchestrator import Step
+        ta = self.ta
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: (
+            [Step("scan", {"what": "ports"})], ""))
+        monkeypatch.setattr(ta, "_replan_llm",
+                            lambda *a: [Step("scan", {"what": "ports"})])
+        ta.set_runner(lambda t, a: (_ for _ in ()).throw(
+            RuntimeError("always")))
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"description": "x", "max_replans": 3})
+        assert "same plan" in out
+        # exactly one runner attempt (initial), no infinite loop
+        assert out.count("✗") == 1
+
+    def test_refusal_is_never_replanned(self, monkeypatch):
+        from core.orchestrator import Step
+        ta = self.ta
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: (
+            [Step("procman", {"action": "kill", "pid": "9"})], ""))
+
+        def sentinel(*a, **k):
+            raise AssertionError("replan must not run on refusal")
+
+        monkeypatch.setattr(ta, "_replan_llm", sentinel)
+        ran = []
+        ta.set_runner(lambda t, a: ran.append(t) or "x")
+        ta.set_runner_names(["procman"])
+        out = ta.task_agent({"description": "kill it"})
+        assert ran == [] and "refused" in out
+
+    def test_max_replans_zero_skips_replan(self, monkeypatch):
+        from core.orchestrator import Step
+        ta = self.ta
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: (
+            [Step("scan", {"what": "ports"})], ""))
+
+        def sentinel(*a, **k):
+            raise AssertionError("must not replan when max_replans=0")
+
+        monkeypatch.setattr(ta, "_replan_llm", sentinel)
+        ta.set_runner(lambda t, a: (_ for _ in ()).throw(
+            RuntimeError("x")))
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"description": "x", "max_replans": 0})
+        assert "resume task" in out
+        assert self.ts.list_runs(1)[0]["status"] == "failed"
+
+    def test_cancel_during_run_at_step_boundary(self, monkeypatch):
+        from core.orchestrator import Step
+        ta = self.ta
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: (
+            [Step("scan", {"what": "a"}),
+             Step("scan", {"what": "b"}),
+             Step("scan", {"what": "c"})], ""))
+        ran = []
+
+        def runner(t, a):
+            ran.append(a.get("what"))
+            if a.get("what") == "a":
+                # user (via parallel tool call) asks to cancel mid-run
+                msg = ta.task_agent({"action": "cancel"})
+                assert "Cancelling" in msg
+            return "ok"
+
+        ta.set_runner(runner)
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"description": "x"})
+        assert ran == ["a"]                       # b and c never ran
+        assert "CANCELLED" in out and "resume task" in out
+        assert self.ts.list_runs(1)[0]["status"] == "cancelled"
+        # cancelled runs are resumable
+        assert any(r["status"] == "cancelled" for r in self.ts.resumable())
+
+    def test_cancel_idle_and_unknown(self):
+        assert "No task is running" in self.ta.task_agent(
+            {"action": "cancel"})
+        assert "No task #99" in self.ta.task_agent(
+            {"action": "cancel", "id": 99})
+
+    def test_cancel_finished_run_is_honest(self, monkeypatch):
+        from core.orchestrator import Step
+        ta = self.ta
+        monkeypatch.setattr(ta, "_plan_with_llm",
+                            lambda g, n: ([Step("scan", {})], ""))
+        ta.set_runner(lambda t, a: "ok")
+        ta.set_runner_names(["scan"])
+        ta.task_agent({"description": "done"})
+        run_id = self.ts.list_runs(1)[0]["id"]
+        out = ta.task_agent({"action": "cancel", "id": run_id})
+        assert "done" in out and "nothing to cancel" in out
+        assert self.ts.list_runs(1)[0]["status"] == "done"
+
+    def test_observe_mode_previews_without_running(self, monkeypatch):
+        from core.orchestrator import Step
+        import core.autonomy as au
+        ta = self.ta
+        monkeypatch.setattr(au, "get_mode", lambda: "observe")
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: (
+            [Step("scan", {"what": "system"}, why="check")], ""))
+        ta.set_runner(lambda t, a: (_ for _ in ()).throw(
+            AssertionError("must not run in observe")))
+        ta.set_runner_names(["scan"])
+        out = ta.task_agent({"description": "health"})
+        assert "OBSERVE mode" in out and "scan" in out
+        assert "Nothing was executed" in out
+        assert self.ts.list_runs() == []
+
+    def test_history_marks_cancelled(self, monkeypatch):
+        from core.orchestrator import Step
+        ta = self.ta
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: (
+            [Step("scan", {"what": "a"}), Step("scan", {"what": "b"})], ""))
+
+        def runner(t, a):
+            if a.get("what") == "a":
+                ta.task_agent({"action": "cancel"})
+            return "ok"
+
+        ta.set_runner(runner)
+        ta.set_runner_names(["scan"])
+        ta.task_agent({"description": "x"})
+        hist = ta.task_agent({"action": "history"})
+        assert "⛔" in hist
+
+
+class TestAgentWiring:
+    """main.py: autonomy gate + enhance at _execute_tool, gate in
+    _agent_runner (source-index — main.py needs PyQt)."""
+
+    @pytest.fixture(autouse=True)
+    def _src(self):
+        self.src = Path("main.py").read_text(encoding="utf-8")
+        yield
+
+    def test_execute_tool_gates_before_dispatch(self):
+        seg = self.src.split("async def _execute_tool", 1)[1][:4000]
+        assert "_autonomy.gate(name, args)" in seg
+        assert "_autonomy.enhancing(name, args)" in seg
+        assert seg.index("_autonomy.gate(name, args)") < \
+            seg.index('if name == "save_memory"')
+
+    def test_agent_runner_gates_steps(self):
+        seg = self.src.split("def _agent_runner", 1)[1][:1400]
+        assert "_autonomy.gate(tool, tool_args)" in seg
+        assert seg.index("_autonomy.gate") < seg.index(
+            "self._action_registry.run")

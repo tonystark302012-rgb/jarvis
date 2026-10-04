@@ -64,6 +64,7 @@ class TaskReport:
     steps: list[StepResult] = field(default_factory=list)
     planned: int = 0
     stopped_early: bool = False
+    cancelled: bool = False          # set when should_stop fired (cooperative)
     started: float = field(default_factory=time.time)
 
     @property
@@ -91,8 +92,10 @@ class TaskReport:
                 lines.append(f"   ↳ {r.result[:200]}")
         skipped = self.planned - len(self.steps)
         if skipped > 0:
-            lines.append(f"({skipped} planned step(s) skipped"
-                         f"{' — stopped at first failure' if self.stopped_early else ''})")
+            why = (" — cancelled by user" if self.cancelled
+                   else " — stopped at first failure"
+                   if self.stopped_early else "")
+            lines.append(f"({skipped} planned step(s) skipped{why})")
         ok_n = self.done
         lines.append("")
         lines.append(f"{ok_n}/{len(self.steps)} steps completed.")
@@ -121,17 +124,33 @@ def run_task(
     allow_destructive: bool = False,
     stop_on_error: bool = True,
     max_retries: int = 0,
+    should_stop: Callable[[], bool] | None = None,
 ) -> TaskReport:
     """Execute a plan.
 
     runner(tool, args) -> str result; it may raise, which counts as a failure.
     Destructive steps are skipped (reported as failed, not run) unless
     allow_destructive=True.
+
+    should_stop: optional cooperative-cancel predicate, checked at every
+    step BOUNDARY (never mid-step). When it fires, report.cancelled=True
+    and remaining steps are skipped — the caller persists `cancelled`
+    status and resume() can pick the pending steps up later.
     """
     report = TaskReport(goal=goal, planned=len(steps))
     activity.note("task", f"started: {goal}", steps=len(steps))
 
     for i, step in enumerate(steps, 1):
+        if should_stop is not None:
+            try:
+                stop_now = bool(should_stop())
+            except Exception:
+                stop_now = False
+            if stop_now:
+                report.cancelled = True
+                report.stopped_early = True
+                activity.note("task", f"cancelled before step {i}: {step.tool}")
+                break
         if is_destructive(step.tool, step.args) and not allow_destructive:
             report.steps.append(StepResult(
                 step=step, ok=False,
@@ -188,6 +207,39 @@ def planner_prompt(goal: str, tool_names: list[str]) -> str:
         "Reply with ONLY a JSON array, no prose, max 8 steps, ordered:\n"
         '[{"tool": "name", "args": {"param": "value"}, "why": "one short reason"}]\n'
         "If the goal needs no tools, reply with []."
+    )
+
+
+def replan_prompt(
+    goal: str,
+    done: list[dict],
+    failed_tool: str,
+    failed_args: dict,
+    failed_result: str,
+    tool_names: list[str],
+) -> str:
+    """Prompt for the REPLAN stage: the plan failed at some step — emit ONLY
+    the remaining work, given what already succeeded. Strict JSON reply."""
+    done_txt = "\n".join(
+        f"- {d.get('tool')}: {'OK' if d.get('ok') else 'FAILED'} "
+        f"({str(d.get('result') or '')[:220]})"
+        for d in done[-8:]
+    ) or "- (nothing completed yet)"
+    return (
+        "You are the replanning stage of a desktop automation agent. "
+        "A plan failed part-way. Look at what already succeeded and the "
+        "failure, then propose the REMAINING steps to still achieve the "
+        "goal — do NOT repeat completed work, do NOT try the exact failed "
+        "step the same way (change approach), and prefer different tools "
+        "if the failed tool keeps failing.\n\n"
+        f"Goal: {goal}\n\n"
+        f"Already attempted (most recent last):\n{done_txt}\n\n"
+        f"Failed step: {failed_tool} {json.dumps(failed_args)[:300]}\n"
+        f"Failure: {str(failed_result)[:500]}\n\n"
+        f"Available tools: {', '.join(sorted(tool_names))}\n\n"
+        "Reply with ONLY a JSON array, max 5 steps, ordered:\n"
+        '[{"tool": "name", "args": {"param": "value"}, "why": "one short reason"}]\n'
+        "If the goal is unreachable now, reply with []."
     )
 
 
