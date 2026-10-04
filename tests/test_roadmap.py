@@ -4196,3 +4196,69 @@ class TestStaleSweep:
         src = Path("main.py").read_text(encoding="utf-8")
         assert "sweep_stale()" in src
         assert src.index("sweep_stale()") < src.index("JarvisLive(ui)")
+
+
+class TestHistoryRecency:
+    """Batch 5d — recency-weighted search ranking."""
+
+    @pytest.fixture(autouse=True)
+    def _iso(self, tmp_path, monkeypatch):
+        import actions.history_search as h
+        self.h = h
+        monkeypatch.setattr(h, "_db_path", lambda: tmp_path / "h.db")
+        monkeypatch.setattr(h, "_CONN", None)
+        h._conn()                    # schema exists for raw inserts
+        yield
+
+    def _insert(self, text, ts):
+        import sqlite3
+        with sqlite3.connect(self.h._db_path()) as c:
+            c.execute("INSERT INTO turns (ts, speaker, text)"
+                      " VALUES (?, 'user', ?)", (ts, text))
+            c.commit()
+        self.h._CONN = None
+
+    def test_weight_helper(self):
+        w = self.h._recency_weight
+        assert w(-5.0, 0.0) == -5.0                    # fresh = full weight
+        old = w(-5.0, 90.0)
+        assert -5.0 < old < -2.5                       # decays toward 0
+        assert w(-5.0, 5.0) < old                      # older → weaker
+        assert w(-5.0, -3.0) == -5.0                   # future clamps to 0
+        # relevance dominates: strong-old still beats weak-new
+        assert w(-20.0, 60.0) < w(-2.0, 0.0)
+
+    def test_equal_relevance_newer_wins(self):
+        now = time.time()
+        self._insert("target alpha zap", now - 40 * 86400)
+        self._insert("target alpha zap", now - 60)
+        out = self.h.search("target")
+        body = [l for l in out.splitlines() if l[:2].rstrip(".").isdigit()]
+        assert len(body) == 2
+        # first result = the newer row (60 seconds ago, not 40 days)
+        first = out.splitlines()[1]
+        assert "target alpha zap" in first
+        assert "10:" in first or "09:" in first      # today's clock time
+
+    def test_strong_old_beats_weak_new(self):
+        now = time.time()
+        for i in range(4):
+            self._insert(f"filler doc number {i} about weekend cooking",
+                         now - i * 100)
+        strong_old = " ".join(["quantum"] * 8 + ["entangled", "states"])
+        weak_new = ("quantum computing might matter someday honestly maybe "
+                    "next year we shall see what happens with the whole "
+                    "field broadly speaking")
+        self._insert(strong_old, now - 60 * 86400)
+        self._insert(weak_new, now - 30)
+        out = self.h.search("quantum")
+        first = out.splitlines()[1]
+        # older by 60 days, but relevance gap > recency's 2x cap
+        assert "entangled" in first
+
+    def test_limit_respected_after_rerank(self):
+        now = time.time()
+        for i in range(12):
+            self._insert(f"deploy target number {i}", now - i * 60)
+        out = self.h.search("target", limit=3)
+        assert "Found 3 turn(s)" in out

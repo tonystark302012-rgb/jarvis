@@ -120,23 +120,43 @@ def _escape_fts(query: str) -> str:
     return " OR ".join(f'"{t}"' for t in tokens[:12])
 
 
+def _recency_weight(rel: float, age_days: float) -> float:
+    """Relevance × freshness. rel is SQLite bm25 (more negative = better);
+    decay maps age → (0.5, 1.0] so recency at most doubles a score — a
+    strong old answer still beats a weak fresh one, but of two equals the
+    newer one wins. Future timestamps clamp to age 0."""
+    import math
+    age = max(0.0, float(age_days))
+    return float(rel) * (0.5 + 0.5 * math.exp(-age / 30.0))
+
+
 def search(query: str, limit: int = 10) -> str:
     match = _escape_fts(query)
     if not match:
         return "Give me something to search for in our conversations."
+    limit = max(1, min(50, int(limit)))
+    import time as _time
+    now = _time.time()
     with _LOCK:
         try:
+            # candidate pool > limit so the re-rank can promote/demote
             rows = _conn().execute(
-                "SELECT t.ts, t.speaker, t.text FROM turns t"
+                "SELECT t.ts, t.speaker, t.text,"
+                " bm25(turns_fts) AS rel FROM turns t"
                 " JOIN turns_fts f ON f.rowid = t.id"
                 " WHERE turns_fts MATCH ?"
-                " ORDER BY bm25(turns_fts), t.ts DESC LIMIT ?",
-                (match, max(1, min(50, int(limit)))),
+                " ORDER BY rel ASC LIMIT ?",
+                (match, min(200, limit * 10)),
             ).fetchall()
         except sqlite3.OperationalError as e:
             return f"History search failed: {e}"
         except Exception as e:
             return f"History search failed: {e}"
+    ranked = sorted(
+        rows,
+        key=lambda r: (_recency_weight(r[3], (now - r[0]) / 86400.0),
+                       -r[0]))[:limit]
+    rows = [(r[0], r[1], r[2]) for r in ranked]
     if not rows:
         return f"No conversation turns match {query!r}."
     head = f"Found {len(rows)} turn(s) for {query!r}:"
