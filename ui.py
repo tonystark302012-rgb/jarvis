@@ -61,7 +61,7 @@ os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.*=false")
 
 from PyQt6.QtCore import (
     QLineF, QPointF,
-    QPoint, QObject, QRectF, QSizeF, Qt, QTimer,
+    QPoint, QObject, QRectF, QSize, QSizeF, Qt, QTimer,
     QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -240,66 +240,317 @@ def qcol(h: str, a: int = 255) -> QColor:
     c = QColor(h); c.setAlpha(a); return c
 
 
+# ── VECTOR ICON SYSTEM ────────────────────────────────────────────────────────
+# No emoji anywhere in the chrome: every symbol is an inline Lucide-style SVG
+# (ISC-licensed path shapes, hand-inlined below) rendered through QtSvg into a
+# cached QPixmap. Icons inherit a colour at call time, so re-theming repaints
+# them like any other widget — and a system without an emoji font shows the
+# exact same UI as one with it.
+try:
+    from PyQt6.QtSvg import QSvgRenderer as _QSvgRenderer
+except Exception:                                   # noqa: BLE001
+    _QSvgRenderer = None                            # pragma: no cover
+
+_ICONS: dict[str, str] = {
+    # navigation / sections
+    "chat":      '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    "monitor":   '<rect x="2" y="3" width="20" height="14" rx="2"/>'
+                 '<line x1="8" y1="21" x2="16" y2="21"/>'
+                 '<line x1="12" y1="17" x2="12" y2="21"/>',
+    "layout":    '<rect x="3" y="3" width="18" height="18" rx="2"/>'
+                 '<line x1="3" y1="9" x2="21" y2="9"/>'
+                 '<line x1="9" y1="21" x2="9" y2="9"/>',
+    "folder":    '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+    "bot":       '<rect x="3" y="11" width="18" height="10" rx="2"/>'
+                 '<circle cx="12" cy="5" r="2"/><path d="M12 7v4"/>'
+                 '<line x1="8" y1="16" x2="8.01" y2="16"/>'
+                 '<line x1="16" y1="16" x2="16.01" y2="16"/>',
+    "server":    '<rect x="2" y="2" width="20" height="8" rx="2"/>'
+                 '<rect x="2" y="14" width="20" height="8" rx="2"/>'
+                 '<line x1="6" y1="6" x2="6.01" y2="6"/>'
+                 '<line x1="6" y1="18" x2="6.01" y2="18"/>',
+    "phone":     '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 '
+                 '19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3'
+                 'a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09'
+                 ' 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0'
+                 ' 2.81.7A2 2 0 0 1 22 16.92z"/>',
+    "checks":    '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/>'
+                 '<line x1="8" y1="18" x2="21" y2="18"/>'
+                 '<polyline points="3 6 4 7 6 5"/><polyline points="3 12 4 13 6 11"/>'
+                 '<polyline points="3 18 4 19 6 17"/>',
+    "database":  '<ellipse cx="12" cy="5" rx="9" ry="3"/>'
+                 '<path d="M3 5v14a9 3 0 0 0 18 0V5"/>'
+                 '<path d="M3 12a9 3 0 0 0 18 0"/>',
+    "zap":       '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    "search":    '<circle cx="11" cy="11" r="8"/>'
+                 '<line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+    "globe":     '<circle cx="12" cy="12" r="10"/>'
+                 '<line x1="2" y1="12" x2="22" y2="12"/>'
+                 '<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 '
+                 '15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+    "cube":      '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8'
+                 'a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>'
+                 '<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>'
+                 '<line x1="12" y1="22.08" x2="12" y2="12"/>',
+    "activity":  '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+    # chrome / actions
+    "settings":  '<circle cx="12" cy="12" r="3"/>'
+                 '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83'
+                 'l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0'
+                 'v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83'
+                 '-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0'
+                 '-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83'
+                 '-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0'
+                 'v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83'
+                 ' 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0'
+                 ' 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+    "sliders":   '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>'
+                 '<line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>'
+                 '<line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>'
+                 '<line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/>'
+                 '<line x1="17" y1="16" x2="23" y2="16"/>',
+    "mic":       '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>'
+                 '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>'
+                 '<line x1="12" y1="19" x2="12" y2="23"/>'
+                 '<line x1="8" y1="23" x2="16" y2="23"/>',
+    "mic-off":   '<line x1="1" y1="1" x2="23" y2="23"/>'
+                 '<path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>'
+                 '<path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/>'
+                 '<line x1="12" y1="19" x2="12" y2="23"/>'
+                 '<line x1="8" y1="23" x2="16" y2="23"/>',
+    "volume-x":  '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>'
+                 '<line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>',
+    "volume":    '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>'
+                 '<path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>',
+    "send":      '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>',
+    "plus":      '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    "x":         '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+    "check":     '<polyline points="20 6 9 17 4 12"/>',
+    "refresh":   '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
+    "play":      '<polygon points="5 3 19 12 5 21 5 3"/>',
+    "stop":      '<rect x="6" y="6" width="12" height="12" rx="1"/>',
+    "upload":    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+                 '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
+    "trash":     '<polyline points="3 6 5 6 21 6"/>'
+                 '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4'
+                 'a2 2 0 0 1 2 2v2"/>',
+    "edit":      '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>'
+                 '<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',
+    "terminal":  '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
+    "power":     '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>',
+    "alert":     '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71'
+                 ' 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/>'
+                 '<line x1="12" y1="17" x2="12.01" y2="17"/>',
+    "info":      '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/>'
+                 '<line x1="12" y1="8" x2="12.01" y2="8"/>',
+    "clock":     '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    "calendar":  '<rect x="3" y="4" width="18" height="18" rx="2"/>'
+                 '<line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/>'
+                 '<line x1="3" y1="10" x2="21" y2="10"/>',
+    "key":       '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777'
+                 '-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3"/>',
+    "eye":       '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+    "copy":      '<rect x="9" y="9" width="13" height="13" rx="2"/>'
+                 '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+    "bell":      '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>'
+                 '<path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
+    "grid":      '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>'
+                 '<rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>',
+    "cpu":       '<rect x="4" y="4" width="16" height="16" rx="2"/>'
+                 '<rect x="9" y="9" width="6" height="6"/>'
+                 '<line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/>'
+                 '<line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/>'
+                 '<line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/>'
+                 '<line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>',
+    "file":      '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>'
+                 '<polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/>'
+                 '<line x1="16" y1="17" x2="8" y2="17"/>',
+    "save":      '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>'
+                 '<polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>',
+    "layers":    '<polygon points="12 2 2 7 12 12 22 7 12 2"/>'
+                 '<polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+    "external":  '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>'
+                 '<polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
+    "chevron":   '<polyline points="9 18 15 12 9 6"/>',
+    "power2":    '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>',
+    "clipboard": '<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>'
+                 '<rect x="8" y="2" width="8" height="4" rx="1"/>',
+    "sparkles":  '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/>'
+                 '<path d="M19 15l.9 2.4L22 18l-2.1.6L19 21l-.9-2.4L16 18l2.1-.6L19 15z"/>',
+    "inbox":     '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>'
+                 '<path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24'
+                 'a2 2 0 0 0-1.79 1.11z"/>',
+    "wrench":    '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91'
+                 ' 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+}
+_ICON_CACHE: dict[tuple, QPixmap] = {}
+
+
+def icon_pm(name: str, color: str | None = None, size: int = 16) -> QPixmap:
+    """Render a named icon to a cached pixmap, tinted `color`."""
+    key = (name, color or C.PRI, int(size))
+    hit = _ICON_CACHE.get(key)
+    if hit is not None:
+        return hit
+    inner = _ICONS.get(name) or _ICONS.get("grid")
+    color = color or C.PRI
+    px = QPixmap(int(size), int(size))
+    px.fill(Qt.GlobalColor.transparent)
+    if _QSvgRenderer is not None:
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+               f'width="{size}" height="{size}" fill="none" stroke="{color}" '
+               f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+               f"{inner}</svg>")
+        try:
+            r = _QSvgRenderer(svg.encode("utf-8"))
+            if r.isValid():
+                from PyQt6.QtGui import QPainter as _QPainter
+                p = _QPainter(px)
+                r.render(p)
+                p.end()
+        except Exception:                             # noqa: BLE001
+            pass
+    _ICON_CACHE[key] = px
+    return px
+
+
+def icon_name_for(name: str) -> str:
+    return name if name in _ICONS else "grid"
+
+
+def set_icon(btn, name: str, color: str | None = None, size: int = 15) -> None:
+    """Attach a vector icon to a QPushButton (left of the label)."""
+    try:
+        from PyQt6.QtGui import QIcon
+        btn.setIcon(QIcon(icon_pm(name, color, size)))
+        btn.setIconSize(QSize(size, size))
+    except Exception:                                 # noqa: BLE001
+        pass
+
+
+def _icon_label(name: str, color: str | None = None, size: int = 15) -> QLabel:
+    l = QLabel()
+    l.setPixmap(icon_pm(name, color, size))
+    l.setFixedWidth(size + 2)
+    l.setStyleSheet("background: transparent; border: none;")
+    return l
+
+
 def install_global_qss(app: QApplication) -> None:
     """
-    Baseline alignment stylesheet — one source of truth for how every generic
-    widget looks (buttons, inputs, combo boxes, scrollbars, tables, tooltips).
-    Per-widget styles that carry C.* colours still sit on top of this; this
-    guarantees consistent radii, padding and focus rings everywhere else, so
-    no panel drifts out of alignment with the dashboard design language.
+    Design system v2 — one stylesheet, the whole language:
+    cards with hairline tops, gradient primaries, ghost/danger/icon buttons,
+    chips, rail rows, toasts, slim inputs with focus glow. Per-widget styles
+    that carry C.* colours sit on top; everything else inherits here, so no
+    panel drifts out of alignment.
     """
-    app.setFont(QFont("Courier New", 10))     # QFont (unlike stylesheets)
-    app.setStyleSheet(f"""                     # has proper per-glyph fallback,
-    * {{                                      # so emoji render on every OS
-        outline: none;
-    }}
+    # Sans first (Segoe UI on Windows/mac, DejaVu elsewhere) — QFont does
+    # proper per-glyph fallback, so symbols never turn into boxes.
+    app.setFont(QFont("Segoe UI", 10))
+    app.setStyleSheet(f"""                     
+    * {{ outline: none; }}
     QWidget {{ background: transparent; color: {C.TEXT}; font-size: 12px; }}
+    QLabel {{ background: transparent; }}
+
+    /* ── buttons ─────────────────────────────────────────── */
     QPushButton {{
-        background: {C.PANEL}; color: {C.TEXT};
-        border: 1px solid {C.BORDER}; border-radius: 6px;
-        padding: 5px 12px; min-height: 18px;
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 {C.PANEL2}, stop:1 {C.PANEL});
+        color: {C.TEXT};
+        border: 1px solid {C.BORDER}; border-radius: 8px;
+        padding: 6px 14px; min-height: 18px;
     }}
-    QPushButton:hover {{ border-color: {C.PRI}; color: {C.PRI}; }}
-    QPushButton:pressed {{ background: {C.PRI_GHO}; }}
-    QPushButton:checked {{ background: {C.PRI_GHO}; border-color: {C.PRI};
-                           color: {C.PRI}; }}
+    QPushButton:hover {{ border-color: {C.BORDER_B}; color: {C.WHITE}; }}
+    QPushButton:pressed {{ background: {C.PRI_GHO}; border-color: {C.PRI_DIM}; }}
     QPushButton:disabled {{ color: {C.TEXT_DIM}; border-color: {C.BORDER};
-                            background: {C.PANEL2}; }}
-    QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {{
-        background: {C.PANEL}; color: {C.TEXT};
-        border: 1px solid {C.BORDER}; border-radius: 6px;
-        padding: 5px 9px; selection-background-color: {C.PRI_GHO};
+                            background: {C.PANEL}; }}
+    QPushButton#primary {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 {C.PRI}, stop:1 {C.PRI_DIM});
+        color: #ffffff; border: 1px solid {C.PRI}; font-weight: 600;
     }}
-    QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
-    QComboBox:focus {{ border-color: {C.PRI}; }}
-    QComboBox::drop-down {{ border: none; width: 18px; }}
+    QPushButton#primary:hover {{ border-color: {C.WHITE}; }}
+    QPushButton#primary:pressed {{ background: {C.PRI_DIM}; }}
+    QPushButton#danger {{
+        background: transparent; color: {C.RED};
+        border: 1px solid {C.RED};
+    }}
+    QPushButton#danger:hover {{ background: #f8717118; border-color: {C.RED}; }}
+    QPushButton#ghost {{
+        background: transparent; color: {C.TEXT_MED};
+        border: 1px solid {C.BORDER};
+    }}
+    QPushButton#ghost:hover {{ color: {C.WHITE}; border-color: {C.PRI_DIM}; }}
+    QPushButton#iconBtn {{
+        background: transparent; color: {C.TEXT_DIM};
+        border: 1px solid {C.BORDER}; border-radius: 8px; padding: 4px;
+    }}
+    QPushButton#iconBtn:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM};
+                                 background: {C.PRI_GHO}; }}
+    QPushButton#iconBtn:checked {{ color: {C.PRI}; border-color: {C.PRI};
+                                   background: {C.PRI_GHO}; }}
+    QPushButton#rail {{
+        background: transparent; color: {C.TEXT_DIM};
+        border: 1px solid transparent; border-radius: 9px;
+        text-align: left; padding: 0 10px; font-size: 11px; font-weight: 600;
+    }}
+    QPushButton#rail:hover {{ background: {C.PANEL}; color: {C.TEXT}; }}
+    QPushButton#rail:checked {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+            stop:0 {C.PRI_GHO}, stop:1 transparent);
+        color: {C.WHITE}; border: 1px solid {C.PRI_DIM};
+    }}
+    QPushButton#chip {{
+        background: {C.PANEL}; color: {C.TEXT_MED};
+        border: 1px solid {C.BORDER}; border-radius: 12px;
+        padding: 4px 12px; font-size: 11px;
+    }}
+    QPushButton#chip:hover {{ color: {C.WHITE}; border-color: {C.BORDER_B}; }}
+    QPushButton#chip:checked {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 {C.PRI}, stop:1 {C.PRI_DIM});
+        color: #ffffff; border-color: {C.PRI}; font-weight: 600;
+    }}
+
+    /* ── inputs ──────────────────────────────────────────── */
+    QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {{
+        background: {C.BG}; color: {C.TEXT};
+        border: 1px solid {C.BORDER}; border-radius: 8px;
+        padding: 6px 10px; selection-background-color: {C.PRI_GHO};
+    }}
+    QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
+        border-color: {C.PRI};
+    }}
+    QComboBox::drop-down {{ border: none; width: 20px; }}
     QComboBox QAbstractItemView {{
         background: {C.PANEL}; color: {C.TEXT};
-        border: 1px solid {C.BORDER}; selection-background-color: {C.PRI_GHO};
+        border: 1px solid {C.BORDER_A}; selection-background-color: {C.PRI_GHO};
     }}
+
+    /* ── surfaces ────────────────────────────────────────── */
     QScrollArea {{ border: none; }}
-    QScrollBar:vertical {{ background: {C.BG}; width: 9px; border: none; }}
+    QScrollBar:vertical {{ background: transparent; width: 10px; border: none; }}
     QScrollBar::handle:vertical {{
-        background: {C.BORDER_B}; border-radius: 4px; min-height: 22px;
+        background: {C.BORDER_B}; border-radius: 5px; min-height: 22px;
     }}
     QScrollBar::handle:vertical:hover {{ background: {C.PRI_DIM}; }}
-    QScrollBar:horizontal {{ background: {C.BG}; height: 9px; border: none; }}
+    QScrollBar:horizontal {{ background: transparent; height: 10px; border: none; }}
     QScrollBar::handle:horizontal {{
-        background: {C.BORDER_B}; border-radius: 4px; min-width: 22px;
+        background: {C.BORDER_B}; border-radius: 5px; min-width: 22px;
     }}
     QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
     QToolTip {{
-        background: {C.PANEL}; color: {C.TEXT};
-        border: 1px solid {C.PRI}; border-radius: 4px; padding: 4px 7px;
+        background: {C.PANEL2}; color: {C.TEXT};
+        border: 1px solid {C.PRI}; border-radius: 6px; padding: 5px 8px;
     }}
     QHeaderView::section {{
         background: {C.DARK}; color: {C.TEXT_MED};
-        border: none; border-bottom: 1px solid {C.BORDER};
-        padding: 5px 8px; font-size: 10px; font-weight: bold;
+        border: none; border-bottom: 1px solid {C.BORDER_B};
+        padding: 6px 9px; font-size: 10px; font-weight: bold;
     }}
     QTableWidget, QTableView {{
         background: {C.PANEL}; color: {C.TEXT};
-        border: 1px solid {C.BORDER}; border-radius: 6px; gridline-color: {C.BORDER};
+        border: 1px solid {C.BORDER}; border-radius: 8px; gridline-color: {C.BORDER};
     }}
     QSplitter::handle:horizontal {{ background: {C.BORDER}; width: 7px;
                                     border-radius: 3px; }}
@@ -1224,12 +1475,12 @@ class LogWidget(QTextEdit):
             QTimer.singleShot(20, self._next)
 
 _FILE_ICONS = {
-    "image":   ("🖼", "#00d4ff"), "video":   ("🎬", "#ff6b00"),
-    "audio":   ("🎵", "#cc44ff"), "pdf":     ("📄", "#ff4444"),
-    "word":    ("📝", "#4488ff"), "excel":   ("📊", "#44bb44"),
-    "code":    ("💻", "#ffcc00"), "archive": ("📦", "#ff8844"),
-    "pptx":    ("📊", "#ff6622"), "text":    ("📃", "#aaaaaa"),
-    "data":    ("🔧", "#88ddff"), "unknown": ("📎", "#888888"),
+    "image":   ("IMG", "#00d4ff"), "video":   ("VID", "#ff6b00"),
+    "audio":   ("AUD", "#cc44ff"), "pdf":     ("PDF", "#ff4444"),
+    "word":    ("DOC", "#4488ff"), "excel":   ("XLS", "#44bb44"),
+    "code":    ("COD", "#ffcc00"), "archive": ("ZIP", "#ff8844"),
+    "pptx":    ("PPT", "#ff6622"), "text":    ("TXT", "#aaaaaa"),
+    "data":    ("DAT", "#88ddff"), "unknown": ("BIN", "#888888"),
 }
 _EXT_TO_CAT = {
     **dict.fromkeys(["jpg","jpeg","png","gif","webp","bmp","tiff","svg","ico"], "image"),
@@ -1584,7 +1835,7 @@ class SetupOverlay(QWidget):
 
         os_row = QHBoxLayout(); os_row.setSpacing(6)
         self._os_btns: dict[str, QPushButton] = {}
-        for key, label in [("windows","⊞  Windows"),("mac","  macOS"),("linux","🐧  Linux")]:
+        for key, label in [("windows","⊞  Windows"),("mac","macOS"),("linux","Linux")]:
             btn = QPushButton(label)
             btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
             btn.setFixedHeight(32)
@@ -1770,7 +2021,7 @@ class CustomizeOverlay(QWidget):
                f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
                f"QLineEdit:focus {{ border: 1px solid {C.PRI}; }}")
 
-        lay.addWidget(_lbl("⚙  CUSTOMISE ASSISTANT", 12, True))
+        lay.addWidget(_lbl("CUSTOMISE ASSISTANT", 12, True))
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         lay.addWidget(sep)
@@ -1977,7 +2228,7 @@ class PluginManagerOverlay(QWidget):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(6)
 
-        hdr = QLabel("🧩  PLUGIN MANAGER")
+        hdr = QLabel("PLUGIN MANAGER")
         hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         lay.addWidget(hdr)
@@ -2118,7 +2369,7 @@ class ConfirmBanner(_HudOverlay):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(8)
 
-        hdr = QLabel("⚠  CONFIRM")
+        hdr = QLabel("CONFIRM")
         hdr.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.ACC}; background: transparent;")
         lay.addWidget(hdr)
@@ -2199,7 +2450,7 @@ class AudioDeviceOverlay(_HudOverlay):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(6)
 
-        hdr = QLabel("🎧  AUDIO DEVICES")
+        hdr = QLabel("AUDIO DEVICES")
         hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         lay.addWidget(hdr)
@@ -2393,7 +2644,7 @@ class MemoryOverlay(_HudOverlay):
 
         from memory.memory_manager import all_entries_for_ui
 
-        hdr = QLabel("🧠  WHAT JARVIS REMEMBERS")
+        hdr = QLabel("WHAT JARVIS REMEMBERS")
         hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         self._lay.addWidget(hdr)
@@ -2618,7 +2869,7 @@ class PluginSettingsOverlay(QWidget):
         root.setContentsMargins(22, 16, 22, 16)
         root.setSpacing(8)
 
-        root.addWidget(self._lbl("⚙  PLUGIN SETTINGS", 12, True))
+        root.addWidget(self._lbl("PLUGIN SETTINGS", 12, True))
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         root.addWidget(sep)
@@ -3106,6 +3357,9 @@ class _DashApi(QObject):
     def patch(self, key: str, path: str, payload: dict) -> None:
         self._submit(key, "PATCH", path, payload)
 
+    def put(self, key: str, path: str, payload: dict) -> None:
+        self._submit(key, "PUT", path, payload)
+
     def delete(self, key: str, path: str) -> None:
         self._submit(key, "DELETE", path, None)
 
@@ -3116,6 +3370,15 @@ class _DashApi(QObject):
             return
         self._ex.submit(self._run, key, method, path, payload)
 
+    def _ssl_ctx(self):
+        """Loopback HTTPS uses the dashboard's self-signed certificate —
+        verification is meaningless for 127.0.0.1 and would break every
+        panel on a fresh machine. The bearer token still authenticates."""
+        if self.base.startswith("https://"):
+            import ssl
+            return ssl._create_unverified_context()
+        return None
+
     def _run(self, key: str, method: str, path: str, payload) -> None:
         try:
             data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -3125,7 +3388,8 @@ class _DashApi(QObject):
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json",
                 })
-            with urllib.request.urlopen(req, timeout=25) as resp:
+            with urllib.request.urlopen(
+                    req, timeout=25, context=self._ssl_ctx()) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
             self.done.emit(key, json.loads(body) if body else None)
         except urllib.error.HTTPError as e:
@@ -3147,8 +3411,17 @@ def _fmt_when(ts) -> str:
         return "--"
 
 
+_ICON_TITLES = {
+    "spaces": "folder", "agents": "bot", "computers": "server",
+    "calls": "phone", "agenda": "checks", "memory": "database",
+    "skills": "zap", "studio": "layout", "display": "layout",
+    "scan": "search", "3d": "cube", "web": "globe",
+    "system monitor": "activity",
+}
+
+
 class _DashPanel(QWidget):
-    """Shared chrome for the five workspace sections."""
+    """Shared chrome for the workspace sections."""
     SEC = "x"                      # rail key; request keys are f"{SEC}:…"
 
     def __init__(self, mw):
@@ -3163,11 +3436,13 @@ class _DashPanel(QWidget):
 
     # ── chrome helpers ───────────────────────────────────────────────────────
     def _header(self, title: str, sub: str = "", refresh=None) -> None:
+        """Panel header — accent icon + wordmark + subtitle chip + actions."""
         row = QHBoxLayout(); row.setSpacing(8)
+        row.addWidget(_icon_label(_ICON_TITLES.get(title.lower(), "grid"),
+                                  C.PRI, 15))
         t = QLabel(title)
-        t.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
-        t.setStyleSheet(f"color: {C.PRI}; background: transparent;"
-                        f"letter-spacing: 2px;")
+        t.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        t.setStyleSheet(f"color: {C.WHITE}; background: transparent;")
         row.addWidget(t)
         if sub:
             s = QLabel(sub)
@@ -3175,8 +3450,12 @@ class _DashPanel(QWidget):
             row.addWidget(s)
         row.addStretch()
         if refresh is not None:
-            rb = QPushButton("↻ REFRESH")
+            rb = QPushButton()
+            rb.setObjectName("ghost")
+            rb.setFixedHeight(26)
             rb.setCursor(Qt.CursorShape.PointingHandCursor)
+            rb.setToolTip("Refresh")
+            set_icon(rb, "refresh", C.TEXT_MED, 13)
             rb.clicked.connect(refresh)
             row.addWidget(rb)
         self._root.addLayout(row)
@@ -3187,27 +3466,7 @@ class _DashPanel(QWidget):
         b.setFixedHeight(height)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        if primary:
-            b.setStyleSheet(f"""
-                QPushButton {{
-                    background: {C.PRI}; color: #fff; border: 1px solid {C.PRI};
-                    border-radius: 6px; padding: 0 12px;
-                }}
-                QPushButton:hover {{ background: {C.PRI_DIM}; }}
-                QPushButton:disabled {{ background: {C.PANEL2};
-                                        color: {C.TEXT_DIM};
-                                        border-color: {C.BORDER}; }}
-            """)
-        else:
-            b.setStyleSheet(f"""
-                QPushButton {{
-                    background: {C.PANEL}; color: {C.TEXT};
-                    border: 1px solid {C.BORDER}; border-radius: 6px;
-                    padding: 0 12px;
-                }}
-                QPushButton:hover {{ border-color: {C.PRI}; color: {C.PRI}; }}
-                QPushButton:disabled {{ color: {C.TEXT_DIM}; }}
-            """)
+        b.setObjectName("primary" if primary else "ghost")
         if handler is not None:
             b.clicked.connect(handler)
         return b
@@ -3331,8 +3590,9 @@ class SpacesPanel(_DashPanel):
             if not data:
                 self._page_lay.addWidget(self._empty("No pages in this space."))
             for pg in data:
-                b = self._btn(f"📄  {pg.get('title') or 'Untitled'}",
+                b = self._btn(f"  {pg.get('title') or 'Untitled'}",
                               lambda _=False, p=pg: self._open_page(p["id"]))
+                set_icon(b, "file", C.TEXT_MED, 13)
                 b.setToolTip(f"page #{pg['id']} · rev {pg.get('rev')}")
                 self._page_lay.addWidget(b)
             self._page_lay.addStretch()
@@ -3481,8 +3741,9 @@ class AgentsPanel(_DashPanel):
                 self._dot_lay.addWidget(
                     self._empty("No Dots yet — create one in the web dashboard."))
             for d in data:
-                b = self._btn(f"🤖  {d.get('name')}",
+                b = self._btn(f"  {d.get('name')}",
                               lambda _=False, dd=d: self._pick(dd))
+                set_icon(b, "bot", C.TEXT_MED, 13)
                 b.setToolTip(d.get("role_instructions") or "")
                 self._dot_lay.addWidget(b)
             self._dot_lay.addStretch()
@@ -3713,7 +3974,8 @@ class CallsPanel(_DashPanel):
         top = QHBoxLayout(); top.setSpacing(6)
         self._dot_box = QComboBox()
         top.addWidget(self._dot_box, stretch=1)
-        self._start_btn = self._btn("📞 START CALL", self._start, True)
+        self._start_btn = self._btn("  START CALL", self._start, True)
+        set_icon(self._start_btn, "phone", "#ffffff", 13)
         top.addWidget(self._start_btn)
         self._end_btn = self._btn("⏹ END", self._end)
         self._end_btn.setEnabled(False)
@@ -3883,7 +4145,9 @@ class AgendaPanel(_DashPanel):
         tkl.addWidget(self._task_list, stretch=1)
         row = QHBoxLayout(); row.setSpacing(6)
         row.addWidget(self._btn("＋ NEW TASK", self._new_task, True))
-        row.addWidget(self._btn("⛏ MINE SKILLS", self._mine))
+        _msk = self._btn("  MINE SKILLS", self._mine)
+        set_icon(_msk, "zap", C.TEXT_MED, 13)
+        row.addWidget(_msk)
         row.addStretch()
         tkl.addLayout(row)
         self._runs = QTextEdit(); self._runs.setReadOnly(True)
@@ -4129,6 +4393,549 @@ def _html_esc(s: str) -> str:
             .replace(">", "&gt;"))
 
 
+# ── toast layer ──────────────────────────────────────────────────────────────
+class _ToastLayer(QWidget):
+    """Floating top-right status chips — every action outcome lands here, so
+    nobody has to hunt the activity log for whether something worked."""
+
+    _inst: "_ToastLayer | None" = None
+
+    @classmethod
+    def get(cls, mw) -> "_ToastLayer":
+        if cls._inst is None or cls._inst.parent() is not mw:
+            cls._inst = cls(mw)
+        inst = cls._inst
+        inst.setGeometry(0, 64, max(mw.width() - 8, 200),
+                         max(mw.height() - 64, 80))
+        inst.show()
+        inst.raise_()
+        return inst
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self.mw = mw
+        self.setObjectName("ToastLayer")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("background: transparent; border: none;")
+        self._v = QVBoxLayout(self)
+        self._v.setContentsMargins(0, 0, 16, 0)
+        self._v.setSpacing(6)
+        self._v.addStretch()
+
+    def resizeEvent(self, e):
+        try:
+            self.setGeometry(0, 64, max(self.mw.width() - 8, 200),
+                             max(self.mw.height() - 64, 80))
+        except Exception:                               # noqa: BLE001
+            pass
+        super().resizeEvent(e)
+
+    def push(self, msg: str, kind: str = "info", ms: int = 3200) -> None:
+        col = {"ok": C.GREEN, "err": C.RED,
+               "warn": C.ACC}.get(kind, C.PRI)
+        ico = {"ok": "check", "err": "alert",
+               "warn": "alert"}.get(kind, "info")
+        chip = QWidget()
+        chip.setStyleSheet(
+            f"background: {C.PANEL2}; border: 1px solid {col};"
+            f" border-radius: 9px;")
+        hl = QHBoxLayout(chip)
+        hl.setContentsMargins(11, 6, 13, 6)
+        hl.setSpacing(7)
+        hl.addWidget(_icon_label(ico, col, 13))
+        tx = QLabel(msg)
+        tx.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        tx.setStyleSheet(f"color: {col}; background: transparent;")
+        hl.addWidget(tx)
+        chip.adjustSize()
+        chip.setFixedHeight(30)
+        self._v.insertWidget(0, chip)
+        chip.show()
+        QTimer.singleShot(ms, lambda c=chip: self._drop(c))
+        # keep at most 4 visible
+        while self._v.count() > 5:
+            w = self._v.itemAt(0).widget()
+            if w is None:
+                break
+            self._v.removeWidget(w)
+            w.deleteLater()
+
+    def _drop(self, chip) -> None:
+        try:
+            self._v.removeWidget(chip)
+            chip.deleteLater()
+        except Exception:                               # noqa: BLE001
+            pass
+
+
+# ── studio (display | scan | 3d | web — one section, four surfaces) ─────────
+class StudioPanel(QWidget):
+    """The dashboard's STUDIO surface, desktop edition.
+
+    Every show_content() funnel lands here, classified by title prefix —
+    DISPLAY charts, SCAN OCR, 3D models, WEB scrapes each keep their own
+    last-rendered content. Rail keys display/scan/3d/web all switch into
+    this one section on the right surface; content that arrives while the
+    user is elsewhere lights the rail dot, exactly like the web UI.
+    """
+
+    SURFACES = ("display", "scan", "3d", "web")
+    _TITLES = {"display": ("DISPLAY", "charts · diagrams · reports",
+                           "layout"),
+               "scan":    ("SCAN", "OCR · regions · screenshots",
+                           "search"),
+               "3d":      ("3D", "models · geometric specs",
+                           "cube"),
+               "web":     ("WEB", "scrapes · search · structured pages",
+                           "globe")}
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self.mw = mw
+        self._content: dict[str, tuple[str, str, str]] = {}
+        self._surface = "display"
+        try:
+            from dashboard.surface import classify_surface
+            self._classify = classify_surface
+        except Exception:                               # noqa: BLE001
+            def _classify(title: str) -> str:
+                return "display"
+            self._classify = _classify
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(8)
+
+        # header: title + subtitle + float-window action
+        hr = QHBoxLayout()
+        hr.setSpacing(8)
+        self._h_ico = _icon_label("layout", C.PRI, 15)
+        hr.addWidget(self._h_ico)
+        self._h_title = QLabel("DISPLAY")
+        self._h_title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self._h_title.setStyleSheet(
+            f"color: {C.WHITE}; background: transparent;")
+        hr.addWidget(self._h_title)
+        self._h_sub = QLabel("charts · diagrams · reports")
+        self._h_sub.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        hr.addWidget(self._h_sub)
+        hr.addStretch()
+        float_btn = QPushButton()
+        float_btn.setObjectName("ghost")
+        float_btn.setFixedHeight(26)
+        float_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        float_btn.setToolTip("Open the floating display window too")
+        set_icon(float_btn, "external", C.TEXT_MED, 13)
+        float_btn.clicked.connect(lambda: self.mw.toggle_display())
+        hr.addWidget(float_btn)
+        root.addLayout(hr)
+
+        # surface tab chips
+        tabs = QHBoxLayout()
+        tabs.setSpacing(6)
+        self._tab_btns: dict[str, QPushButton] = {}
+        for s in self.SURFACES:
+            b = QPushButton(f"  {self._TITLES[s][0]}")
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setFixedHeight(26)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            set_icon(b, self._TITLES[s][2], C.TEXT_MED, 13)
+            b.clicked.connect(lambda _=False, k=s: self.show_surface(k))
+            self._tab_btns[s] = b
+            tabs.addWidget(b)
+        tabs.addStretch()
+        root.addLayout(tabs)
+
+        # content card
+        card = QWidget()
+        card.setStyleSheet(
+            f"background: {C.PANEL}; border: 1px solid {C.BORDER};"
+            f" border-radius: 10px;")
+        cv = QVBoxLayout(card)
+        cv.setContentsMargins(14, 12, 14, 12)
+        cv.setSpacing(6)
+        self._c_title = QLabel("")
+        self._c_title.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._c_title.setStyleSheet(
+            f"color: {C.PRI}; background: transparent;")
+        self._c_title.setWordWrap(True)
+        cv.addWidget(self._c_title)
+        self._c_ts = QLabel("")
+        self._c_ts.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        cv.addWidget(self._c_ts)
+        self._c_view = QTextEdit()
+        self._c_view.setReadOnly(True)
+        self._c_view.setStyleSheet(
+            f"background: {C.BG}; border: 1px solid {C.BORDER};"
+            f" border-radius: 8px; padding: 8px;"
+            f" font-family: 'Courier New', monospace; font-size: 12px;")
+        cv.addWidget(self._c_view, stretch=1)
+        self._c_empty = QLabel()
+        self._c_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._c_empty.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; font-size: 13px;")
+        cv.addWidget(self._c_empty, stretch=1)
+        root.addWidget(card, stretch=1)
+        self._card = card
+        self.show_surface("display")
+
+    # ── surface routing ──────────────────────────────────────────────────────
+    def show_surface(self, surface: str) -> None:
+        if surface not in self.SURFACES:
+            surface = "display"
+        self._surface = surface
+        t, sub, ico = self._TITLES[surface]
+        self._h_title.setText(t)
+        self._h_sub.setText(sub)
+        self._h_ico.setPixmap(icon_pm(ico, C.PRI, 15))
+        for k, b in self._tab_btns.items():
+            b.setChecked(k == surface)
+        self._render()
+
+    def receive(self, title: str, text: str) -> None:
+        """A show_content() funnel arrived — store it on its surface."""
+        surface = str(self._classify(title) or "display")
+        self._content[surface] = (str(title or ""), str(text or ""),
+                                  time.strftime("%H:%M:%S"))
+        if surface == self._surface and self.isVisible():
+            self._render()
+        else:
+            # has-new dot on that rail key (dashboard parity)
+            try:
+                bd = self.mw._rail_badges.get(surface)
+                if bd is not None and not self.mw._rail_btns[surface].isChecked():
+                    bd.setText("\u25cf")
+                    bd.show()
+            except Exception:                           # noqa: BLE001
+                pass
+
+    def _render(self) -> None:
+        item = self._content.get(self._surface)
+        has = item is not None
+        self._c_view.setVisible(has)
+        self._c_title.setVisible(has)
+        self._c_ts.setVisible(has)
+        self._c_empty.setVisible(not has)
+        if has:
+            t, text, ts = item
+            self._c_title.setText(t)
+            self._c_ts.setText(f"updated {ts}")
+            self._c_view.setPlainText(text)
+            self._c_view.moveCursor(
+                self._c_view.textCursor().MoveOperation.Start)
+        else:
+            t, sub, ico = self._TITLES[self._surface]
+            self._c_empty.setText(
+                f"Nothing on {t} yet\u2014 tools render here: "
+                f"{sub}.")
+        try:
+            self._card.adjustSize()
+        except Exception:                               # noqa: BLE001
+            pass
+
+    def refresh(self) -> None:
+        self._render()
+
+
+# ── memory (owner preferences) ──────────────────────────────────────────────
+class MemoryPanel(_DashPanel):
+    """JARVIS's owner memory — list / set / delete the preferences the brain
+    injects into every prompt. Same loopback API the web dashboard uses."""
+
+    SEC = "memory"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self._header("MEMORY", "injected into every prompt",
+                     refresh=self.refresh)
+        self._all: list[dict] = []
+
+        tools = QHBoxLayout()
+        tools.setSpacing(6)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("filter keys / values\u2026")
+        self._search.textChanged.connect(self._render)
+        tools.addWidget(self._search, stretch=1)
+        new_btn = self._btn("  NEW", self._new_pref, primary=True)
+        tools.addWidget(new_btn)
+        self._root.addLayout(tools)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent;")
+        self._list = QWidget()
+        self._list.setStyleSheet("background: transparent;")
+        self._list_lay = QVBoxLayout(self._list)
+        self._list_lay.setContentsMargins(0, 0, 4, 0)
+        self._list_lay.setSpacing(6)
+        self._list_lay.addStretch()
+        scroll.setWidget(self._list)
+        self._root.addWidget(scroll, stretch=1)
+
+    # ── data ─────────────────────────────────────────────────────────────────
+    def refresh(self) -> None:
+        if not self.api.configured():
+            self._note("dashboard not wired"); return
+        self.api.get(f"{self.SEC}:list", "/api/memory")
+
+    def _on_done(self, key: str, data) -> None:
+        if key == f"{self.SEC}:list" and isinstance(data, list):
+            self._all = data
+            self._render()
+        elif key.startswith(f"{self.SEC}:put"):
+            self.toast("Memory saved", "ok")
+            self.refresh()
+        elif key.startswith(f"{self.SEC}:del"):
+            self.toast("Memory entry removed", "ok")
+            self.refresh()
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if key.startswith(self.SEC + ":"):
+            self._note(msg, error=True)
+            if "put" in key or "del" in key:
+                self.mw.toast(msg, "err")
+
+    def _render(self) -> None:
+        needle = (self._search.text() or "").strip().lower()
+        while self._list_lay.count() > 1:
+            it = self._list_lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        shown = 0
+        for pref in self._all:
+            key = str(pref.get("key") or "")
+            val = str(pref.get("value") or "")
+            if needle and needle not in key.lower() and needle not in val.lower():
+                continue
+            shown += 1
+            pid = pref.get("id")
+            card = QWidget()
+            card.setStyleSheet(
+                f"background: {C.PANEL}; border: 1px solid {C.BORDER};"
+                f" border-radius: 8px;")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(11, 7, 11, 7)
+            cl.setSpacing(3)
+            top = QHBoxLayout(); top.setSpacing(6)
+            k_lbl = QLabel(key)
+            k_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            k_lbl.setStyleSheet(
+                f"color: {C.PRI}; background: transparent;")
+            top.addWidget(k_lbl, stretch=1)
+            top.addWidget(self._btn("EDIT",
+                                    lambda _=False, pr=pref: self._edit(pr),
+                                    height=22))
+            top.addWidget(self._btn("DEL",
+                                    lambda _=False, i=pid: self._delete(i),
+                                    height=22))
+            cl.addLayout(top)
+            v_lbl = QLabel(val)
+            v_lbl.setWordWrap(True)
+            v_lbl.setStyleSheet(
+                f"color: {C.TEXT_MED}; background: transparent;")
+            cl.addWidget(v_lbl)
+            self._list_lay.insertWidget(self._list_lay.count() - 1, card)
+        if not shown:
+            note = self._empty(
+                "No memories yet \u2014 the owner's preferences land here "
+                "and are injected into every Dot prompt.")
+            self._list_lay.insertWidget(0, note)
+
+    # ── actions ──────────────────────────────────────────────────────────────
+    def _new_pref(self) -> None:
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        k = prompt_jarvis_text(self, "New memory", "Key  (what to remember):")
+        if not k:
+            return
+        v = prompt_jarvis_text(self, "New memory",
+                               f"Value for  {k} :", "")
+        if v is None:
+            return
+        self.api.put(f"{self.SEC}:put:{int(time.time()*1000)}",
+                     "/api/memory", {"key": k, "value": v, "allowed": "*"})
+
+    def _edit(self, pref: dict) -> None:
+        key = str(pref.get("key") or "")
+        v = prompt_jarvis_text(self, f"Edit  {key}",
+                               "Value:", str(pref.get("value") or ""))
+        if v is None:
+            return
+        self.api.put(f"{self.SEC}:put:{int(time.time()*1000)}",
+                     "/api/memory", {"key": key, "value": v,
+                                     "allowed": pref.get("allowed", "*")})
+
+    def _delete(self, pid) -> None:
+        if pid is None:
+            return
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            ans = QMessageBox.question(
+                self, "Delete memory",
+                "Remove this entry from the owner memory?")
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        except Exception:                               # noqa: BLE001
+            pass
+        self.api.delete(f"{self.SEC}:del:{pid}",
+                        f"/api/memory/{int(pid)}")
+
+    def toast(self, msg: str, kind: str = "info") -> None:
+        self.mw.toast(msg, kind)
+
+
+# ── skills (mined automations) ──────────────────────────────────────────────
+class SkillsPanel(_DashPanel):
+    """Skill registry — mine new drafts from what JARVIS has learned, publish
+    the good ones, archive the stale. Live dashboard data."""
+
+    SEC = "skills"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self._header("SKILLS", "mine \u00b7 publish \u00b7 archive",
+                     refresh=self.refresh)
+        self._all: list[dict] = []
+        self._filter = "any"
+
+        tools = QHBoxLayout()
+        tools.setSpacing(6)
+        for f, lbl in (("any", "ALL"), ("draft", "DRAFT"),
+                       ("published", "LIVE"), ("archived", "ARCH")):
+            b = QPushButton(lbl)
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setFixedHeight(24)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, key=f: self._set_filter(key))
+            b.setChecked(f == self._filter)
+            self._filter_btns = getattr(self, "_filter_btns", {})
+            self._filter_btns[f] = b
+            tools.addWidget(b)
+        tools.addStretch()
+        mine_btn = self._btn("  MINE NEW", self._mine, primary=True)
+        tools.addWidget(mine_btn)
+        self._root.addLayout(tools)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent;")
+        self._list = QWidget()
+        self._list.setStyleSheet("background: transparent;")
+        self._list_lay = QVBoxLayout(self._list)
+        self._list_lay.setContentsMargins(0, 0, 4, 0)
+        self._list_lay.setSpacing(6)
+        self._list_lay.addStretch()
+        scroll.setWidget(self._list)
+        self._root.addWidget(scroll, stretch=1)
+
+    def _set_filter(self, key: str) -> None:
+        self._filter = key
+        for k, b in self._filter_btns.items():
+            b.setChecked(k == key)
+        self.refresh()
+
+    def refresh(self) -> None:
+        if not self.api.configured():
+            self._note("dashboard not wired"); return
+        q = "" if self._filter == "any" else f"?status={self._filter}"
+        self.api.get(f"{self.SEC}:list", f"/api/skills{q}")
+
+    def _on_done(self, key: str, data) -> None:
+        if key == f"{self.SEC}:list" and isinstance(data, list):
+            self._all = data
+            self._render()
+        elif key.startswith(f"{self.SEC}:mine"):
+            n = int((data or {}).get("created", 0)) if isinstance(data, dict) else 0
+            self.mw.toast(f"Mined {n} new draft skill" + ("s" if n != 1 else ""),
+                          "ok")
+            self.refresh()
+        elif key.startswith(f"{self.SEC}:act"):
+            self.mw.toast("Skill updated", "ok")
+            self.refresh()
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if key.startswith(self.SEC + ":"):
+            self._note(msg, error=True)
+            if "mine" in key or "act" in key:
+                self.mw.toast(msg, "err")
+
+    def _render(self) -> None:
+        while self._list_lay.count() > 1:
+            it = self._list_lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        if not self._all:
+            self._list_lay.insertWidget(0, self._empty(
+                "No skills yet \u2014 MINE NEW learns from completed runs, "
+                "drafts land here for review."))
+            return
+        for i, sk in enumerate(self._all):
+            sid = sk.get("id")
+            title = str(sk.get("title") or f"skill #{sid}")
+            status = str(sk.get("status") or "draft")
+            card = QWidget()
+            card.setStyleSheet(
+                f"background: {C.PANEL}; border: 1px solid {C.BORDER};"
+                f" border-radius: 8px;")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(11, 7, 11, 7)
+            cl.setSpacing(3)
+            top = QHBoxLayout(); top.setSpacing(6)
+            t_lbl = QLabel(title)
+            t_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            t_lbl.setStyleSheet(f"color: {C.WHITE}; background: transparent;")
+            t_lbl.setWordWrap(True)
+            top.addWidget(t_lbl, stretch=1)
+            chip = QLabel(f" {status.upper()} ")
+            chip.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            scol = {"published": C.GREEN, "archived": C.TEXT_DIM}.get(
+                status, C.ACC)
+            chip.setStyleSheet(
+                f"color: {scol}; background: transparent;"
+                f" border: 1px solid {scol}; border-radius: 8px;"
+                f" padding: 1px 7px;")
+            top.addWidget(chip)
+            if status == "draft":
+                top.addWidget(self._btn("PUBLISH",
+                                        lambda _=False, i=sid: self._act(i, "publish"),
+                                        primary=True, height=22))
+            if status != "archived":
+                top.addWidget(self._btn("ARCHIVE",
+                                        lambda _=False, i=sid: self._act(i, "archive"),
+                                        height=22))
+            elif status == "archived":
+                top.addWidget(self._btn("RESTORE",
+                                        lambda _=False, i=sid: self._act(i, "publish"),
+                                        height=22))
+            cl.addLayout(top)
+            note = str(sk.get("source_note") or "")
+            if note:
+                n_lbl = QLabel(note)
+                n_lbl.setWordWrap(True)
+                n_lbl.setStyleSheet(
+                    f"color: {C.TEXT_DIM}; background: transparent;")
+                cl.addWidget(n_lbl)
+            self._list_lay.insertWidget(self._list_lay.count() - 1, card)
+
+    def _mine(self) -> None:
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        self.api.post(f"{self.SEC}:mine:{int(time.time()*1000)}",
+                      "/api/skills/mine", {})
+
+    def _act(self, sid, action: str) -> None:
+        if sid is None or not self.api.configured():
+            return
+        self.api.post(f"{self.SEC}:act:{action}:{sid}",
+                      f"/api/skills/{int(sid)}/{action}", {})
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -4334,7 +5141,8 @@ class MainWindow(QMainWindow):
         # Muted is the default and the button says so, because a soundtrack
         # talking over JARVIS is the one way this feature could make the
         # assistant worse rather than better.
-        self._video_mute_btn = _vid_btn("🔇  SOUND OFF")
+        self._video_mute_btn = _vid_btn("SOUND OFF")
+        set_icon(self._video_mute_btn, "volume-x", C.TEXT_MED, 13)
         self._video_mute_btn.clicked.connect(self._toggle_video_mute)
         _vid_hdr.addWidget(self._video_mute_btn)
 
@@ -4443,18 +5251,24 @@ class MainWindow(QMainWindow):
         # System monitor page (the old left panel, promoted to a section).
         self._section_stack.addWidget(self._build_monitor_page())  # index 1
 
-        # Dashboard workspace merged in-process (Spaces/Agents/…/Agenda).
+        # Dashboard workspace merged in-process (Spaces/Agents/…/Agenda)
+        # + the new MEMORY / SKILLS registries + the STUDIO surface.
         self._spaces_panel = SpacesPanel(self)
         self._agents_panel = AgentsPanel(self)
         self._computers_panel = ComputersPanel(self)
         self._calls_panel = CallsPanel(self)
         self._agenda_panel = AgendaPanel(self)
+        self._memory_panel = MemoryPanel(self)
+        self._skills_panel = SkillsPanel(self)
+        self._studio_panel = StudioPanel(self)
         for _p in (self._spaces_panel, self._agents_panel,
                    self._computers_panel, self._calls_panel,
-                   self._agenda_panel):
+                   self._agenda_panel, self._memory_panel,
+                   self._skills_panel, self._studio_panel):
             self._section_stack.addWidget(_p)
         self._section_names = ["chat", "monitor", "spaces", "agents",
-                               "computers", "calls", "agenda"]
+                               "computers", "calls", "agenda",
+                               "memory", "skills", "studio"]
         self._section_index = {n: i for i, n in enumerate(self._section_names)}
         self._section_stack.setCurrentIndex(0)
 
@@ -4728,7 +5542,7 @@ class MainWindow(QMainWindow):
     def _sync_video_mute_btn(self) -> None:
         out = self._video_sound_out if self._video_split else self._video_audio
         muted = bool(out and out.isMuted())
-        self._video_mute_btn.setText("🔇  SOUND OFF" if muted else "🔊  SOUND ON")
+        self._video_mute_btn.setText("SOUND OFF" if muted else "SOUND ON")
 
     def _toggle_video_mute(self) -> None:
         out = self._video_sound_out if self._video_split else self._video_audio
@@ -4850,7 +5664,7 @@ class MainWindow(QMainWindow):
             )
             return True
         except Exception as e:
-            print(f"[Shortcut] ⚠️  Icon generation failed: {e}")
+            print(f"[Shortcut] icon generation failed: {e}")
             return False
 
     @staticmethod
@@ -5103,6 +5917,13 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        try:
+            tl = _ToastLayer._inst
+            if tl is not None and tl.parent() is self:
+                tl.setGeometry(0, 64, max(self.width() - 8, 200),
+                               max(self.height() - 64, 80))
+        except Exception:                               # noqa: BLE001
+            pass
         cw = self.centralWidget()
         if self._overlay and self._overlay.isVisible():
             ow, oh = 460, 390
@@ -5195,93 +6016,93 @@ class MainWindow(QMainWindow):
 
 
     def _build_header(self) -> QWidget:
+        """Top chrome — version chip, icon drawers, state pill, centred brand,
+        clock. Every symbol is a vector icon (no emoji glyphs)."""
         w = QWidget()
-        w.setFixedHeight(54)
-        w.setStyleSheet(f"background: {C.DARK}; border-bottom: 1px solid {C.BORDER_B};")
+        w.setFixedHeight(56)
+        w.setStyleSheet(
+            f"background: {C.DARK};"
+            f" border-bottom: 1px solid {C.BORDER_B};")
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setContentsMargins(14, 0, 14, 0)
 
-        def _badge(txt, color=C.TEXT_MED):
-            l = QLabel(txt)
-            l.setFont(QFont("Courier New", 8))
-            l.setStyleSheet(f"color: {color}; background: transparent;")
-            return l
-
-        lay.addWidget(_badge(APP_VERSION, C.PRI_DIM))
+        ver = QLabel(APP_VERSION)
+        ver.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        ver.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PRI_GHO};"
+            f" border: 1px solid {C.PRI_DIM}; border-radius: 9px;"
+            f" padding: 3px 9px;")
+        lay.addWidget(ver)
         lay.addSpacing(8)
-        self._drawer_btn = QPushButton("⚙")
-        self._drawer_btn.setFixedSize(26, 26)
-        self._drawer_btn.setFont(QFont("Courier New", 11))
-        self._drawer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._drawer_btn.setToolTip("Settings & Controls")
-        self._drawer_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {C.TEXT_DIM};
-                border: 1px solid {C.BORDER}; border-radius: 4px;
-            }}
-            QPushButton:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM}; }}
-            QPushButton:checked {{ color: {C.PRI}; border-color: {C.PRI}; background: {C.PRI_GHO}; }}
-        """)
-        self._drawer_btn.setCheckable(True)
-        self._drawer_btn.setToolTip("Setup — things you set once")
+
+        def _icon_btn(icon: str, tip: str) -> QPushButton:
+            b = QPushButton()
+            b.setObjectName("iconBtn")
+            b.setFixedSize(28, 28)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            set_icon(b, icon, C.TEXT_DIM, 15)
+            return b
+
+        # Setup drawer (rarely touched) vs controls drawer (everyday) —
+        # split by how often a thing is touched; icon-led now.
+        self._drawer_btn = _icon_btn("settings", "Setup — things you set once")
         self._drawer_btn.clicked.connect(self._toggle_drawer)
         lay.addWidget(self._drawer_btn)
 
-        # A SECOND drawer, and the split is by how often a thing is touched.
-        #
-        # One panel held twelve buttons: the ones you press once when you set
-        # the assistant up sitting next to the ones you flick on and off every
-        # day. Separating them by that — setup behind ⚙, everyday behind 🎛 —
-        # is what makes each list short enough to read at a glance.
-        self._ctrl_btn = QPushButton("🎛")
-        self._ctrl_btn.setFixedSize(26, 26)
-        self._ctrl_btn.setFont(QFont("Courier New", 11))
-        self._ctrl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._ctrl_btn.setToolTip("Controls — the everyday switches")
-        self._ctrl_btn.setStyleSheet(self._drawer_btn.styleSheet())
-        self._ctrl_btn.setCheckable(True)
+        self._ctrl_btn = _icon_btn("sliders", "Controls — the everyday switches")
         self._ctrl_btn.clicked.connect(self._toggle_controls)
         lay.addSpacing(4)
         lay.addWidget(self._ctrl_btn)
 
-        # Live state pill — the dashboard's header pill, desktop edition.
-        self._state_pill = QLabel("● SLEEPING")
-        self._state_pill.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        # Live state pill — icon + text, tinted per state.
+        self._state_icon = _icon_label("power", C.TEXT_DIM, 12)
+        lay.addSpacing(10)
+        lay.addWidget(self._state_icon)
+        self._state_pill = QLabel("SLEEPING")
+        self._state_pill.setObjectName("statePill")
+        self._state_pill.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self._state_pill.setStyleSheet(
             f"color: {C.TEXT_DIM}; background: {C.PANEL};"
             f" border: 1px solid {C.BORDER}; border-radius: 10px;"
-            f" padding: 3px 10px;")
-        lay.addSpacing(8)
+            f" padding: 4px 11px;")
         lay.addWidget(self._state_pill)
         lay.addStretch()
 
-        mid = QVBoxLayout(); mid.setSpacing(1)
+        # Centred brand — light wordmark, accent subtitle.
+        mid = QVBoxLayout()
+        mid.setSpacing(1)
         _disp = self._assistant_name.upper()
         self._title_lbl = QLabel(_disp)
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._title_lbl.setFont(QFont("Courier New", 17, QFont.Weight.Bold))
-        self._title_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self._title_lbl.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        self._title_lbl.setStyleSheet(
+            f"color: {C.WHITE}; background: transparent; letter-spacing: 6px;")
         mid.addWidget(self._title_lbl)
-        _sub_text = ("A Friendly Assistant"
+        _sub_text = ("A  FRIENDLY  ASSISTANT"
                      if _disp in ("JARVIS", "J.A.R.V.I.S")
-                     else "Personal AI Assistant")
+                     else "PERSONAL  AI  ASSISTANT")
         self._sub_lbl = QLabel(_sub_text)
         self._sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sub_lbl.setFont(QFont("Courier New", 7))
-        self._sub_lbl.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
+        self._sub_lbl.setFont(QFont("Segoe UI", 7))
+        self._sub_lbl.setStyleSheet(
+            f"color: {C.PRI_DIM}; background: transparent;")
         mid.addWidget(self._sub_lbl)
         lay.addLayout(mid)
         lay.addStretch()
 
-        right_col = QVBoxLayout(); right_col.setSpacing(2)
+        right_col = QVBoxLayout()
+        right_col.setSpacing(2)
         self._clock_lbl = QLabel("00:00:00")
         self._clock_lbl.setFont(QFont("Courier New", 14, QFont.Weight.Bold))
         self._clock_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         self._clock_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._clock_lbl)
         self._date_lbl = QLabel("")
-        self._date_lbl.setFont(QFont("Courier New", 7))
-        self._date_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        self._date_lbl.setFont(QFont("Segoe UI", 7))
+        self._date_lbl.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
         self._date_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._date_lbl)
         lay.addLayout(right_col)
@@ -5292,78 +6113,98 @@ class MainWindow(QMainWindow):
         self._date_lbl.setText(time.strftime("%a %d %b %Y"))
 
     def _build_rail(self) -> QWidget:
-        """Left navigation rail — dashboard rail language, desktop edition."""
+        """Left navigation rail v2 — icon rows, three groups, live badges.
+
+        CORE      chat · monitor
+        WORKSPACE spaces · agents · computers · calls · agenda · memory · skills
+        STUDIO    display · scan · 3d · web   (one studio section, 4 surfaces)
+        """
         w = QWidget()
         w.setFixedWidth(_RAIL_W)
-        w.setStyleSheet(f"background: {C.DARK}; border-right: 1px solid {C.BORDER};")
+        w.setStyleSheet(
+            f"background: {C.DARK}; border-right: 1px solid {C.BORDER};")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 10, 8, 10)
-        lay.setSpacing(4)
+        lay.setContentsMargins(10, 12, 10, 12)
+        lay.setSpacing(3)
 
-        def _sec(txt):
-            l = QLabel(f"◈ {txt}")
-            l.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-            l.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;"
-                            f"letter-spacing: 2px; padding-top: 6px;")
+        def _sec(txt: str):
+            l = QLabel(f"   {txt}")
+            l.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            l.setStyleSheet(
+                f"color: {C.TEXT_DIM}; background: transparent;"
+                f" padding-top: 9px; padding-bottom: 2px;")
             lay.addWidget(l)
 
-        def _btn(key, text, handler):
-            b = QPushButton(text)
+        def _btn(key: str, text: str, icon: str):
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(3)
+            b = QPushButton(f"  {text}")
+            b.setObjectName("rail")
             b.setCheckable(True)
-            b.setFixedHeight(30)
+            b.setFixedHeight(32)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-            b.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; color: {C.TEXT_DIM};
-                    border: 1px solid transparent; border-radius: 8px;
-                    text-align: left; padding: 0 10px; letter-spacing: 1px;
-                }}
-                QPushButton:hover {{ background: {C.PANEL};
-                                     color: {C.TEXT}; }}
-                QPushButton:checked {{
-                    background: {C.PRI_GHO}; color: {C.PRI};
-                    border: 1px solid {C.PRI_DIM};
-                }}
-            """)
+            b.setProperty("rail_icon", icon)
+            set_icon(b, icon, C.TEXT_MED, 15)
             b.clicked.connect(lambda _=False, k=key: self._switch_section(k))
+            rl.addWidget(b, stretch=1)
+            badge = QLabel("")
+            badge.setFixedHeight(18)
+            badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setStyleSheet(
+                f"color: {C.WHITE}; background: {C.PRI};"
+                f" border-radius: 9px; padding: 0 6px; min-width: 14px;")
+            badge.hide()
+            rl.addWidget(badge)
             self._rail_btns[key] = b
-            lay.addWidget(b)
-            return b
+            self._rail_badges[key] = badge
+            lay.addWidget(row)
 
         self._rail_btns: dict[str, QPushButton] = {}
         self._rail_badges: dict[str, QLabel] = {}
 
-        _sec("HUD")
-        _btn("chat",     "💬  CHAT",     None)
-        _btn("display",  "🖥  DISPLAY",  None)
-        _btn("monitor",  "📊  MONITOR",  None)
+        _sec("CORE")
+        _btn("chat",     "CHAT",     "chat")
+        _btn("monitor",  "MONITOR",  "monitor")
         _sec("WORKSPACE")
-        _btn("spaces",   "📄  SPACES",   None)
-        _btn("agents",    "🤖  AGENTS",    None)
-        _btn("computers", "🖥  COMPUTERS", None)
-        _btn("calls",     "📞  CALLS",     None)
-        _btn("agenda",    "⏰  AGENDA",    None)
+        _btn("spaces",    "SPACES",    "folder")
+        _btn("agents",    "AGENTS",    "bot")
+        _btn("computers", "COMPUTERS", "server")
+        _btn("calls",     "CALLS",     "phone")
+        _btn("agenda",    "AGENDA",    "checks")
+        _btn("memory",    "MEMORY",    "database")
+        _btn("skills",    "SKILLS",    "zap")
+        _sec("STUDIO")
+        _btn("display", "DISPLAY", "layout")
+        _btn("scan",    "SCAN",    "search")
+        _btn("3d",      "3D",      "cube")
+        _btn("web",     "WEB",     "globe")
 
         lay.addStretch()
 
-        for txt, col in [
-            ("AI CORE\nACTIVE", C.GREEN),
-            (f"PROTOCOL\n{APP_PROTOCOL}", C.TEXT_DIM),
-        ]:
-            lbl = QLabel(txt)
-            lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(
-                f"color: {col}; background: {C.PANEL2};"
-                f"border: 1px solid {C.BORDER_A}; border-radius: 6px;"
-                f"padding: 5px;"
-            )
-            lay.addWidget(lbl)
+        # status tiles bottom
+        self._rail_core_lbl = QLabel("AI CORE\nACTIVE")
+        self._rail_core_lbl.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        self._rail_core_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._rail_core_lbl.setStyleSheet(
+            f"color: {C.GREEN}; background: {C.PANEL2};"
+            f" border: 1px solid {C.BORDER_A}; border-radius: 8px;"
+            f" padding: 6px;")
+        lay.addWidget(self._rail_core_lbl)
+        proto = QLabel(f"PROTOCOL\n{APP_PROTOCOL}")
+        proto.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        proto.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        proto.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: {C.PANEL2};"
+            f" border: 1px solid {C.BORDER_A}; border-radius: 8px;"
+            f" padding: 6px;")
+        lay.addWidget(proto)
 
         self._rail_btns["chat"].setChecked(True)
 
-        # pending badge poller — one heartbeat keeps the rail honest
+        # badge heartbeat — one poller keeps the rail honest (pending count)
         self._badge_tmr = QTimer(self)
         self._badge_tmr.setInterval(45000)
         self._badge_tmr.timeout.connect(self.refresh_pending_badge)
@@ -5371,23 +6212,49 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(2500, self.refresh_pending_badge)
         return w
 
+    def _sync_rail_icons(self, checked: str) -> None:
+        """Recolour row icons: white on the active row, muted elsewhere."""
+        for key, b in self._rail_btns.items():
+            try:
+                set_icon(b, b.property("rail_icon") or "grid",
+                         C.WHITE if key == checked else C.TEXT_MED, 15)
+            except Exception:                          # noqa: BLE001
+                pass
+
+    # rail keys that all open the ONE studio section on a given surface
+    _STUDIO_KEYS = frozenset({"display", "scan", "3d", "web"})
+
     def _switch_section(self, name: str) -> None:
-        """Rail navigation. 'display' opens the display window WITHOUT
-        changing the current section (it is a window, not a page)."""
+        """Rail navigation. Studio keys (display/scan/3d/web) all land on the
+        studio section with that surface active — dashboard parity."""
         try:
-            if name == "display":
-                self.toggle_display()
-                return
+            surface = None
+            if name in self._STUDIO_KEYS:
+                surface = name
+                name = "studio"
             idx = self._section_index.get(name, 0)
             self._section_stack.setCurrentIndex(idx)
             for k, b in self._rail_btns.items():
-                b.setChecked(k == name)
-            # The log/composer column belongs to the assistant conversation —
-            # workspace sections take the full width (matching the web UI).
+                b.setChecked(k == (surface or name))
+            self._sync_rail_icons(surface or name)
+            # the log/composer column belongs to the assistant conversation —
+            # workspace/studio sections take the full width (web UI parity).
             try:
-                self._right_panel.setVisible(name in ("chat", "monitor"))
+                self._right_panel.setVisible(
+                    (surface or name) in ("chat", "monitor"))
             except Exception:
                 pass
+            # studio: show the requested surface, drop its has-new dot
+            if name == "studio":
+                st = getattr(self, "_studio_panel", None)
+                if st is not None and surface:
+                    st.show_surface(surface)
+                try:
+                    bd = self._rail_badges.get(surface or "")
+                    if bd is not None:
+                        bd.hide()
+                except Exception:
+                    pass
             # refresh the section you landed on (cheap GETs, thread-pool)
             page = self._section_stack.currentWidget()
             if hasattr(page, "refresh"):
@@ -5408,11 +6275,21 @@ class MainWindow(QMainWindow):
         if key != "hud:pending" or not isinstance(data, list):
             return
         self._pending_n = len(data)
-        btn = self._rail_btns.get("spaces")
-        if btn is not None:
-            btn.setText("📄  SPACES" + (f"  ({self._pending_n})"
-                                        if self._pending_n else ""))
-            btn.setStyleSheet(btn.styleSheet())          # repaint text
+        badge = self._rail_badges.get("spaces")
+        if badge is not None:
+            if self._pending_n:
+                badge.setText(str(min(self._pending_n, 99)))
+                badge.show()
+            else:
+                badge.hide()
+
+    def toast(self, msg: str, kind: str = "info", ms: int = 3200) -> None:
+        """Floating status chip, top-right — action results land here so the
+        user never has to hunt the activity log for an outcome."""
+        try:
+            _ToastLayer.get(self).push(str(msg or ""), kind, ms)
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _build_monitor_page(self) -> QWidget:
         """System monitor — the old left panel, promoted to a full section."""
@@ -5527,7 +6404,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(_sec("COMMAND INPUT"))
         lay.addLayout(self._build_input_row())
 
-        self._interrupt_btn = QPushButton("✋  INTERRUPT  [ESC]")
+        self._interrupt_btn = QPushButton("  INTERRUPT  [ESC]")
+        set_icon(self._interrupt_btn, "x", C.RED, 13)
         self._interrupt_btn.setFixedHeight(34)
         self._interrupt_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self._interrupt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5546,7 +6424,8 @@ class MainWindow(QMainWindow):
         self._interrupt_btn.clicked.connect(self._do_interrupt)
         lay.addWidget(self._interrupt_btn)
 
-        self._mute_btn = QPushButton("🎙  MICROPHONE ACTIVE")
+        self._mute_btn = QPushButton("  MICROPHONE ACTIVE")
+        set_icon(self._mute_btn, "mic", C.GREEN, 13)
         self._mute_btn.setFixedHeight(30)
         self._mute_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5557,7 +6436,7 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_quick_drawer(self) -> QWidget:
-        """Floating overlay panel shown when the ⚙ header button is toggled."""
+        """Floating overlay panel shown when the header settings button is toggled."""
         _BTN_STYLE_PRI = f"""
             QPushButton {{
                 background: #00091a; color: {C.PRI};
@@ -5621,7 +6500,8 @@ class MainWindow(QMainWindow):
         self._autostart_btn.clicked.connect(self._toggle_autostart)
         lay.addWidget(self._autostart_btn)
 
-        cust_btn = QPushButton("⚙  CUSTOMISE ASSISTANT")
+        cust_btn = QPushButton("  CUSTOMISE ASSISTANT")
+        set_icon(cust_btn, "sliders", C.PRI, 14)
         cust_btn.setFixedHeight(26)
         cust_btn.setFont(QFont("Courier New", 7))
         cust_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5629,7 +6509,8 @@ class MainWindow(QMainWindow):
         cust_btn.clicked.connect(self._open_customize)
         lay.addWidget(cust_btn)
 
-        audio_btn = QPushButton("🎧  AUDIO DEVICES")
+        audio_btn = QPushButton("  AUDIO DEVICES")
+        set_icon(audio_btn, "volume", C.PRI, 14)
         audio_btn.setFixedHeight(26)
         audio_btn.setFont(QFont("Courier New", 7))
         audio_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5637,7 +6518,8 @@ class MainWindow(QMainWindow):
         audio_btn.clicked.connect(self._open_audio_devices)
         lay.addWidget(audio_btn)
 
-        mem_btn = QPushButton("🧠  MEMORY")
+        mem_btn = QPushButton("  MEMORY")
+        set_icon(mem_btn, "database", C.PRI, 14)
         mem_btn.setFixedHeight(26)
         mem_btn.setFont(QFont("Courier New", 7))
         mem_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5645,7 +6527,8 @@ class MainWindow(QMainWindow):
         mem_btn.clicked.connect(self._open_memory_panel)
         lay.addWidget(mem_btn)
 
-        plugin_btn = QPushButton("🧩  PLUGINS")
+        plugin_btn = QPushButton("  PLUGINS")
+        set_icon(plugin_btn, "grid", C.PRI, 14)
         plugin_btn.setFixedHeight(26)
         plugin_btn.setFont(QFont("Courier New", 7))
         plugin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5653,7 +6536,8 @@ class MainWindow(QMainWindow):
         plugin_btn.clicked.connect(self._open_plugin_manager)
         lay.addWidget(plugin_btn)
 
-        settings_btn = QPushButton("⚙  PLUGIN SETTINGS")
+        settings_btn = QPushButton("  PLUGIN SETTINGS")
+        set_icon(settings_btn, "wrench", C.PRI, 14)
         settings_btn.setFixedHeight(26)
         settings_btn.setFont(QFont("Courier New", 7))
         settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5690,7 +6574,8 @@ class MainWindow(QMainWindow):
             lay.addWidget(button)
             return button
 
-        fs_btn = _row(QPushButton("⛶  FULLSCREEN  [F11]"), self._BTN_DIM)
+        fs_btn = _row(QPushButton("  FULLSCREEN  [F11]"), self._BTN_DIM)
+        set_icon(fs_btn, "grid", C.TEXT_MED, 13)
         fs_btn.clicked.connect(self._toggle_fullscreen)
 
         self._brief_btn = _row(QPushButton())
@@ -5701,7 +6586,8 @@ class MainWindow(QMainWindow):
         self._wake_sleep_btn = _row(QPushButton())
         self._wake_sleep_btn.clicked.connect(self._tap_wake_manual)
         # Neutral until the real state lands from the background warm-up.
-        self._wake_btn.setText("🎙  WAKE WORD")
+        self._wake_btn.setText("  WAKE WORD")
+        set_icon(self._wake_btn, "mic", C.TEXT_MED, 13)
         self._wake_btn.setStyleSheet(self._BTN_DIM)
         self._wake_sleep_btn.hide()
 
@@ -5802,10 +6688,11 @@ class MainWindow(QMainWindow):
         self._input.returnPressed.connect(self._send)
         row.addWidget(self._input)
 
-        send = QPushButton("▸")
+        send = QPushButton()
         send.setFixedSize(30, 30)
-        send.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
         send.setCursor(Qt.CursorShape.PointingHandCursor)
+        send.setToolTip("Send")
+        set_icon(send, "send", C.PRI, 14)
         send.setStyleSheet(f"""
             QPushButton {{
                 background: {C.PANEL}; color: {C.PRI};
@@ -5924,6 +6811,12 @@ class MainWindow(QMainWindow):
         if first_show:
             total = self._center_split.height()
             self._center_split.setSizes([max(total - 220, 120), 220])
+        # Mirror into the studio section (display/scan/3d/web) — the same
+        # funnel the dashboard uses, so every surface has a desktop home.
+        try:
+            self._studio_panel.receive(title, text)
+        except Exception:                               # noqa: BLE001
+            pass
 
     # ── document review ──────────────────────────────────────────────────────
     # Rendered as rich text into the content panel that already exists, rather
@@ -6495,17 +7388,23 @@ class MainWindow(QMainWindow):
             QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}"""
         self._wake_btn.setEnabled(True)
         if not st["ready"]:
-            self._wake_btn.setText("⬇  WAKE WORD: DOWNLOAD")
+            self._wake_btn.setText("  WAKE WORD: DOWNLOAD")
             self._wake_btn.setStyleSheet(_off)
             self._wake_sleep_btn.hide()
         elif st["enabled"]:
-            self._wake_btn.setText("🎙  WAKE WORD: ON")
+            self._wake_btn.setText("  WAKE WORD: ON")
+            set_icon(self._wake_btn, "mic", C.GREEN, 13)
             self._wake_btn.setStyleSheet(_on)
             self._wake_sleep_btn.show()
-            self._wake_sleep_btn.setText("😴  SLEEP NOW" if st["awake"] else "👂  WAKE NOW")
+            self._wake_sleep_btn.setText(
+                "  SLEEP NOW" if st["awake"] else "  WAKE NOW")
+            set_icon(self._wake_sleep_btn,
+                     "power" if st["awake"] else "mic",
+                     C.RED if st["awake"] else C.GREEN, 13)
             self._wake_sleep_btn.setStyleSheet(_off)
         else:
-            self._wake_btn.setText("🎙  WAKE WORD: OFF")
+            self._wake_btn.setText("  WAKE WORD: OFF")
+            set_icon(self._wake_btn, "mic-off", C.TEXT_DIM, 13)
             self._wake_btn.setStyleSheet(_off)
             self._wake_sleep_btn.hide()
 
@@ -6527,8 +7426,9 @@ class MainWindow(QMainWindow):
             QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}"""
 
         ptt = get_push_to_talk_enabled()
-        self._ptt_btn.setText(f"🎚  PUSH-TO-TALK: {chord_label()}" if ptt
-                              else "🎚  PUSH-TO-TALK: OFF")
+        self._ptt_btn.setText(f"  PUSH-TO-TALK: {chord_label()}" if ptt
+                              else "  PUSH-TO-TALK: OFF")
+        set_icon(self._ptt_btn, "mic", C.PRI if ptt else C.TEXT_DIM, 13)
         self._ptt_btn.setStyleSheet(_on if ptt else _off)
         self._ptt_btn.setToolTip(
             "Microphone stays closed until you hold the key — nothing is sent "
@@ -6546,8 +7446,10 @@ class MainWindow(QMainWindow):
                 border: 1px solid {C.BORDER_A}; border-radius: 3px;
                 text-align: left; padding: 0 8px; }}
             QPushButton:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}"""
-        self._hud_btn.setText("🧑  HUD: ANIMATED FACE" if face
-                              else "◉  HUD: REACTOR CORE")
+        self._hud_btn.setText("  HUD: ANIMATED FACE" if face
+                              else "  HUD: REACTOR CORE")
+        set_icon(self._hud_btn, "eye" if face else "activity",
+                 C.PRI, 13)
         self._hud_btn.setStyleSheet(style)
         self._hud_btn.setToolTip(
             "An animated head that speaks your words and shows what JARVIS is "
@@ -6636,7 +7538,7 @@ class MainWindow(QMainWindow):
         st = self._wake_state()
         if not st["ready"]:
             # First time: download openwakeword + model in a worker thread.
-            self._wake_btn.setText("⬇  DOWNLOADING… (one-time)")
+            self._wake_btn.setText("  DOWNLOADING… (one-time)")
             self._wake_btn.setEnabled(False)
             def _work():
                 try:
@@ -6677,7 +7579,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, '_brief_btn'):
             return
         if enabled:
-            self._brief_btn.setText("☀  MORNING BRIEF: ON")
+            self._brief_btn.setText("  MORNING BRIEF: ON")
+            set_icon(self._brief_btn, "inbox", C.GREEN, 13)
             self._brief_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: #001a08; color: {C.GREEN};
@@ -6687,7 +7590,8 @@ class MainWindow(QMainWindow):
                 QPushButton:hover {{ background: #002010; }}
             """)
         else:
-            self._brief_btn.setText("☀  MORNING BRIEF: OFF")
+            self._brief_btn.setText("  MORNING BRIEF: OFF")
+            set_icon(self._brief_btn, "inbox", C.TEXT_DIM, 13)
             self._brief_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent; color: {C.TEXT_DIM};
@@ -6921,7 +7825,8 @@ class MainWindow(QMainWindow):
 
     def _style_mute_btn(self):
         if self._muted:
-            self._mute_btn.setText("🔇  MICROPHONE MUTED")
+            self._mute_btn.setText("  MICROPHONE MUTED")
+            set_icon(self._mute_btn, "mic-off", C.RED, 13)
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: #140006; color: {C.MUTED_C};
@@ -6929,7 +7834,8 @@ class MainWindow(QMainWindow):
                 }}
             """)
         else:
-            self._mute_btn.setText("🎙  MICROPHONE ACTIVE")
+            self._mute_btn.setText("  MICROPHONE ACTIVE")
+            set_icon(self._mute_btn, "mic", C.GREEN, 13)
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: #00140a; color: {C.GREEN};
@@ -6949,17 +7855,24 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
-        # Header pill mirrors the state (same colour language as the web UI).
+        # Header pill mirrors the state — icon + text, same colour language
+        # as the web UI (no emoji glyphs anywhere in the chrome).
         pill = getattr(self, "_state_pill", None)
         if pill is not None:
             col = {"LISTENING": C.GREEN, "SPEAKING": C.PRI,
                    "THINKING": C.ACC, "SLEEPING": C.TEXT_DIM,
                    "ERROR": C.RED}.get(state, C.TEXT_MED)
-            pill.setText(f"● {state}")
+            ico = {"LISTENING": "mic", "SPEAKING": "volume",
+                   "THINKING": "sparkles", "SLEEPING": "power",
+                   "ERROR": "alert"}.get(state, "activity")
+            pill.setText(f"  {state}")
             pill.setStyleSheet(
                 f"color: {col}; background: {C.PANEL};"
                 f" border: 1px solid {C.BORDER}; border-radius: 10px;"
-                f" padding: 3px 10px; font-weight: bold;")
+                f" padding: 4px 11px; font-weight: bold;")
+            ip = getattr(self, "_state_icon", None)
+            if ip is not None:
+                ip.setPixmap(icon_pm(ico, col, 12))
 
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
@@ -7181,7 +8094,8 @@ class JarvisUI:
         try:
             self._win._dash_api.configure(url, token)
             self._win.refresh_pending_badge()
-            for name in ("spaces", "agents", "computers", "calls", "agenda"):
+            for name in ("spaces", "agents", "computers", "calls",
+                         "agenda", "memory", "skills"):
                 page = getattr(self._win, f"_{name}_panel", None)
                 if page is not None and hasattr(page, "refresh"):
                     page.refresh()
