@@ -2205,3 +2205,100 @@ class TestClipHistoryV2:
         assert n <= 500
         newest = ch.clip_history({"action": "list"})
         assert "entry 519" in newest and "entry 0\n" not in newest
+
+
+class TestCodeIntel:
+    """2g: jedi navigation + pylsp diagnostics (Report-E dev tooling)."""
+
+    @pytest.fixture(autouse=True)
+    def _file(self, tmp_path):
+        self.src = tmp_path / "sample.py"
+        self.src.write_text(
+            '"""Sample module."""\n'
+            "\n"
+            "\n"
+            "def greet(name: str) -> str:\n"
+            '    """Say hello."""\n'
+            '    return f"hello {name}"\n'
+            "\n"
+            "\n"
+            'msg = greet("world")\n'
+            'other = greet("there")\n',
+            encoding="utf-8")
+        yield
+
+    def test_hover_returns_docstring(self):
+        from actions import code_intel as ci
+        # cursor on the greet() call at line 6
+        out = ci.code_intel({"action": "hover", "path": str(self.src),
+                             "line": "9", "col": "8"})
+        assert "greet" in out and "Say hello" in out
+
+    def test_goto_finds_definition(self):
+        from actions import code_intel as ci
+        out = ci.code_intel({"action": "goto", "path": str(self.src),
+                             "line": "9", "col": "8"})
+        assert "sample.py:4:" in out
+
+    def test_refs_finds_all_callers(self):
+        from actions import code_intel as ci
+        out = ci.code_intel({"action": "refs", "path": str(self.src),
+                             "line": "4", "col": "5"})
+        assert "reference(s)" in out
+        assert "sample.py:9:" in out and "sample.py:10:" in out
+
+    def test_complete_after_dot(self):
+        from actions import code_intel as ci
+        line = self.src.read_text(encoding="utf-8").splitlines()
+        line.append('s = "text"\ns.')                     # str attrs at EOF
+        self.src.write_text("\n".join(line) + "\n", encoding="utf-8")
+        out = ci.code_intel({"action": "complete", "path": str(self.src)})
+        assert "completion(s)" in out and "upper" in out
+
+    def test_diag_reports_syntax_error(self):
+        from actions import code_intel as ci
+        bad = self.src.parent / "bad.py"
+        bad.write_text("def broken(:\n    pass\n", encoding="utf-8")
+        out = ci.code_intel({"action": "diag", "path": str(bad)})
+        # pylsp installed in the test venv → real diagnostics
+        assert "diagnostic" in out or "no diagnostics" not in out
+        assert "Error" in out or "error" in out.lower()
+
+    def test_diag_clean_file(self):
+        from actions import code_intel as ci
+        out = ci.code_intel({"action": "diag", "path": str(self.src)})
+        assert "clean" in out or "no diagnostics" in out
+
+    def test_non_python_and_missing_file_honest(self):
+        from actions import code_intel as ci
+        js = self.src.parent / "app.js"
+        js.write_text("const x = 1;\n", encoding="utf-8")
+        assert "Python-only" in ci.code_intel({"action": "goto",
+                                               "path": str(js)})
+        assert "No such file" in ci.code_intel(
+            {"action": "goto", "path": str(self.src.parent / "ghost.py")})
+        assert "path" in ci.code_intel({"action": "hover"}).lower()
+
+    def test_symbols_delegates_to_code_outline(self):
+        from actions import code_intel as ci
+        out = ci.code_intel({"action": "symbols", "path": str(self.src)})
+        assert "greet" in out
+
+    def test_setup_refuses_non_allowlisted(self):
+        from actions import code_intel as ci
+        ci._SETUP_SAFE.clear()
+        try:
+            out = ci._setup({})
+            assert "Refusing" in out
+        finally:
+            ci._SETUP_SAFE.update({"jedi", "python-lsp-server",
+                                   "python-lsp-json-rpc", "pyflakes",
+                                   "pycodestyle", "pluggy", "ujson",
+                                   "docstring-to-markdown",
+                                   "jedi-language-server"})
+
+    def test_tool_shape(self):
+        from actions import code_intel as ci
+        assert ci.TOOL["name"] == "code_intel"
+        assert ci.TOOL["handler"] is ci.code_intel
+        assert ci.TOOL["parameters"]["type"] == "OBJECT"
