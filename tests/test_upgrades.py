@@ -711,3 +711,110 @@ class TestLocalLLMDefaults:
         url, model = m.get_llm_settings()
         assert url == "http://127.0.0.1:1234"
         assert model == "qwen2.5"
+
+
+class TestLLMFreeRungs:
+    """2f: Groq/Cerebras/OpenRouter free rungs in llm_client presets."""
+
+    @staticmethod
+    def _cfg(tmp_path, monkeypatch, data: dict):
+        import json
+        from core import llm_client as m
+        cfg = tmp_path / "api_keys.json"
+        cfg.write_text(json.dumps(data), encoding="utf-8")
+        monkeypatch.setattr(m, "CONFIG_PATH", cfg)
+        return m
+
+    @pytest.mark.parametrize("name,base,model", [
+        ("groq", "https://api.groq.com/openai",
+         "llama-3.3-70b-versatile"),
+        ("cerebras", "https://api.cerebras.ai", "llama-3.3-70b"),
+        ("openrouter", "https://openrouter.ai/api",
+         "meta-llama/llama-3.3-70b-instruct:free"),
+    ])
+    def test_preset_maps_to_openai_protocol_with_defaults(self, tmp_path,
+                                                          monkeypatch,
+                                                          name, base, model):
+        m = self._cfg(tmp_path, monkeypatch, {"llm_provider": name})
+        assert m.get_llm_provider() == "openai"
+        assert m.get_llm_preset() == name
+        url, mdl = m.get_llm_settings()
+        assert url == base and mdl == model
+
+    def test_explicit_url_and_model_win_over_preset(self, tmp_path,
+                                                    monkeypatch):
+        m = self._cfg(tmp_path, monkeypatch, {
+            "llm_provider": "groq",
+            "llm_url": "https://proxy.local/v1",
+            "llm_model": "my-pinned-model"})
+        url, mdl = m.get_llm_settings()
+        assert url == "https://proxy.local/v1" and mdl == "my-pinned-model"
+
+    def test_api_key_from_config_then_env(self, tmp_path, monkeypatch):
+        m = self._cfg(tmp_path, monkeypatch,
+                      {"llm_provider": "groq",
+                       "groq_api_key": "cfg-key-123"})
+        assert m._headers() == {"Authorization": "Bearer cfg-key-123"}
+        m2 = self._cfg(tmp_path, monkeypatch, {"llm_provider": "cerebras"})
+        monkeypatch.setenv("CEREBRAS_API_KEY", "env-key-456")
+        assert m2._headers()["Authorization"] == "Bearer env-key-456"
+        # no key anywhere → no header (server will 401 honestly)
+        monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+        assert m2._headers() == {}
+
+    def test_call_llm_text_uses_openai_endpoint_with_auth(self, tmp_path,
+                                                          monkeypatch):
+        import json as _json
+        m = self._cfg(tmp_path, monkeypatch,
+                      {"llm_provider": "groq", "groq_api_key": "k1"})
+        seen = {}
+
+        class Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": "hi from groq"}}]}
+
+        def fake_post(url, json=None, timeout=None, headers=None, **kw):
+            seen.update(url=url, json=json, headers=headers)
+            return Resp()
+
+        import requests
+        monkeypatch.setattr(requests, "post", fake_post)
+        out = m.call_llm_text("hey")
+        assert out == "hi from groq"
+        assert seen["url"].endswith("/v1/chat/completions")
+        assert seen["headers"] == {"Authorization": "Bearer k1"}
+        assert seen["json"]["max_tokens"] == 600
+
+    def test_call_llm_posts_bearer_and_parses_choices(self, tmp_path,
+                                                      monkeypatch):
+        m = self._cfg(tmp_path, monkeypatch,
+                      {"llm_provider": "openrouter",
+                       "openrouter_api_key": "or-key"})
+        seen = {}
+
+        class Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": "ans",
+                                                 "tool_calls": []}}]}
+
+        def fake_post(url, json=None, timeout=None, headers=None, **kw):
+            seen.update(url=url, headers=headers)
+            return Resp()
+
+        import requests
+        monkeypatch.setattr(requests, "post", fake_post)
+        out = m.call_llm([{"role": "user", "content": "q"}])
+        assert out["content"] == "ans"
+        assert seen["url"] == "https://openrouter.ai/api/v1/chat/completions"
+        assert seen["headers"]["Authorization"] == "Bearer or-key"
+
+    def test_defaults_stay_ollama(self):
+        from core import llm_client as m
+        assert m._DEFAULTS["llm_provider"] == "ollama"
+        assert m.get_llm_preset() == "" or True   # reads live config

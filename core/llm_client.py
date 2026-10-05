@@ -15,6 +15,14 @@ Supports two backends — selected via  "llm_provider"  in config/api_keys.json:
         Set  "llm_url": "http://localhost:1234"  in config.
         Note: tool-calling support depends on the model; use a model that
         supports function/tool calls (e.g. Qwen2.5, Llama-3.1, Mistral).
+
+  "llm_provider": "groq" | "cerebras" | "openrouter"
+        Free hosted OpenAI-compatible rungs (the ₹0 cloud ladder). Each
+        preset fills its own base URL, default model and API key
+        (config/api_keys.json keys groq_api_key / cerebras_api_key /
+        openrouter_api_key — or the GROQ_API_KEY / CEREBRAS_API_KEY /
+        OPENROUTER_API_KEY env vars). Explicit llm_url / llm_model in the
+        config always win over the preset defaults.
 """
 import json
 import re
@@ -46,10 +54,63 @@ _DEFAULTS = {
 }
 
 
-def get_llm_provider() -> str:
-    """Returns 'ollama' or 'openai' (covers LM Studio, LocalAI, Jan, etc.)."""
+# Free hosted rungs — every one is OpenAI-compatible, so they share the
+# 'openai' wire protocol and differ only in base URL / model / API key.
+PRESETS: dict[str, dict] = {
+    "groq": {
+        "base":  "https://api.groq.com/openai",   # + /v1 appended by callers
+        "model": "llama-3.3-70b-versatile",
+        "key":   "groq_api_key",   "env": "GROQ_API_KEY",
+    },
+    "cerebras": {
+        "base":  "https://api.cerebras.ai",      # + /v1 appended by callers
+        "model": "llama-3.3-70b",
+        "key":   "cerebras_api_key", "env": "CEREBRAS_API_KEY",
+    },
+    "openrouter": {
+        "base":  "https://openrouter.ai/api",    # + /v1 appended by callers
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "key":   "openrouter_api_key", "env": "OPENROUTER_API_KEY",
+    },
+}
+_OPENAI_ALIASES = ("openai", "lmstudio", "localai", "jan", "llamacpp")
+
+
+def get_llm_preset() -> str:
+    """'groq' | 'cerebras' | 'openrouter' | '' (empty = not a hosted rung)."""
     raw = _load_config().get("llm_provider", "ollama").strip().lower()
-    return "openai" if raw in ("openai", "lmstudio", "localai", "jan", "llamacpp") else "ollama"
+    return raw if raw in PRESETS else ""
+
+
+def _api_key(preset: str) -> str:
+    """Rung API key — api_keys.json first, environment second, '' if none."""
+    if not preset:
+        return ""
+    spec = PRESETS.get(preset, {})
+    cfg_key = str(spec.get("key", "")).strip()
+    val = ""
+    if cfg_key:
+        val = str(_load_config().get(cfg_key, "") or "").strip()
+    if not val:
+        import os
+        val = str(os.environ.get(spec.get("env", ""), "") or "").strip()
+    return val
+
+
+def _headers(preset: str | None = None) -> dict:
+    """Bearer auth for OpenAI-compatible calls; {} for local servers."""
+    preset = get_llm_preset() if preset is None else preset
+    key = _api_key(preset) if preset else ""
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def get_llm_provider() -> str:
+    """Returns 'ollama' or 'openai' (covers LM Studio, LocalAI, Jan, the
+    free hosted rungs, etc.)."""
+    raw = _load_config().get("llm_provider", "ollama").strip().lower()
+    if raw in PRESETS:
+        return "openai"
+    return "openai" if raw in _OPENAI_ALIASES else "ollama"
 
 
 def _load_config() -> dict:
@@ -73,7 +134,8 @@ def ensure_ollama_running(timeout: int = 15) -> bool:
         # by the user — we just check if they're reachable.
         health = f"{url}/v1/models"
         try:
-            ok = requests.get(health, timeout=5).status_code == 200
+            ok = requests.get(health, timeout=5,
+                              headers=_headers()).status_code == 200
             if ok:
                 print(f"[LLM] OpenAI-compatible server reachable at {url}")
             else:
@@ -156,7 +218,9 @@ def warmup_model(system_prompt: str | None = None) -> bool:
             "max_tokens": 1,
         }
         try:
-            resp = requests.post(f"{url}/v1/chat/completions", json=payload, timeout=180)
+            resp = requests.post(f"{url}/v1/chat/completions",
+                                 json=payload, timeout=180,
+                                 headers=_headers())
             resp.raise_for_status()
             print(f"[LLM] '{model}' ready (OpenAI-compatible server).")
             return True
@@ -219,10 +283,24 @@ def check_model_available(log: Callable | None = None) -> bool:
 
 
 def get_llm_settings() -> tuple[str, str]:
-    """Returns (base_url, model_name)."""
-    cfg   = _load_config()
-    url   = cfg.get("llm_url",   _DEFAULTS["llm_url"]).rstrip("/")
-    model = cfg.get("llm_model", _DEFAULTS["llm_model"])
+    """Returns (base_url, model_name).
+
+    Hosted rungs (groq/cerebras/openrouter) fill in their preset base and
+    default model — but any explicit llm_url / llm_model in the config
+    still wins, so users can point a rung at a proxy or pin a model."""
+    cfg = _load_config()
+    url = str(cfg.get("llm_url", "") or "").strip().rstrip("/")
+    model = str(cfg.get("llm_model", "") or "").strip()
+    preset = get_llm_preset()
+    if preset:
+        spec = PRESETS[preset]
+        if not url:
+            url = spec["base"]
+        if not model or model == _DEFAULTS["llm_model"]:
+            model = spec["model"]
+        return url, model
+    url = url or _DEFAULTS["llm_url"]
+    model = model or _DEFAULTS["llm_model"]
     return url, model
 
 
@@ -252,7 +330,8 @@ def call_llm(
             payload["tools"]       = tools
             payload["tool_choice"] = "auto"
         try:
-            resp = requests.post(endpoint, json=payload, timeout=timeout)
+            resp = requests.post(endpoint, json=payload, timeout=timeout,
+                                 headers=_headers())
             resp.raise_for_status()
             choice = resp.json().get("choices", [{}])[0]
             msg    = choice.get("message", {})
@@ -339,7 +418,6 @@ def call_llm_text(
     Used by planner, executor, error_handler, code_helper, dev_agent.
     """
     url, default_model = get_llm_settings()
-    endpoint = f"{url}/api/chat"
     m        = model or default_model
 
     messages: list[dict] = []
@@ -347,6 +425,23 @@ def call_llm_text(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
+    # OpenAI-compatible backends (incl. the free hosted rungs) answer in
+    # choices[0].message — this call used to be Ollama-only and would 404
+    # on every preset server.
+    if get_llm_provider() == "openai":
+        endpoint = f"{url}/v1/chat/completions"
+        payload = {"model": m, "messages": messages, "stream": False,
+                   "max_tokens": 600}
+        try:
+            resp = requests.post(endpoint, json=payload, timeout=timeout,
+                                 headers=_headers())
+            resp.raise_for_status()
+            content = resp.json().get("choices", [{}])[0].get("message", {})
+            return (content.get("content") or "").strip()
+        except Exception as e:
+            raise RuntimeError(f"LLM text call failed: {e}") from e
+
+    endpoint = f"{url}/api/chat"
     payload = {"model": m, "messages": messages, "stream": False, "keep_alive": -1, "options": {"num_predict": 600}}
 
     try:
@@ -394,7 +489,8 @@ def _stream_openai(
         payload["tool_choice"] = "auto"
 
     try:
-        with requests.post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
+        with requests.post(endpoint, json=payload, timeout=timeout,
+                           stream=True, headers=_headers()) as resp:
             resp.raise_for_status()
             full_content = ""
             buf          = ""
@@ -521,7 +617,8 @@ def call_llm_stream(
         payload["tools"] = tools
 
     def _do_stream() -> Generator[dict, None, None]:
-        with requests.post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
+        with requests.post(endpoint, json=payload, timeout=timeout,
+                           stream=True, headers=_headers()) as resp:
             resp.raise_for_status()
             full_content = ""
             tool_calls:  list = []
