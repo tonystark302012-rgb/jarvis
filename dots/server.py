@@ -396,10 +396,11 @@ def api_create_task(payload: dict = Body(...)) -> dict:
     from . import scheduler
     scheduler.ensure_started()
     try:
+        raw_dot = payload.get("dot_id")
         return store.create_task(payload.get("name"),
                                  payload.get("instruction"),
                                  payload.get("every_seconds", 3600),
-                                 int(payload.get("dot_id")))
+                                 None if raw_dot is None else int(raw_dot))
     except (ValueError, KeyError, TypeError) as e:
         status = 404 if isinstance(e, KeyError) else 400
         raise HTTPException(status, str(e))

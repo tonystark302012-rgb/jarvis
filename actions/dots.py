@@ -226,20 +226,22 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
                 return err
         else:
             ds = store.list_dots()
-            if len(ds) != 1:
+            if len(ds) > 1:
                 return ("Which Dot should run it? Add dot=… Known: "
-                        + (", ".join(x["name"] for x in ds) or "(none)"))
-            d = ds[0]
+                        + ", ".join(x["name"] for x in ds))
+            d = ds[0] if ds else None      # no dots → main brain (dot-less)
         every = params.get("every") or params.get("every_seconds") or 3600
         try:
             t = store.create_task(params.get("task") or instruction[:40],
-                                  instruction, every, d["id"])
+                                  instruction, every,
+                                  d["id"] if d else None)
         except (ValueError, KeyError) as e:
             return str(e)
         from dots import scheduler
         scheduler.ensure_started()
+        where = f"on Dot '{d['name']}'" if d else "on the main brain"
         return (f"Task '{t['name']}' scheduled every {t['every_seconds']}s "
-                f"on Dot '{d['name']}' (first run on the next tick, "
+                f"{where} (first run on the next tick, "
                 f"hard cap {scheduler.DEADLINE_SECONDS}s per run). "
                 f"List: dots action=task_list")
 
@@ -252,7 +254,10 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
                     "instruction=… every=…")
         lines = []
         for t in rows:
-            dn = (store.get_dot(t["dot_id"]) or {}).get("name", "?")
+            if t["dot_id"] is None:
+                dn = "main brain"
+            else:
+                dn = (store.get_dot(t["dot_id"]) or {}).get("name", "?")
             lines.append(f"#{t['id']} [{t['status']}] every "
                          f"{t['every_seconds']}s on {dn}: {t['name']}")
         return "\n".join(lines)

@@ -590,7 +590,9 @@ def prefs_for_dot(dot: dict) -> list[dict]:
 
 # ── tasks (recurring instructions) + runs ───────────────────────────────────
 def create_task(name: str, instruction: str, every_seconds,
-                dot_id: int, next_run_at: float | None = None) -> dict:
+                dot_id: int | None,
+                next_run_at: float | None = None) -> dict:
+    """dot_id=None → task runs on the main brain (dot-less, like chat)."""
     instruction = str(instruction or "").strip()
     if not instruction:
         raise ValueError("task needs an instruction")
@@ -600,7 +602,7 @@ def create_task(name: str, instruction: str, every_seconds,
         raise ValueError("every_seconds must be an integer")
     if every < 1:
         raise ValueError("every_seconds must be >= 1")
-    if get_dot(dot_id) is None:
+    if dot_id is not None and get_dot(dot_id) is None:
         raise KeyError(f"no dot #{dot_id}")
     name = str(name or "").strip() or instruction[:40]
     now = _now()
@@ -609,7 +611,7 @@ def create_task(name: str, instruction: str, every_seconds,
         cur = c.execute(
             "INSERT INTO tasks (name, instruction, every_seconds, dot_id,"
             " status, next_run_at, created_at) VALUES (?,?,?,?,'active',?,?)",
-            (name, instruction, every, int(dot_id),
+            (name, instruction, every, dot_id,
              float(next_run_at if next_run_at is not None else now), now))
         c.commit()
         tid = cur.lastrowid

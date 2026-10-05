@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   name TEXT NOT NULL,
   instruction TEXT NOT NULL,
   every_seconds INTEGER NOT NULL,
-  dot_id INTEGER NOT NULL,
+  dot_id INTEGER,                -- nullable: NULL = main-brain task
   status TEXT NOT NULL DEFAULT 'active',
   next_run_at REAL NOT NULL,
   last_run_at REAL,
@@ -175,9 +175,11 @@ def _conn() -> sqlite3.Connection:
 
 
 def _migrate(c: sqlite3.Connection) -> None:
-    """Additive column migrations for DBs created before this batch.
+    """Column migrations for DBs created before this batch.
     CREATE TABLE IF NOT EXISTS never alters an existing table, so
-    sources_json (research links, batch 6b) lands via guarded ALTER."""
+    sources_json (research links, batch 6b) lands via guarded ALTER, and the
+    tasks.dot_id nullability change (main-brain tasks) lands via a guarded
+    table rebuild — SQLite cannot ALTER nullability in place."""
     for ddl in (
         "ALTER TABLE pages ADD COLUMN sources_json TEXT",
         "ALTER TABLE pending_changes ADD COLUMN sources_json TEXT",
@@ -186,6 +188,29 @@ def _migrate(c: sqlite3.Connection) -> None:
             c.execute(ddl)
         except sqlite3.OperationalError:
             pass  # already exists
+
+    try:
+        info = {r[1]: r for r in c.execute("PRAGMA table_info(tasks)")}
+    except sqlite3.Error:
+        info = {}
+    if info.get("dot_id") and info["dot_id"][3]:     # notnull flag = 1 (old)
+        cols = ["id", "name", "instruction", "every_seconds", "dot_id",
+                "status", "next_run_at", "last_run_at", "created_at"]
+        c.execute(
+            "CREATE TABLE tasks_rebuild ("
+            " id INTEGER PRIMARY KEY,"
+            " name TEXT NOT NULL,"
+            " instruction TEXT NOT NULL,"
+            " every_seconds INTEGER NOT NULL,"
+            " dot_id INTEGER,"
+            " status TEXT NOT NULL DEFAULT 'active',"
+            " next_run_at REAL NOT NULL,"
+            " last_run_at REAL,"
+            " created_at REAL NOT NULL)")
+        c.execute("INSERT INTO tasks_rebuild (" + ",".join(cols) + ")"
+                  " SELECT " + ",".join(cols) + " FROM tasks")
+        c.execute("DROP TABLE tasks")
+        c.execute("ALTER TABLE tasks_rebuild RENAME TO tasks")
 
 
 def reset_for_tests() -> None:

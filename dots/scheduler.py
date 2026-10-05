@@ -98,7 +98,8 @@ def _execute(task: dict, abort: threading.Event,
              trigger: str = "tick") -> None:
     tid = task["id"]
     started = time.time()
-    dot = store.get_dot(task["dot_id"]) or {}
+    _d = task.get("dot_id")
+    dot = (store.get_dot(_d) if _d is not None else None) or {}
     try:
         # history first: the brain sees earlier runs on this convo
         try:

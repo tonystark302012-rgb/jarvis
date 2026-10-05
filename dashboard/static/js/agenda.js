@@ -47,7 +47,7 @@ async function loadTasks() {
     $('ag-tasks').innerHTML = `<div class="pane-empty">${JV.esc(e.message)}</div>`; return;
   }
   if (!tasks.length) {
-    $('ag-tasks').innerHTML = '<div class="pane-empty">No recurring tasks — create one: a prompt, an interval, a Dot.</div>';
+    $('ag-tasks').innerHTML = '<div class="pane-empty">No recurring tasks — create one: a prompt, an interval (the Dot is optional).</div>';
     return;
   }
   $('ag-tasks').innerHTML = `<table class="tbl">
@@ -57,7 +57,7 @@ async function loadTasks() {
       return `<tr class="task-row" data-id="${t.id}">
         <td><b>${JV.esc(t.name)}</b><br>
           <span class="muted" style="font-size:11px">${JV.esc((t.instruction || '').slice(0, 90))}</span><br>
-          <span class="chip accent">${JV.esc(dot ? dot.name : 'dot #' + t.dot_id)}</span></td>
+          <span class="chip accent">${JV.esc(t.dot_id == null ? 'main brain' : (dot ? dot.name : 'dot #' + t.dot_id))}</span></td>
         <td class="mono">${everyLabel(t.every_seconds)}<br>
           <span class="muted" style="font-size:10px">next ${t.next_run_at ? new Date(t.next_run_at * 1000).toLocaleString() : '—'}</span></td>
         <td><span class="chip ${t.status === 'active' ? 'green'
@@ -117,22 +117,30 @@ async function loadTasks() {
 $('ag-add').onclick = async () => {
   try { if (!S.dots.length) S.dots = await JV.api('/api/dots'); }
   catch (_) {}
-  if (!S.dots.length) { JV.toast('Create a Dot first (Agents)'); return; }
   const name = prompt('Task name:', 'Morning brief');
   if (!name) return;
-  const instruction = prompt('Instruction (what should the Dot do?):',
+  const instruction = prompt('Instruction (what should it do?):',
     'Summarize what happened since last run in 5 bullet points.');
   if (!instruction) return;
   const every = prompt('Repeat every (seconds — e.g. 3600 = hourly):', '3600');
   if (!every) return;
-  const dotId = prompt('Dot ID:\n' +
-    S.dots.map(d => `${d.id}: ${d.name}`).join('\n'), String(S.dots[0].id));
-  if (!dotId) return;
+  // Dot is optional (blank → main brain, like a plain chat prompt)
+  const dotLine = S.dots.length
+    ? 'Dot ID:\n' + S.dots.map(d => `${d.id}: ${d.name}`).join('\n') +
+      '\n(blank = main brain)'
+    : '';
+  const dotId = dotLine ? prompt(dotLine, String(S.dots[0].id)) : '';
+  if (dotId === null) return;                 // cancelled
+  const body = { name, instruction,
+                 every_seconds: parseInt(every, 10) || 3600 };
+  if (String(dotId).trim() !== '') {
+    const pid = parseInt(dotId, 10);
+    if (isNaN(pid)) { JV.toast('Dot ID must be a number'); return; }
+    body.dot_id = pid;
+  }
   try {
-    await JV.api('/api/tasks', { method: 'POST', body: JSON.stringify({
-      name, instruction,
-      every_seconds: parseInt(every, 10) || 3600,
-      dot_id: parseInt(dotId, 10) }) });
+    await JV.api('/api/tasks', { method: 'POST',
+                                 body: JSON.stringify(body) });
     JV.toast('Task created');
     loadTasks();
   } catch (e) { JV.toast(e.message); }

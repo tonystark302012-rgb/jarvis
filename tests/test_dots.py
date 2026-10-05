@@ -1328,25 +1328,38 @@ class TestScheduler:
         from actions.dots import dots as dots_action
         from dots import scheduler, store
         c = env["client"]
-        # no dot yet → honest "which Dot"
+        # no dot yet → schedules on the main brain (dot_id is optional; this
+        # used to be a P0: int(None) → TypeError → HTTP 400)
         out = dots_action({"action": "task_create",
                            "instruction": "check mail", "every": "60"})
-        assert "Which Dot" in out
+        assert "main brain" in out and "scheduled every 60s" in out
         c.post("/api/dots", json={"name": "Worker", "role": "r"})
         out = dots_action({"action": "task_create", "dot": "Worker",
                            "instruction": "check mail every hour",
                            "every": "60"})
         assert "scheduled every 60s" in out and "90s" in out
+        # multiple dots, none named → still honest disambiguation
+        c.post("/api/dots", json={"name": "Worker2", "role": "r"})
+        out = dots_action({"action": "task_create",
+                           "instruction": "ambiguous", "every": "60"})
+        assert "Which Dot" in out
         # invalid every → honest
         out = dots_action({"action": "task_create", "dot": "Worker",
                            "instruction": "x", "every": "abc"})
         assert "every_seconds" in out
         tasks = store.list_tasks()
-        assert len(tasks) == 1 and tasks[0]["status"] == "active"
-        store.set_task_status(tasks[0]["id"], "paused")  # keep ticker off
+        assert len(tasks) == 2 and tasks[0]["status"] == "active"
+        assert tasks[0]["dot_id"] is None            # main-brain task
+        assert tasks[1]["dot_id"] == 1               # Worker
+        for t in tasks:
+            store.set_task_status(t["id"], "paused")  # keep ticker off
         listed = dots_action({"action": "task_list"})
         assert "every 60s on Worker" in listed and "paused" in listed
-        # route shapes
+        assert "every 60s on main brain" in listed
+        # route shapes — dot_id optional
+        r = c.post("/api/tasks", json={"instruction": "via http",
+                                       "every_seconds": 120})
+        assert r.status_code == 201 and r.json()["dot_id"] is None
         r = c.post("/api/tasks", json={"instruction": "via http",
                                        "every_seconds": 120,
                                        "dot_id": 1})
@@ -1363,6 +1376,47 @@ class TestScheduler:
                                          "which": "nope"})
         assert "which=#task-id" in dots_action({"action": "task_runs",
                                                 "which": "abc"})
+
+    def test_main_brain_task_executes(self, env):
+        """dot-less task: store → scheduler._execute → brain.reply({})."""
+        from dots import scheduler, store
+        t = store.create_task("main ping", "run the ping", 3600, None)
+        assert t["dot_id"] is None
+        assert scheduler.tick() == 1                  # due now → spawn
+        run = _wait_for(lambda: store.last_run(t["id"]))
+        assert run is not None and run["status"] == "ok"
+        assert "scripted reply to:" in run["output"]
+        msgs = store.list_messages(f"task:{t['id']}")
+        assert msgs[-1]["role"] == "dot"              # main brain answered
+
+    def test_tasks_dot_id_nullable_migration(self, env, monkeypatch,
+                                             tmp_path):
+        """Old NOT NULL schema rebuilds to nullable, preserving rows."""
+        import sqlite3 as _sq
+        from dots import db, store
+        old = tmp_path / "old_schema.db"
+        conn = _sq.connect(old)
+        conn.executescript(
+            "CREATE TABLE tasks ("
+            " id INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+            " instruction TEXT NOT NULL, every_seconds INTEGER NOT NULL,"
+            " dot_id INTEGER NOT NULL,"
+            " status TEXT NOT NULL DEFAULT 'active',"
+            " next_run_at REAL NOT NULL, last_run_at REAL,"
+            " created_at REAL NOT NULL);"
+            "INSERT INTO tasks VALUES"
+            " (1,'old','do old',60,7,'active',1,NULL,1);")
+        conn.commit()
+        conn.close()
+        db.reset_for_tests()                          # drop fixture's conn
+        monkeypatch.setattr(db, "_db_path", lambda: old)
+        try:
+            row = store.get_task(1)
+            assert row is not None and row["dot_id"] == 7   # preserved
+            t = store.create_task("main", "hi", 60, None)    # nullable now
+            assert t["dot_id"] is None
+        finally:
+            db.reset_for_tests()                      # never leak old conn
 
     def test_run_ok_flow_and_convo_history(self, env):
         from dots import scheduler, store
