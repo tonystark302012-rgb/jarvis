@@ -6839,16 +6839,19 @@ class MainWindow(QMainWindow):
             self._switch_section(names[idx])
 
     def _open_palette(self) -> None:
-        """Ctrl+K palette: type-to-filter, Enter to jump. Mirrors the web
-        dashboard's quick nav but lives in the desktop chrome."""
+        """Ctrl+K command palette: fuzzy over sections AND every
+        registered tool (Report M — 'palette: send telegram…'). Enter on
+        a section jumps; Enter on a tool RUNS it with the typed remainder
+        as its query/prompt, through main's palette_run (autonomy gate +
+        activity timeline + audit chain all intact)."""
         dlg = QDialog(self)
-        dlg.setWindowTitle("Go to section  —  Ctrl+K")
-        dlg.setFixedWidth(380)
+        dlg.setWindowTitle("Command palette  —  Ctrl+K")
+        dlg.setFixedWidth(440)
         v = QVBoxLayout(dlg)
         v.setContentsMargins(10, 10, 10, 10)
         v.setSpacing(6)
         edit = QLineEdit()
-        edit.setPlaceholderText("Type a section name…  (Enter jumps)")
+        edit.setPlaceholderText("Type a section or tool…  (Enter runs/jumps)")
         edit.setFont(QFont("Courier New", 10))
         edit.setStyleSheet(
             f"QLineEdit {{ background: {C.BG}; color: {C.WHITE};"
@@ -6864,15 +6867,26 @@ class MainWindow(QMainWindow):
             f" QListWidget::item:selected {{ background: {C.PANEL_H};"
             f" color: {C.WHITE}; }}")
         names = list(getattr(self, "_section_names", []))
-        actions: dict[str, int] = {n: i for i, n in enumerate(names)}
+        try:
+            tool_names = sorted(str(n) for n in
+                                (getattr(self, "get_action_names",
+                                         None) or (lambda: []))())
+        except Exception:
+            tool_names = []
 
         def _fill(q: str = "") -> None:
             lst.clear()
             q = q.strip().lower()
-            for n in names:
+            for i, n in enumerate(names):
                 if not q or q in n.lower():
                     it = QListWidgetItem(f"  {n.upper()}")
-                    it.setData(Qt.ItemDataRole.UserRole, actions[n])
+                    it.setData(Qt.ItemDataRole.UserRole,
+                               ("section", i))
+                    lst.addItem(it)
+            for n in tool_names:
+                if not q or q in n.lower():
+                    it = QListWidgetItem(f"  ▸ {n}")
+                    it.setData(Qt.ItemDataRole.UserRole, ("tool", n))
                     lst.addItem(it)
             if lst.count():
                 lst.setCurrentRow(0)
@@ -6881,9 +6895,40 @@ class MainWindow(QMainWindow):
             it = lst.currentItem()
             if it is None:
                 return
-            self._switch_section(names[int(it.data(
-                Qt.ItemDataRole.UserRole))])
+            kind, payload = it.data(Qt.ItemDataRole.UserRole)
+            if kind == "section":
+                self._switch_section(names[int(payload)])
+                dlg.accept()
+                return
+            name = str(payload)
+            raw = edit.text().strip()
+            args: dict = {}
+            if raw:
+                if raw.lower().startswith(name.lower()):
+                    rest = raw[len(name):].strip()
+                    if rest:
+                        args = {"query": rest, "prompt": rest}
+                else:
+                    args = {"query": raw, "prompt": raw}
+            runner = getattr(self, "palette_run", None)
+            if runner is None:
+                self.toast("Palette runner not wired (UI standalone)",
+                           "warn")
+                dlg.accept()
+                return
             dlg.accept()
+            self.toast(f"Running {name}…")
+            try:
+                out = runner(name, args)
+            except Exception as e:
+                self.toast(f"{name} failed: {e}", "error")
+                return
+            try:
+                self.show_content(f"PALETTE — {name.upper()}",
+                                  str(out)[:4000])
+            except Exception:
+                pass
+            self.toast(f"{name}: " + str(out)[:120])
 
         edit.textChanged.connect(_fill)
         edit.returnPressed.connect(_run)

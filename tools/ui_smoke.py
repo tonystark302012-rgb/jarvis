@@ -560,6 +560,10 @@ check(len(getattr(win, "_section_shortcuts", [])) == 10, "C8 10 section shortcut
       len(getattr(win, "_section_shortcuts", [])))
 pal_slice = src2[src2.index("def _open_palette"):src2.index("def _open_palette") + 4000]
 check("Enter" in pal_slice or "returnPressed" in pal_slice, "C8 Enter-to-jump")
+check("palette_run" in pal_slice, "C8 palette runs tools (M)")
+check("get_action_names" in pal_slice, "C8 action index in palette (M)")
+check('"\u25b8"' in pal_slice or "\u25b8" in pal_slice, "C8 tool entries marked")
+check("palette_run" in main_src, "C8 main wires palette_run")
 
 # C10 — skill detail dialog
 check("def _detail" in src2[src2.index("class SkillsPanel"):], "C10 skill _detail method")

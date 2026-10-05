@@ -698,6 +698,39 @@ class JarvisLive:
         except Exception as e:
             print(f"[JARVIS] ⚠ Task/rules wiring failed: {e}")
 
+        # ── Ctrl+K palette: run any registered tool, not just jump sections
+        # Same safety stack as agent/rule calls: autonomy gate → activity
+        # timeline → registry.run (which writes the audit chain).
+        try:
+            def _palette_run(name: str, args: dict | None = None) -> str:
+                args = dict(args or {})
+                ctx = {"player": self.ui, "speak": self.speak,
+                       "response": None, "session_memory": None}
+                try:
+                    from core import autonomy
+                    blocked = autonomy.gate(name, args)
+                except Exception:
+                    blocked = None
+                if blocked:
+                    return str(blocked)
+                from core import activity as _act
+                ev = _act.begin("tool", name, args)
+                out = self._action_registry.run(name, args, ctx)
+                text = out if isinstance(out, str) else ""
+                ok = not (("not available" in text[:80])
+                          or ("failed:" in text[:70])
+                          or text.startswith("Action '")
+                          or text.startswith("Tool '"))
+                _act.finish(ev, ok, out)
+                self.ui.write_log(f"PALETTE: {name} → {text[:140]}")
+                return out or "Done."
+
+            self.ui.get_action_names = (
+                lambda: sorted(self._action_registry.names()))
+            self.ui.palette_run = _palette_run
+        except Exception as e:
+            print(f"[JARVIS] ⚠ Palette wiring failed: {e}")
+
         # Mission Control: mirror every activity event to the dashboard feed.
         # Listener may fire from ANY thread — rules tick (to_thread), focus
         # timers, agent runner (run_in_executor) — so the loop is never

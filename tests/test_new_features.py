@@ -9,6 +9,9 @@ or the code path is pure. Nothing here needs a display server.
 """
 from __future__ import annotations
 
+import shutil
+import sqlite3
+
 import asyncio
 import json
 import time
@@ -2393,3 +2396,157 @@ class TestAuditChain:
         assert "BROKEN" not in ac.audit_log({"action": "verify"})
         assert ac.TOOL["name"] == "audit_log"
         assert ac.TOOL["handler"] is ac.audit_log
+
+
+class TestWellbeing:
+    """3b: browser visit analytics from locked-copy history (Report D3)."""
+
+    @staticmethod
+    def _chromium_db(tmp_path, visits):
+        """visits: list of (url, seconds_ago)"""
+        p = tmp_path / "History"
+        c = sqlite3.connect(p)
+        c.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT)")
+        c.execute("CREATE TABLE visits (url_id INTEGER, visit_time INTEGER)")
+        now = time.time()
+        for i, (url, ago) in enumerate(visits, 1):
+            c.execute("INSERT INTO urls VALUES (?, ?)", (i, url))
+            us = int((now - ago + 11644473600) * 1_000_000)
+            c.execute("INSERT INTO visits VALUES (?, ?)", (i, us))
+        c.commit()
+        c.close()
+        return p
+
+    @pytest.fixture(autouse=True)
+    def _dbs(self, tmp_path, monkeypatch):
+        from actions import wellbeing as w
+        self._w = w
+        self._tmp = tmp_path
+        yield
+
+    def test_today_groups_strips_www_and_ranks(self):
+        w = self._w
+        db = self._chromium_db(self._tmp, [
+            ("https://www.example.com/a", 60),
+            ("https://www.example.com/b", 120),
+            ("https://example.com/c", 3600),
+            ("https://news.site.org/x", 300),
+            ("https://old.site.org/y", 8 * 86400),     # last week only
+        ])
+        w._history_dbs = lambda: [("chromium", db)]
+        out = w.wellbeing({"action": "today"})
+        assert "example.com" in out and "3 visit(s)" in out
+        assert "news.site.org" in out
+        assert "old.site.org" not in out              # outside today window
+        assert "www." not in out.split("example.com")[0][-4:]  # stripped
+        assert "not minutes" in out                   # honesty line
+        assert "focus start" in out                   # top site ≥3 visits
+
+    def test_week_includes_older_and_domain_list(self):
+        w = self._w
+        db = self._chromium_db(self._tmp, [
+            ("https://old.site.org/y", 6 * 86400),   # inside 7-day window
+        ])
+        w._history_dbs = lambda: [("chromium", db)]
+        week = w.wellbeing({"action": "week"})
+        assert "old.site.org" in week
+        doms = w.wellbeing({"action": "domains"})
+        assert "old.site.org: 1" in doms
+
+    def test_firefox_schema_and_no_history_honest(self):
+        w = self._w
+        p = self._tmp / "places.sqlite"
+        c = sqlite3.connect(p)
+        c.execute("CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT)")
+        c.execute("CREATE TABLE moz_historyvisits (place_id INTEGER,"
+                  " visit_date INTEGER)")
+        us = int(time.time() * 1_000_000)
+        c.execute("INSERT INTO moz_places VALUES (1, 'https://ff.page/')")
+        c.execute("INSERT INTO moz_historyvisits VALUES (1, ?)", (us,))
+        c.commit()
+        c.close()
+        w._history_dbs = lambda: [("firefox", p)]
+        out = w.wellbeing({"action": "today"})
+        assert "ff.page" in out
+        # nothing at all → honest message
+        w._history_dbs = lambda: []
+        assert "No browser history found" in w.wellbeing({})
+
+    def test_live_file_never_opened(self):
+        """_copy_locked reads a copy; the source bytes stay untouched."""
+        db = self._chromium_db(self._tmp, [("https://a.b/", 10)])
+        before = db.read_bytes()
+        copy = self._w._copy_locked(db)
+        try:
+            assert copy != db and copy.is_file()
+            assert db.read_bytes() == before
+        finally:
+            shutil.rmtree(copy.parent, ignore_errors=True)
+
+    def test_tool_shape(self):
+        assert self._w.TOOL["name"] == "wellbeing"
+        assert self._w.TOOL["handler"] is self._w.wellbeing
+
+
+class TestSpokenBrief:
+    """3d: spoken brief — composed sources, spoken via ctx speak (K)."""
+
+    @pytest.fixture(autouse=True)
+    def _seams(self, tmp_path, monkeypatch):
+        import actions.spoken_brief as sb
+        self._sb = sb
+        monkeypatch.setattr(sb, "_cache_path",
+                            lambda: tmp_path / "brief.txt")
+        monkeypatch.setattr(sb, "_weather_section",
+                            lambda city="": "24C, clear skies in Jaipur")
+        monkeypatch.setattr(sb, "_tasks_section",
+                            lambda: "Standup 10:00 | Ship report 18:00")
+        monkeypatch.setattr(sb, "_headlines_section",
+                            lambda limit=4: "Big story one — Big story two")
+        yield
+
+    def test_compose_merges_sections_with_greeting(self):
+        text = self._sb.compose()
+        assert "Good" in text or "Hello" in text
+        assert "24C" in text and "Standup" in text and "Big story" in text
+        low = text.lower()
+        assert "weather:" in low and "agenda:" in low and "headlines:" in low
+
+    def test_missing_section_is_noted_not_fatal(self, monkeypatch):
+        monkeypatch.setattr(self._sb, "_weather_section",
+                            lambda city="": "")
+        text = self._sb.compose()
+        assert "24C" not in text
+        assert "no weather available" in text
+
+    def test_all_missing_is_honest(self, monkeypatch):
+        monkeypatch.setattr(self._sb, "_weather_section", lambda city="": "")
+        monkeypatch.setattr(self._sb, "_tasks_section", lambda: "")
+        monkeypatch.setattr(self._sb, "_headlines_section", lambda limit=4: "")
+        assert "empty" in self._sb.compose()
+
+    def test_spoken_and_cached_then_refresh(self):
+        spoken = []
+
+        class P:
+            def show_content(self, t, b):
+                pass
+
+        out = self._sb.spoken_brief({}, player=P(), speak=spoken.append)
+        assert spoken and spoken[0] == out
+        # second call serves the cache (sections not re-invoked)
+        status = self._sb.spoken_brief({"action": "status"})
+        assert "cached" in status
+        # refresh recomposes and speaks again
+        spoken.clear()
+        out2 = self._sb.spoken_brief({"action": "refresh"},
+                                     speak=spoken.append)
+        assert spoken and spoken[0] == out2
+
+    def test_speak_none_still_returns(self):
+        out = self._sb.spoken_brief({})
+        assert isinstance(out, str) and out
+
+    def test_tool_shape(self):
+        assert self._sb.TOOL["name"] == "spoken_brief"
+        assert self._sb.TOOL["handler"] is self._sb.spoken_brief
