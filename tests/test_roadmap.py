@@ -5035,7 +5035,12 @@ class TestScannedPdfRAG:
 
     @staticmethod
     def _blank_pdf(tmp_path, name="scan.pdf") -> Path:
-        from PyPDF2 import PdfWriter
+        import warnings
+        try:
+            from pypdf import PdfWriter            # modern, no warning
+        except ImportError:
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            from PyPDF2 import PdfWriter           # venv fallback
         w = PdfWriter()
         w.add_blank_page(width=612, height=792)
         p = tmp_path / name
