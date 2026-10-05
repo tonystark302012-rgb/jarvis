@@ -10,6 +10,12 @@ WHAT IT DOES
                     GROUP BY city ORDER BY 2 DESC LIMIT 10"
 
     describe — schema + row count of a file (no SQL needed).
+    summarize — DuckDB's own column statistics (count/distinct/null/min/
+                max/avg/quantiles) for the whole file, no SQL needed.
+
+    Auto-chart: a SELECT that comes back with a label column + a numeric
+    column ALSO saves an SVG bar chart (actions/charts.py) and prints the
+    path — 'average rent by city' gives the table AND the picture.
 
 FREE: duckdb is MIT-licensed and a single wheel. This is the ₹0 SQL
 engine from the roadmap (CSV/Parquet pe SQL — poore dataset seconds mein).
@@ -85,6 +91,51 @@ def _fmt_table(columns: list[str], rows: list[tuple]) -> str:
     return "\n".join(out)
 
 
+def _maybe_chart(cols: list[str], rows: list, title: str) -> str:
+    """Bar-chart the first (label, numeric) column pair a result offers.
+    Honest about when it can't: returns '' instead of a junk SVG."""
+    if not cols or len(rows) < 3 or len(cols) < 2:
+        return ""
+    # first column whose values are short, unique-ish strings = labels
+    label_i = None
+    for i in range(len(cols) - 1):
+        vals = [r[i] for r in rows]
+        if all(v is not None and len(str(v)) <= 40 for v in vals) and \
+                len({str(v) for v in vals}) >= max(2, len(rows) // 2):
+            label_i = i
+            break
+    if label_i is None:
+        return ""
+    num_i = None
+    for j in range(len(cols)):
+        if j == label_i:
+            continue
+        ok = True
+        for r in rows:
+            try:
+                float(r[j])
+            except (TypeError, ValueError):
+                ok = False
+                break
+        if ok and any(r[j] is not None for r in rows):
+            num_i = j
+            break
+    if num_i is None:
+        return ""
+    pairs = []
+    for r in rows[:30]:
+        try:
+            pairs.append([str(r[label_i])[:28], float(r[num_i])])
+        except (TypeError, ValueError):
+            return ""
+    try:
+        from actions.charts import chart
+        return chart({"kind": "bar", "data": pairs,
+                      "title": f"{title}: {cols[num_i]} by {cols[label_i]}"})
+    except Exception:                               # charting is a bonus
+        return ""
+
+
 def data_query(parameters: dict = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     if not _OK:
@@ -108,6 +159,22 @@ def data_query(parameters: dict = None, player=None, session_memory=None) -> str
         return f"Couldn't start DuckDB: {e}"
 
     try:
+        if action == "summarize":
+            if not files:
+                return "Which file? Pass file=… (summarize needs one)"
+            target = files[0]
+            low = target.lower()
+            reader = ("read_csv_auto" if low.endswith(".csv") else
+                      "read_parquet" if low.endswith((".parquet", ".pq"))
+                      else "read_json_auto")
+            qpath = target.replace("'", "''")
+            cur = con.execute(
+                f"SUMMARIZE SELECT * FROM {reader}('{qpath}')")
+            cols = [d[0] for d in cur.description] if cur.description else []
+            rows = cur.fetchmany(_MAX_ROWS)
+            return (f"{Path(target).name} — column summary "
+                    f"(DuckDB SUMMARIZE):\n" + _fmt_table(cols, rows))
+
         if action == "describe" or (files and not sql):
             if not files:
                 return "Which file? Pass file=…"
@@ -150,7 +217,12 @@ def data_query(parameters: dict = None, player=None, session_memory=None) -> str
         cur = con.execute(sql)
         cols = [d[0] for d in cur.description] if cur.description else []
         rows = cur.fetchmany(_MAX_ROWS)
-        return _fmt_table(cols, rows)
+        out = _fmt_table(cols, rows)
+        note = _maybe_chart(cols, rows,
+                            Path(files[0]).name if files else "query")
+        if note:
+            out += "\n" + note
+        return out
     except Exception as e:
         return f"Query failed: {e}"
     finally:
@@ -166,9 +238,12 @@ TOOL = {
         "Run SQL over the user's data files with DuckDB (offline, free). "
         "Pass file= (a path, glob, or several separated by ;) and query= "
         "(SELECT/CTE; LIMIT auto-applied). action=describe shows schema + "
-        "row count without SQL. The first file is also available as the "
+        "row count without SQL; action=summarize shows DuckDB column "
+        "statistics (min/max/avg/nulls/quantiles) without SQL. SELECT "
+        "results with a label+numeric column pair also save an SVG bar "
+        "chart and print its path. The first file is also available as the "
         "view `data`. Use for 'CSV pe SQL chalao', 'average rent by "
-        "city', 'this parquet file mein kya hai'."
+        "city', 'is data mein kya hai', 'give me column stats'."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -176,7 +251,8 @@ TOOL = {
             "file": {"type": "STRING",
                      "description": "Path/glob of CSV, Parquet or JSON"},
             "query": {"type": "STRING", "description": "SQL to run"},
-            "action": {"type": "STRING", "description": "describe (optional)"},
+            "action": {"type": "STRING",
+                       "description": "describe | summarize (optional)"},
         },
         "required": [],
     },

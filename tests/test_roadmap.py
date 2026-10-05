@@ -460,6 +460,28 @@ class TestDataQuery:
         out = data_query({"file": str(self.csv)})
         assert "4 row(s)" in out and "city" in out and "price" in out
 
+    def test_summarize_column_stats(self):
+        from actions.data_query import data_query
+        out = data_query({"file": str(self.csv), "action": "summarize"})
+        assert "column summary" in out and "price" in out
+        assert "18000" in out and "48000" in out          # min/max visible
+        assert "summarize needs one" in data_query(
+            {"query": "SELECT 1", "action": "summarize"})
+
+    def test_auto_chart_on_chartable_result(self, tmp_path, monkeypatch):
+        from actions.data_query import data_query
+        monkeypatch.setattr("actions.charts._base_dir", lambda: tmp_path)
+        out = data_query({"file": str(self.csv),
+                          "query": "SELECT city, AVG(price) avg FROM data "
+                                   "GROUP BY city"})
+        assert "Chart saved:" in out
+        path = Path(out.split("Chart saved: ", 1)[1].splitlines()[0])
+        assert path.exists() and "<svg" in path.read_text()
+        # single-column result → honest, no junk chart
+        out2 = data_query({"file": str(self.csv),
+                           "query": "SELECT DISTINCT city FROM data"})
+        assert "Chart saved:" not in out2
+
     def test_pure_sql_without_file(self):
         from actions.data_query import data_query
         out = data_query({"query": "SELECT 42 AS answer"})
