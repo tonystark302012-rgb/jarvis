@@ -1,8 +1,10 @@
 #computer_control.py
 import io
 import json
+import os
 import platform
 import re
+import shutil
 import string
 import subprocess
 import sys
@@ -20,11 +22,13 @@ try:
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.05
     _PYAUTOGUI = True
-except Exception:
+    _PYAUTOGUI_ERR = ""
+except Exception as e:
     # Optional dep: import can fail with ImportError (not installed) OR with
     # KeyError('DISPLAY')/DisplayConnectionError when no X server exists —
     # either way the action must stay discoverable, just disabled.
     _PYAUTOGUI = False
+    _PYAUTOGUI_ERR = f"{type(e).__name__}: {e}"
 
 try:
     import pyperclip
@@ -80,7 +84,10 @@ def _safe_screenshot_path(requested: str | None) -> Path:
 
 def _require_pyautogui():
     if not _PYAUTOGUI:
-        raise RuntimeError("PyAutoGUI not installed. Run: pip install pyautogui")
+        raise RuntimeError(
+            "PyAutoGUI unavailable ("
+            + (_PYAUTOGUI_ERR or "not installed — pip install pyautogui")
+            + ")")
 
 _FIRST_NAMES = [
     "Alex", "Jordan", "Taylor", "Morgan", "Casey", "Riley", "Drew", "Quinn",
@@ -157,7 +164,33 @@ def _user_profile() -> dict:
         pass
     return {}
 
+def _wayland_type(text: str) -> str:
+    """Type on Wayland through wtype (virtual-keyboard protocol — XTEST does
+    not exist there). Returns an honest result string; never falls back to
+    X11, which cannot work in a Wayland session."""
+    exe = shutil.which("wtype")
+    if not exe:
+        return ("Wayland session detected but wtype is missing — install it "
+                "(e.g. `sudo apt install wtype`) to type from JARVIS.")
+    try:
+        r = subprocess.run([exe, text], capture_output=True, text=True,
+                           timeout=15)
+    except Exception as e:                       # noqa: BLE001
+        return f"wtype failed to run ({type(e).__name__}: {e})"
+    if r.returncode != 0:
+        err = (r.stderr or "").strip()[:160] or "no stderr"
+        return f"wtype exited {r.returncode}: {err}"
+    return f"Typed via wtype: {text[:60]}{'…' if len(text) > 60 else ''}"
+
+
+def _is_wayland() -> bool:
+    return (platform.system() == "Linux"
+            and bool(os.environ.get("WAYLAND_DISPLAY")))
+
+
 def _type(text: str, interval: float = 0.03) -> str:
+    if _is_wayland():
+        return _wayland_type(text)
     _require_pyautogui()
     time.sleep(0.3)
     pyautogui.typewrite(text, interval=interval)
@@ -165,6 +198,10 @@ def _type(text: str, interval: float = 0.03) -> str:
 
 
 def _smart_type(text: str, clear_first: bool = True) -> str:
+    if _is_wayland():
+        # wtype sends full UTF-8 text directly — no clipboard round-trip and
+        # no X11 field-clear available, so type as-is and say so.
+        return _wayland_type(text)
     _require_pyautogui()
     if clear_first:
         _clear_field()

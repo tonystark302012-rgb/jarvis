@@ -103,6 +103,14 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 #                            #   (also needs ffmpeg on PATH for most formats)
 #   pip install mediapipe    # pushup_counter: elbow-angle rep detection
 
+# ── Auto-discovered actions & scheduling engines ──────────────────────────────
+croniter>=2,<3          # dots scheduler: cron / at-style recurring task windows
+feedparser>=6,<7        # feed action: RSS/Atom + GitHub releases.atom watching
+sqlite-vec>=0.1,<1      # hybrid RAG: vector search inside SQLite
+trafilatura>=1.8,<2     # scrape: article-grade HTML → text extraction
+pypdfium2>=4,<7         # file_processor: render scanned-PDF pages for OCR
+duckdb>=1,<2            # data_query: SQL over CSV/Parquet files
+
 # ── Optional: local wake word ("Hey Jarvis") ──────────────────────────────────
 # Deliberately NOT installed by default — it's opt-in. Enable it (and download
 # the tiny model) with one click from ⚙ → WAKE WORD in the app, or install it

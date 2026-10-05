@@ -1736,3 +1736,253 @@ class TestMainWiring:
         # remote commands must wake an asleep JARVIS (no WAKE button on phone)
         drain = self.SRC[self.SRC.index("async def _process_dashboard_commands"):]
         assert 'wake(reason="remote command")' in drain[:4000]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Batch 1 — free keyless actions: image_gen, feed, backup, sky (+ wtype)
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestImageGen:
+    def test_png_saved(self, tmp_path, monkeypatch):
+        from actions import image_gen as ig
+        monkeypatch.setattr(ig, "_base_dir", lambda: tmp_path)
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 300
+        monkeypatch.setattr(ig, "_get", lambda url, timeout=120: png)
+        out = ig.image_gen({"prompt": "a red fox", "width": 512,
+                          "height": 512, "seed": 7})
+        assert out.startswith("Saved: ")
+        path = Path(out.split(": ", 1)[1].split(" (")[0])
+        assert path.exists() and path.read_bytes() == png
+        assert "512x512" in out and "seed=7" in out
+
+    def test_refuses_non_image(self, monkeypatch, tmp_path):
+        from actions import image_gen as ig
+        monkeypatch.setattr(ig, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            ig, "_get",
+            lambda url, timeout=120: b"<html>rate limited</html>" * 10)
+        out = ig.image_gen({"prompt": "x"})
+        assert "refused" in out
+        assert not list((tmp_path / "generated").glob("*"))
+
+    def test_needs_prompt_and_sniffs_formats(self):
+        from actions import image_gen as ig
+        assert "prompt" in ig.image_gen({})
+        assert ig._sniff(b"\x89PNG\r\n\x1a\n...") == "png"
+        assert ig._sniff(b"\xff\xd8\xff\xe0rest") == "jpg"
+        assert ig._sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == "webp"
+        assert ig._sniff(b"not an image") == ""
+        assert ig.TOOL["name"] == "image_gen"
+        assert callable(ig.TOOL["handler"])
+
+
+class TestFeed:
+    RSS = (b"<?xml version=\"1.0\"?><rss version=\"2.0\"><channel>"
+           b"<title>T</title>"
+           b"<item><title>Hello 1</title><link>http://x/1</link>"
+           b"<pubDate>Mon, 05 Oct 2026 10:00:00 GMT</pubDate></item>"
+           b"<item><title>Hello 2</title><link>http://x/2</link></item>"
+           b"</channel></rss>")
+
+    def test_add_list_check_remove(self, tmp_path, monkeypatch):
+        from actions import feed as fd
+        monkeypatch.setattr(fd, "_feeds_path", lambda: tmp_path / "feeds.json")
+        monkeypatch.setattr(fd, "_get", lambda url, timeout=20: self.RSS)
+        assert "No feeds yet" in fd.feed({"action": "list"})
+        out = fd.feed({"action": "add", "name": "releases",
+                       "url": "https://github.com/o/r/releases.atom"})
+        assert "Subscribed" in out
+        assert "releases" in fd.feed({"action": "list"})
+        out = fd.feed({"action": "check"})
+        assert "Hello 1" in out and "Hello 2" in out
+        assert "shown of" in out
+        out = fd.feed({"action": "check", "limit": 1})
+        assert "Hello 1" in out and "Hello 2" not in out
+        assert "Removed" in fd.feed({"action": "remove", "which": "releases"})
+        assert "No feeds" in fd.feed({"action": "list"})
+        assert "http" in fd.feed({"action": "add", "name": "x",
+                                  "url": "ftp://bad"})
+        assert "Unknown feed action" in fd.feed({"action": "wat"})
+
+    def test_check_reports_unreachable(self, tmp_path, monkeypatch):
+        from actions import feed as fd
+        monkeypatch.setattr(fd, "_feeds_path", lambda: tmp_path / "f.json")
+        fd._save([{"name": "down", "url": "https://example.invalid/rss"}])
+
+        def boom(url, timeout=20):
+            raise OSError("connection refused")
+        monkeypatch.setattr(fd, "_get", boom)
+        out = fd.feed({"action": "check"})
+        assert "unreachable" in out and "connection refused" in out
+
+    def test_github_releases_url_accepted(self, tmp_path, monkeypatch):
+        from actions import feed as fd
+        monkeypatch.setattr(fd, "_feeds_path", lambda: tmp_path / "f.json")
+        out = fd.feed({"action": "add", "name": "jarvis",
+                       "url": "https://github.com/tonystark302012-rgb/"
+                              "jarvis/releases.atom"})
+        assert "Subscribed" in out
+
+
+class TestBackupZip:
+    @staticmethod
+    def _populated(base: Path):
+        (base / "memory").mkdir(parents=True)
+        (base / "memory" / "f.json").write_text('{"prefs": 1}')
+        (base / "config" / "certs").mkdir(parents=True)
+        (base / "config" / "certs" / "jarvis.key").write_text("SECRETKEY")
+        (base / "config" / "api_keys.json").write_text('{"gemini": "k"}')
+        (base / "macros").mkdir()
+        (base / "macros" / "skill.md").write_text("# skill")
+        (base / "research").mkdir()
+        (base / "research" / "r.md").write_text("report")
+        (base / "charts").mkdir()
+        (base / "charts" / "evil.svg").write_text("<svg/>")
+        import sqlite3 as _sq
+        con = _sq.connect(base / "memory" / "fake.db")
+        con.execute("CREATE TABLE t (x INTEGER)")
+        con.execute("INSERT INTO t VALUES (42)")
+        con.commit()
+        con.close()
+        (base / "memory" / "fake.db-wal").write_bytes(b"stale-wal")
+
+    def test_create_contains_excludes_and_snapshots(self, tmp_path,
+                                                    monkeypatch):
+        from actions import backup as bk
+        base = tmp_path / "app"
+        self._populated(base)
+        monkeypatch.setattr(bk, "_base_dir", lambda: base)
+        out = bk.backup({"action": "create"})
+        assert out.startswith("Saved: ") and "API keys" in out
+        zpath = Path(out.split(": ", 1)[1].split(" (")[0])
+        import zipfile as _zf
+        with _zf.ZipFile(zpath) as zf:
+            names = set(zf.namelist())
+            assert "memory/f.json" in names
+            assert "memory/fake.db" in names
+            assert "config/api_keys.json" in names
+            assert "macros/skill.md" in names and "research/r.md" in names
+            assert not any(n.startswith("charts/") for n in names)
+            assert not any(n.endswith("jarvis.key") for n in names)
+            assert not any(n.endswith("-wal") for n in names)
+            # the snapshot inside the zip is a REAL, openable sqlite db
+            import sqlite3 as _sq
+            dump = tmp_path / "check.db"
+            dump.write_bytes(zf.read("memory/fake.db"))
+            con = _sq.connect(dump)
+            assert con.execute("SELECT x FROM t").fetchone()[0] == 42
+            con.close()
+
+    def test_list_and_restore_never_overwrite(self, tmp_path, monkeypatch):
+        from actions import backup as bk
+        base = tmp_path / "app"
+        self._populated(base)
+        monkeypatch.setattr(bk, "_base_dir", lambda: base)
+        bk.backup({"action": "create"})
+        listed = bk.backup({"action": "list"})
+        assert "#1" in listed and "jarvis-backup-" in listed
+        live = (base / "memory" / "f.json")
+        live.write_text('{"prefs": "changed-live"}')
+        out = bk.backup({"action": "restore", "which": "#1"})
+        assert out.startswith("Restored ") and "nothing was overwritten" in out
+        dest = Path(out.split("into ", 1)[1].split(" —")[0])
+        assert (dest / "memory" / "f.json").read_text() == '{"prefs": 1}'
+        assert live.read_text() == '{"prefs": "changed-live"}'
+        assert "Unknown backup action" in bk.backup({"action": "nope"})
+
+
+class TestSky:
+    def test_iss(self, monkeypatch):
+        from actions import sky as sk
+        import json as _j
+        monkeypatch.setattr(
+            sk, "_get",
+            lambda url, timeout=20: _j.dumps({
+                "iss_position": {"latitude": "12.5", "longitude": "-45.25"},
+                "timestamp": 1700000000}).encode())
+        out = sk.sky({"action": "iss"})
+        assert "+12.5000" in out and "-45.2500" in out and "UTC" in out
+
+    def test_quakes_bucket_and_limit(self, monkeypatch):
+        from actions import sky as sk
+        import json as _j
+        def feat(m, place, t):
+            return {
+                "properties": {"mag": m, "place": place, "time": t,
+                               "url": "https://usgs.gov/x"},
+                "geometry": {"coordinates": [-118.2, 34.05, 10]}}
+        payload = _j.dumps({
+            "features": [feat(5.1, "20 km S of Foo", 1793460000000),
+                         feat(2.9, "Bar", 1793450000000)]}).encode()
+        seen = {}
+
+        def fake(url, timeout=20):
+            seen["url"] = url
+            return payload
+        monkeypatch.setattr(sk, "_get", fake)
+        out = sk.sky({"action": "quakes", "min_magnitude": "4.5",
+                      "limit": 1})
+        assert "4.5_day.geojson" in seen["url"]
+        assert "M5.1" in out and "20 km S of Foo" in out
+        assert "M2.9" not in out                    # limit=1 honoured
+        assert "USGS last 24 h" in out
+
+    def test_suntimes_needs_coords_and_formats(self, monkeypatch):
+        from actions import sky as sk
+        assert "needs lat" in sk.sky({"action": "suntimes"})
+        assert "YYYY-MM-DD" in sk.sky({"action": "suntimes", "lat": 1,
+                                       "lon": 2, "date": "october"})
+        import json as _j
+        monkeypatch.setattr(
+            sk, "_get",
+            lambda url, timeout=20: _j.dumps({
+                "status": "OK",
+                "results": {"sunrise": "2026-10-05T06:12:00+00:00",
+                            "sunset": "2026-10-05T17:48:00+00:00",
+                            "day_length": 42000}}).encode())
+        out = sk.sky({"action": "suntimes", "lat": 26.91, "lon": 75.79,
+                      "date": "2026-10-05"})
+        assert "Sun for 2026-10-05" in out
+        assert "sunrise 06:12" in out and "sunset 17:48" in out
+
+    def test_unknown_and_network_failure_honest(self, monkeypatch):
+        from actions import sky as sk
+        assert "Unknown sky action" in sk.sky({"action": "meteors"})
+
+        def boom(url, timeout=20):
+            raise OSError("dns blocked")
+        monkeypatch.setattr(sk, "_get", boom)
+        out = sk.sky({"action": "iss"})
+        assert "failed" in out and "dns blocked" in out
+
+
+class TestWaylandWtype:
+    def test_types_through_wtype(self, tmp_path, monkeypatch):
+        import os as _os
+        from actions import computer_control as cc
+        fake = tmp_path / "wtype"
+        fake.write_text("#!/bin/sh\nprintf '%s' \"$1\" > \"$WTYPE_OUT\"\n")
+        fake.chmod(0o755)
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("WTYPE_OUT", str(tmp_path / "typed.txt"))
+        monkeypatch.setenv("PATH", str(tmp_path) + _os.pathsep
+                           + _os.environ.get("PATH", ""))
+        out = cc._type("hello world")
+        assert "wtype" in out
+        assert (tmp_path / "typed.txt").read_text() == "hello world"
+
+    def test_wayland_without_wtype_is_honest(self, monkeypatch, tmp_path):
+        import os as _os
+        from actions import computer_control as cc
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("PATH", str(tmp_path))       # empty — no wtype
+        out = cc._type("hi")
+        assert "wtype is missing" in out
+
+    def test_no_display_reports_real_reason(self, monkeypatch):
+        from actions import computer_control as cc
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        if cc._PYAUTOGUI:
+            pytest.skip("pyautogui usable here — nothing to report")
+        with pytest.raises(RuntimeError, match="PyAutoGUI unavailable"):
+            cc._type("hi")
