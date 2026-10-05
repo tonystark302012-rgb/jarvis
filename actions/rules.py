@@ -6,6 +6,11 @@ Declarative rules: WHEN a trigger fires, THEN run one or more tools. Triggers:
   file   — a file appears / changes / is removed under a watched folder
   usb    — a block device appears/disappears (Linux/Windows best-effort)
   phrase — fires when the UI relay calls fire_phrase (scene-style voice rules)
+  interval — every N minutes/hours/days since the anchor tick
+  site   — a URL goes up / down / its head-bytes change (free HTTP probe,
+           default every 5m, rate-limited per rule)
+  port   — a local TCP port opens or closes (127.0.0.1 connect probe)
+  proc   — a process appears or disappears (Linux /proc scan; ps fallback)
 
 Rules live in a JSON file under the user's config dir, survive restarts, and
 are executed through an injected runner (main.py passes the action registry).
@@ -18,6 +23,7 @@ sets allow_destructive (default false, and the UI never sets it).
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from pathlib import Path
@@ -117,8 +123,16 @@ def add_rule(trigger: dict, tool: str, args: dict | None = None,
     }
     if clean_steps:
         rule["steps"] = clean_steps
-    rule["id"] = f"{_mk_id(rule)}#{int(time.time()*1000) % 100000}"
+    base_id = f"{_mk_id(rule)}#{int(time.time()*1000) % 100000}"
+    rid = base_id
+    n = 1
     with _LOCK:
+        # unique even for rules created in the same millisecond — colliding
+        # ids would share trigger state (_STATE) and double-fire or mute
+        while any(x.get("id") == rid for x in _RULES):
+            n += 1
+            rid = f"{base_id}-{n}"
+        rule["id"] = rid
         _RULES.append(rule)
         _save()
     kind = f"scene({len(clean_steps)} steps)" if clean_steps else tool
@@ -338,6 +352,160 @@ def _due_phrase(r: dict) -> bool:
     return False
 
 
+# ── site / port / proc triggers (batch: rules v2) ──────────────────────────
+# All three are EDGE-triggered on a state transition with a first-tick
+# baseline (same contract as file triggers — never fire on observation #1),
+# rate-limited per rule so a 30s tick never hammers the target.
+
+def _site_probe(url: str, timeout: float = 8.0) -> tuple[bool, str]:
+    """(reachable, sha1-of-first-64KB). Any HTTP response — even 404/500 —
+    means the site is UP; only DNS/conn/timeout failures mean down."""
+    import hashlib
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "JARVIS-Rules/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read(65536)
+    except urllib.error.HTTPError as he:         # server answered → UP
+        try:
+            data = he.read(65536)
+        except Exception:                        # noqa: BLE001
+            data = b""
+    except Exception:                            # noqa: BLE001
+        return False, ""
+    return True, hashlib.sha1(data).hexdigest()
+
+
+def _rate_ok(rid: str, now: float, every: float) -> bool:
+    """Per-rule probe interval — checked BEFORE the probe so a 30s tick
+    never hammers the target (site) or the local socket (port)."""
+    st = _STATE.get(rid)
+    if not isinstance(st, dict):
+        return True
+    return now - float(st.get("probe", 0.0)) >= max(0.0, every)
+
+
+def _edge_fire(rid: str, now: float, cur_state: str, want: str,
+               digest: str | None = None) -> bool:
+    """Shared edge-trigger for site/port/proc. `want` is the state that
+    fires ('up'/'down'/'changed'/'running'/'gone'); first observation is a
+    baseline (never fires) — same contract as file triggers."""
+    st = _STATE.get(rid)
+    if not isinstance(st, dict):
+        st = {}
+    st["probe"] = now
+    prev = st.get("state")
+    if digest is not None:
+        prev_hash, st["hash"] = st.get("hash"), digest
+    else:
+        prev_hash = None
+    st["state"] = cur_state
+    _STATE[rid] = st
+    if prev is None:
+        return False                              # baseline tick: no fire
+    if want == "changed":
+        return (cur_state == "up" and prev == "up"
+                and prev_hash is not None and digest != prev_hash)
+    return prev != want and cur_state == want     # edge INTO the want-state
+
+
+def _due_site(r: dict, now: float) -> bool:
+    trig = r.get("trigger", {})
+    url = str(trig.get("url") or trig.get("value") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return False
+    want = str(trig.get("state") or "up").lower()
+    if want not in ("up", "down", "changed"):
+        want = "up"
+    every = _parse_interval(trig.get("every")) or 300
+    if not _rate_ok(r["id"], now, every):
+        return False
+    reachable, digest = _site_probe(url)
+    return _edge_fire(r["id"], now,
+                      "up" if reachable else "down", want, digest)
+
+
+def _due_port(r: dict, now: float) -> bool:
+    import socket
+    trig = r.get("trigger", {})
+    raw = str(trig.get("port") or trig.get("value") or "").strip()
+    if not raw.isdigit():
+        return False
+    port = int(raw)
+    if not 1 <= port <= 65535:
+        return False
+    want = str(trig.get("state") or "up").lower()
+    if want not in ("up", "down"):
+        want = "up"
+    every = _parse_interval(trig.get("every")) or 30
+    if not _rate_ok(r["id"], now, every):
+        return False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.7)
+    try:
+        sock.connect(("127.0.0.1", port))
+        up = True
+    except OSError:
+        up = False
+    finally:
+        sock.close()
+    return _edge_fire(r["id"], now, "up" if up else "down", want)
+
+
+def _proc_names() -> set[str]:
+    """Lowercased process names right now. Linux: direct /proc scan (no
+    subprocess); elsewhere: ps (macOS); last resort: tasklist (Windows)."""
+    import os
+    names: set[str] = set()
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/comm", encoding="utf-8",
+                          errors="replace") as fh:
+                    names.add(fh.read().strip().lower())
+            except OSError:
+                continue
+        if names:
+            return names
+    except OSError:
+        pass
+    import subprocess
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(["ps", "-A", "-o", "comm="],
+                                 capture_output=True, text=True,
+                                 timeout=5).stdout
+        else:
+            out = subprocess.run(["tasklist", "/FO", "CSV"],
+                                 capture_output=True, text=True,
+                                 timeout=5).stdout
+        for line in out.splitlines():
+            if line.strip():
+                names.add(line.strip().strip('"').split(",")[0].lower())
+    except Exception:                             # noqa: BLE001
+        pass
+    return names
+
+
+def _due_proc(r: dict, now: float) -> bool:
+    trig = r.get("trigger", {})
+    want_name = str(trig.get("value") or trig.get("proc") or "").strip().lower()
+    if not want_name:
+        return False
+    want = str(trig.get("state") or "running").lower()
+    if want not in ("running", "gone"):
+        want = "running"
+    every = _parse_interval(trig.get("every")) or 0   # /proc scan is cheap
+    if not _rate_ok(r["id"], now, every):
+        return False
+    running = any(want_name in n for n in _proc_names())
+    return _edge_fire(r["id"], now,
+                      "running" if running else "gone", want)
+
+
 def _parse_interval(value) -> int | None:
     """'30m' | '2h' | '1d' | '1w' | bare minutes → seconds. None = invalid."""
     raw = str(value or "").strip().lower()
@@ -381,8 +549,10 @@ def _due_interval(r: dict, now: float) -> bool:
 
 
 _DUE = {"time": _due_time, "file": _due_file, "usb": lambda r: False,
-        "phrase": _due_phrase, "interval": _due_interval}
-_DUE_ARGS = {"time", "interval"}     # these need (r, now[, today])
+        "phrase": _due_phrase, "interval": _due_interval,
+        "site": _due_site, "port": _due_port, "proc": _due_proc}
+_DUE_ARGS = {"time", "interval", "site", "port", "proc"}
+# → time needs (r, now, today); interval/site/port/proc need (r, now)
 
 
 def fire_phrase(text: str) -> list[str]:
@@ -449,8 +619,9 @@ def tick(now: float | None = None) -> list[str]:
         if fn is None:
             continue
         try:
-            if fn(r, now, today) if t == "time" else (
-                    fn(r, now) if t == "interval" else fn(r)):
+            if (fn(r, now, today) if t == "time" else
+                    (fn(r, now) if t in
+                     ("interval", "site", "port", "proc") else fn(r))):
                 ok, out = _exec_rule(r, t)
                 if _RUNNER is not None:
                     _note_health(r, ok, out, now)
@@ -630,6 +801,11 @@ def manage_rules(parameters: dict = None, player=None, session_memory=None) -> s
             "value": params.get("value", ""),
             "path": params.get("path", ""),
         }
+        # site/port/proc extras — only carried when given (keeps JSON clean)
+        if isinstance(trigger, dict):
+            for key in ("state", "every", "url", "port", "proc"):
+                if params.get(key) not in (None, ""):
+                    trigger.setdefault(key, params.get(key))
         tool = str(params.get("tool", "")).strip()
         args = params.get("tool_args") or {}
         if isinstance(args, str):
@@ -670,15 +846,18 @@ TOOL = {
     "name": "rules",
     "description": (
         "When/then automation rules that run tools on triggers. Actions: "
-        "list (default), add (trigger_type: time HH:MM | file path + value "
-        "appears/removed/changed | phrase keyword; plus tool + tool_args — "
-        "OR steps: JSON list of {tool, args} to run in order as a scene), "
-        "remove (by number or match), tick (evaluate now), health (rules "
-        "that recently failed — self-heal retries them automatically with "
-        "backoff). Use when the user "
-        "wants 'every morning at 8 do X', 'when a file appears in Downloads "
-        "do Y', 'when I say Z do W', or a multi-action routine like "
-        "'movie mode' (open player, dim lights, silence notifications)."
+        "list (default), add (trigger_type: time HH:MM | interval 30m/2h/1d "
+        "| file path + value appears/removed/changed | phrase keyword | "
+        "site value=URL state=up/down/changed every=5m | port value=8080 "
+        "state=up/down | proc value=<process name> state=running/gone; plus "
+        "tool + tool_args — OR steps: JSON list of {tool, args} to run in "
+        "order as a scene), remove (by number or match), tick (evaluate "
+        "now), health (rules that recently failed — self-heal retries them "
+        "automatically with backoff). Use when the user wants 'every "
+        "morning at 8 do X', 'when a file appears in Downloads do Y', "
+        "'when the server/port/process comes up tell me', 'watch this site "
+        "and alert me if it goes down', 'when I say Z do W', or a "
+        "multi-action routine like 'movie mode'."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -686,10 +865,23 @@ TOOL = {
             "action": {"type": "STRING",
                        "description": "list | add | remove | tick | health | suggest"},
             "trigger_type": {"type": "STRING",
-                             "description": "time | interval | file | phrase | usb"},
+                             "description": "time | interval | file | "
+                                            "phrase | usb | site | port | "
+                                            "proc"},
             "value": {"type": "STRING",  # time=HH:MM, interval=30m/2h/1d, phrase=keyword
-                      "description": "HH:MM for time, keyword for phrase, appears/removed for file"},
+                      "description": "HH:MM for time, interval like 30m/2h, "
+                                     "keyword for phrase, appears/removed "
+                                     "for file, URL for site, port number "
+                                     "for port, process name for proc"},
             "path": {"type": "STRING", "description": "Folder/file path for file trigger"},
+            "state": {"type": "STRING",
+                      "description": "site: up (default) | down | changed; "
+                                     "port: up (default) | down; "
+                                     "proc: running (default) | gone — the "
+                                     "edge that fires the rule"},
+            "every": {"type": "STRING",
+                      "description": "Probe rate limit, e.g. 30s/5m (site "
+                                     "default 5m, port default 30s)"},
             "tool": {"type": "STRING", "description": "Tool to run when triggered"},
             "tool_args": {"type": "STRING", "description": "JSON args for the tool"},
             "steps": {"type": "STRING",

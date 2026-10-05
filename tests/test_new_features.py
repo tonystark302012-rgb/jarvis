@@ -1986,3 +1986,135 @@ class TestWaylandWtype:
             pytest.skip("pyautogui usable here — nothing to report")
         with pytest.raises(RuntimeError, match="PyAutoGUI unavailable"):
             cc._type("hi")
+
+
+class TestRulesV2SitePortProc:
+    """rules v2: site (HTTP edge), port (local TCP edge), proc (/proc edge)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        import actions.rules as r
+        monkeypatch.setattr(r, "_path", lambda: tmp_path / "rules.json")
+        r._RULES.clear()
+        r._LOADED = False
+        r._DAY_KEYS.clear()
+        r._STATE.clear()
+        r._LAST_FIRE.clear()
+        fired = []
+        r.set_runner(lambda t, a: fired.append((t, a)) or f"ran {t}")
+        r.set_notifier(lambda m: None)
+        self.fired = fired
+        yield
+        r._RULES.clear()
+        r._LOADED = False
+        r.set_runner(None)
+        r.set_notifier(None)
+
+    def test_site_up_down_transitions_rate_limited(self, monkeypatch):
+        import actions.rules as r
+        state = {"up": True}
+        probes = []
+
+        def fake_probe(url, timeout=8.0):
+            probes.append(url)
+            return state["up"], "hashA" if state["up"] else ""
+        monkeypatch.setattr(r, "_site_probe", fake_probe)
+        r.add_rule({"type": "site", "value": "https://example.com",
+                    "state": "up"}, "scan", {}, "site watch")
+        assert r.tick(now=1000) == []              # baseline: never fires
+        assert r.tick(now=1100) == []              # within 5m rate → no probe
+        assert len(probes) == 1
+        state["up"] = False
+        assert r.tick(now=1400) == []              # rate passed → probes DOWN
+        assert len(probes) == 2                    # …want=up → no fire yet
+        assert r.tick(now=1500) == []              # rate-blocked again
+        assert len(probes) == 2
+        state["up"] = True
+        out = r.tick(now=1900)                     # down→up EDGE → FIRE
+        assert out and self.fired and self.fired[0][0] == "scan"
+
+    def test_site_down_and_changed_states(self, monkeypatch):
+        import actions.rules as r
+        state = {"up": True, "body": "v1"}
+
+        def fake_probe(url, timeout=8.0):
+            return state["up"], state["body"] if state["up"] else ""
+        monkeypatch.setattr(r, "_site_probe", fake_probe)
+        r.add_rule({"type": "site", "value": "https://example.com",
+                    "state": "down"}, "scan", {}, "down alert")
+        r.add_rule({"type": "site", "value": "https://example.com",
+                    "state": "changed"}, "scan", {}, "changed alert")
+        assert r.tick(now=1000) == []              # baselines (both)
+        state["up"] = False
+        out = r.tick(now=2000)                     # second rule rate: 2000-1000
+        assert out and len(self.fired) == 1        # only the DOWN rule fires
+        state["up"] = True
+        assert r.tick(now=3000) == []              # back up, nothing wanted
+        state["body"] = "v2"
+        out = r.tick(now=4000)                     # changed rule sees new hash
+        assert out and len(self.fired) == 2
+
+    def test_port_edge_with_real_socket(self):
+        import socket
+        import actions.rules as r
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            r.add_rule({"type": "port", "value": str(port),
+                        "state": "up"}, "scan", {}, "port up")
+            assert r.tick(now=1000) == []          # baseline (open)
+            srv.close()                            # → down
+            assert r.tick(now=1100) == []          # want up, now down
+            assert r.tick(now=1140) == []          # still down, no edge
+            srv2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv2.bind(("127.0.0.1", port))
+            srv2.listen(1)
+            try:
+                out = r.tick(now=1180)             # down→up EDGE → FIRE
+                assert out and self.fired
+            finally:
+                srv2.close()
+        finally:
+            try:
+                srv.close()
+            except OSError:
+                pass
+
+    def test_proc_scan_real_and_edges(self, monkeypatch):
+        import actions.rules as r
+        # real /proc scan sees this python process
+        assert any("python" in n for n in r._proc_names())
+        names = set()                             # absent at baseline
+        monkeypatch.setattr(r, "_proc_names", lambda: set(names))
+        r.add_rule({"type": "proc", "value": "zzz-jarvis-test",
+                    "state": "running"}, "scan", {}, "proc watch")
+        assert r.tick(now=1000) == []              # absent at baseline
+        names.add("zzz-jarvis-test")               # 'starts'
+        out = r.tick(now=1001)
+        assert out and self.fired
+        r._RULES.clear()
+        r._STATE.clear()
+        r.add_rule({"type": "proc", "value": "zzz-jarvis-test",
+                    "state": "gone"}, "scan", {}, "proc exit watch")
+        assert r.tick(now=2000) == []              # running at baseline
+        names.clear()                              # 'exits'
+        out = r.tick(now=2001)
+        assert out and len(self.fired) == 2
+
+    def test_manage_rules_surface_passes_extras(self):
+        import actions.rules as r
+        out = r.manage_rules({"action": "add", "trigger_type": "site",
+                              "value": "https://status.example.org",
+                              "state": "down", "every": "1m",
+                              "tool": "scan", "tool_args": "{}",
+                              "label": "status down?"})
+        assert "Rule added" in out
+        trig = r._RULES[-1]["trigger"]
+        assert trig["state"] == "down" and trig["every"] == "1m"
+        out2 = r.manage_rules({"action": "add", "trigger_type": "bogus",
+                               "value": "x", "tool": "scan"})
+        assert "Rule added" in out2                # unknown types stay honest
