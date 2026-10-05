@@ -2558,13 +2558,14 @@ class TestTranslateLens:
     @pytest.fixture(autouse=True)
     def _wired(self, monkeypatch):
         import actions.region_ocr as ro
+        import actions.translate as tr
         import actions.translate_lens as tl
         self._tl = tl
         monkeypatch.setattr(ro, "_capture", lambda region: object())
         monkeypatch.setattr(ro, "_read_text",
                             lambda img, mode="text":
                             "HELLO WORLD\nSECOND LINE HERE")
-        monkeypatch.setattr("actions.translate.translate",
+        monkeypatch.setattr(tr, "translate",
                             lambda p: f"[{p.get('target') or 'hi'}] "
                                       f"{p['text']}")
         class P:
@@ -2603,8 +2604,9 @@ class TestTranslateLens:
         assert "nothing readable" in out
 
     def test_translation_unavailable_surfaces_reason(self, monkeypatch):
+        import actions.translate as tr
         monkeypatch.setattr(
-            "actions.translate.translate",
+            tr, "translate",
             lambda p: "No translation engine available: install "
                       "`argostranslate` for offline translation, or "
                       "configure a Gemini key.")
