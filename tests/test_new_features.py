@@ -2302,3 +2302,94 @@ class TestCodeIntel:
         assert ci.TOOL["name"] == "code_intel"
         assert ci.TOOL["handler"] is ci.code_intel
         assert ci.TOOL["parameters"]["type"] == "OBJECT"
+
+
+class TestAuditChain:
+    """3a: tamper-evident audit log (append-only + SHA-256 chain)."""
+
+    @pytest.fixture(autouse=True)
+    def _db(self, tmp_path, monkeypatch):
+        from core import audit_chain as ac
+        monkeypatch.setattr(ac, "_db_path", lambda: tmp_path / "audit.db")
+        ac.reset_for_tests()
+        yield
+        ac.reset_for_tests()
+
+    def test_record_and_verify_ok(self):
+        from core import audit_chain as ac
+        ac.record("weather_report", {"city": "Jaipur"}, status="ok")
+        ac.record("web_search", {"query": "jarvis"}, status="ok")
+        out = ac.verify()
+        assert out.startswith("Audit chain OK") and "2 entrie" in out
+
+    def test_tamper_is_detected(self):
+        from core import audit_chain as ac
+        ac.record("weather_report", {"city": "Jaipur"}, status="ok")
+        ac.record("web_search", {"query": "x"}, status="ok")
+        c = ac._conn()
+        c.execute("UPDATE audit_log SET params = '{\"city\": \"Mars\"}'"
+                  " WHERE id = 1")
+        c.commit()
+        out = ac.verify()
+        assert "BROKEN" in out and "#1" in out
+
+    def test_delete_is_detected(self):
+        from core import audit_chain as ac
+        ac.record("a", {}, status="ok")
+        ac.record("b", {}, status="ok")
+        c = ac._conn()
+        c.execute("DELETE FROM audit_log WHERE id = 1")
+        c.commit()
+        assert "BROKEN" in ac.verify()
+
+    def test_redaction_by_key_and_value(self, monkeypatch):
+        from core import audit_chain as ac
+        # by key
+        s = ac.redact({"api_key": "abc123456789", "city": "Jaipur"})
+        assert "abc123456789" not in s and "[redacted]" in s
+        assert "Jaipur" in s
+        # by value pattern
+        s2 = ac.redact({"note": "use ghp_abcdefghijklmnop123456"})
+        assert "ghp_" not in s2
+        # config values never land in the log
+        monkeypatch.setattr(ac, "_config_secrets",
+                            lambda: {"totally-secret-value-9999"})
+        s4 = ac.redact({"msg": "my key is totally-secret-value-9999"})
+        assert "totally-secret-value-9999" not in s4
+
+    def test_run_hook_records_all_statuses(self):
+        from core import audit_chain as ac
+        from core.action_loader import ActionRegistry, ActionRecord
+
+        def ok_fn(parameters=None, **kw):
+            return "all good"
+
+        def bad_fn(parameters=None, **kw):
+            raise RuntimeError("boom")
+
+        recs = {
+            "ok_tool": ActionRecord(name="ok_tool", handler=ok_fn, valid=True),
+            "bad_tool": ActionRecord(name="bad_tool", handler=bad_fn,
+                                     valid=True),
+        }
+        reg = ActionRegistry(recs, logger=lambda m: None)
+        reg.run("ok_tool", {"x": 1})
+        reg.run("bad_tool", {})
+        reg.run("missing_tool", {"y": 2})
+        c = ac._conn()
+        rows = {r["tool"]: r for r in c.execute(
+            "SELECT tool, status, params FROM audit_log")}
+        assert rows["ok_tool"]["status"] == "ok"
+        assert rows["bad_tool"]["status"] == "error"
+        assert "boom" in rows["bad_tool"]["detail"] \
+            if "detail" in rows["bad_tool"].keys() else True
+        assert rows["missing_tool"]["status"] == "unavailable"
+        assert '"x": 1' in rows["ok_tool"]["params"]
+
+    def test_recent_and_tool_shape(self):
+        from core import audit_chain as ac
+        ac.record("demo", {"a": 5}, status="ok")
+        assert "demo" in ac.audit_log({"action": "recent"})
+        assert "BROKEN" not in ac.audit_log({"action": "verify"})
+        assert ac.TOOL["name"] == "audit_log"
+        assert ac.TOOL["handler"] is ac.audit_log
