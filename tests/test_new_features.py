@@ -3725,3 +3725,153 @@ class TestAtspi:
         from pathlib import Path as P
         from core.action_loader import discover_actions
         assert "atspi" in discover_actions(P("actions")).names()
+
+
+class TestCad:
+    """Batch 14: CadQuery guarded CAD export (STL/STEP/SVG)."""
+
+    @pytest.fixture(autouse=True)
+    def _seams(self, tmp_path, monkeypatch):
+        import actions.cad as c
+        self.c = c
+        monkeypatch.setattr(c, "_base_dir", lambda: tmp_path)
+        self.tmp = tmp_path
+
+    def test_status_missing_is_install_line(self, monkeypatch):
+        monkeypatch.setattr(self.c, "_has_cq", lambda: False)
+        out = self.c.cad({"action": "status"})
+        assert "pip install cadquery" in out
+        assert "no placeholder" in out
+
+    def test_no_code_honest(self, monkeypatch):
+        monkeypatch.setattr(self.c, "_has_cq", lambda: False)
+        assert "CadQuery snippet" in self.c.cad({})
+
+    def test_missing_dep_never_fakes_files(self, monkeypatch):
+        monkeypatch.setattr(self.c, "_has_cq", lambda: False)
+        out = self.c.cad({"code": "result = cq.Workplane().box(1,1,1)"})
+        assert "pip install cadquery" in out
+        assert not list((self.tmp / "cad").glob("*.stl")) if \
+            (self.tmp / "cad").exists() else True
+
+    def test_build_script_composition(self):
+        sc = self.c._build_script(
+            "result = cq.Workplane().box(1,1,1)",
+            Path("/o/x.stl"), Path("/o/x.step"), Path("/o/x.svg"))
+        assert "import cadquery as cq" in sc
+        assert "cq.exporters.export(result, r'/o/x.stl')" in sc
+        assert "JARVIS_CAD_OK" in sc
+        # fenced paste tolerated
+        sc2 = self.c._build_script("```python\nresult = cq.Workplane()\n```",
+                                   Path("/a.stl"), Path("/a.step"),
+                                   Path("/a.svg"))
+        assert "```" not in sc2.split("export tail")[1]
+
+    def test_build_success_lists_artifacts(self, monkeypatch):
+        monkeypatch.setattr(self.c, "_has_cq", lambda: True)
+
+        def fake_run(script_path, timeout=120):
+            stem = script_path.stem                      # cad-<stamp>
+            d = script_path.parent
+            (d / f"{stem}.stl").write_bytes(b"solid x")
+            (d / f"{stem}.step").write_bytes(b"ISO-10303")
+            (d / f"{stem}.svg").write_text("<svg/>")
+            return "JARVIS_CAD_OK"
+        monkeypatch.setattr(self.c, "_run_script", fake_run)
+        out = self.c.cad({"code": "result = cq.Workplane().box(1,1,1)"})
+        assert "CAD solid exported:" in out
+        assert ".stl" in out and ".svg" in out
+
+    def test_failure_keeps_snippet_and_reports(self, monkeypatch):
+        monkeypatch.setattr(self.c, "_has_cq", lambda: True)
+
+        def boom(script_path, timeout=120):
+            raise RuntimeError("script failed (exit 1):\nValueError: bad")
+        monkeypatch.setattr(self.c, "_run_script", boom)
+        out = self.c.cad({"code": "result = 'oops'"})
+        assert "CAD build failed" in out and "ValueError: bad" in out
+        assert "Snippet kept at" in out
+        assert list((self.tmp / "cad").glob("*.py"))
+
+    def test_tool_shape_and_discoverable(self):
+        from core.action_loader import discover_actions
+        assert self.c.TOOL["handler"] is self.c.cad
+        assert "cad" in discover_actions(Path("actions")).names()
+
+
+class TestManimAnim:
+    """Batch 14: Manim guarded animation render (mp4)."""
+
+    @pytest.fixture(autouse=True)
+    def _seams(self, tmp_path, monkeypatch):
+        import actions.manim_anim as ma
+        self.ma = ma
+        monkeypatch.setattr(ma, "_base_dir", lambda: tmp_path)
+        self.tmp = tmp_path
+
+    def test_status_missing(self, monkeypatch):
+        monkeypatch.setattr(self.ma, "_has_manim", lambda: False)
+        out = self.ma.manim_anim({"action": "status"})
+        assert "pip install manim" in out
+        assert "no placeholder" in out
+
+    def test_no_code_honest(self, monkeypatch):
+        monkeypatch.setattr(self.ma, "_has_manim", lambda: False)
+        assert "Manim scene" in self.ma.manim_anim({})
+
+    def test_missing_dep_never_fakes_video(self, monkeypatch):
+        monkeypatch.setattr(self.ma, "_has_manim", lambda: False)
+        out = self.ma.manim_anim({"code": "class S(Scene): pass"})
+        assert "pip install manim" in out
+        assert not (self.tmp / "anims").exists() or \
+            not list((self.tmp / "anims").glob("*.mp4"))
+
+    def test_scene_name_extraction(self):
+        code = ("from manim import *\n"
+                "class Demo(Scene):\n"
+                "    def construct(self): pass\n")
+        assert self.ma._scene_name(code) == "Demo"
+        assert self.ma._scene_name("x = 1") is None
+        assert self.ma._scene_name("class Inner(ThreeDScene):") == "Inner"
+
+    def test_build_file_adds_import_and_default_scene(self):
+        f = self.tmp / "s.py"
+        name = self.ma._build_file("class MyScene(Scene): pass", f)
+        assert name == "MyScene"
+        body = f.read_text(encoding="utf-8")
+        assert "from manim import *" in body
+        f2 = self.tmp / "s2.py"
+        name2 = self.ma._build_file("x = 42", f2)
+        assert name2 == "JavisScene"          # default scene injected
+        assert "JARVIS" in f2.read_text(encoding="utf-8")
+        # fenced paste tolerated
+        f3 = self.tmp / "s3.py"
+        self.ma._build_file("```python\nclass Q(Scene): pass\n```", f3)
+        assert "```" not in f3.read_text(encoding="utf-8")
+
+    def test_render_success_returns_newest_mp4(self, monkeypatch):
+        def fake_render(file_path, scene, quality, media_dir, timeout=300):
+            clip = media_dir / "vid.mp4"
+            clip.parent.mkdir(parents=True, exist_ok=True)
+            clip.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"0" * 64)
+            return clip
+        monkeypatch.setattr(self.ma, "_has_manim", lambda: True)
+        monkeypatch.setattr(self.ma, "_render", fake_render)
+        out = self.ma.manim_anim({"code": "class S(Scene): pass"})
+        assert "Animation rendered:" in out and "scene `S`" in out
+
+    def test_render_failure_keeps_scene(self, monkeypatch):
+        monkeypatch.setattr(self.ma, "_has_manim", lambda: True)
+
+        def boom(file_path, scene, quality, media_dir, timeout=300):
+            raise RuntimeError("manim failed (exit 1): no cairo")
+        monkeypatch.setattr(self.ma, "_render", boom)
+        out = self.ma.manim_anim({"code": "class S(Scene): pass"})
+        assert "Render failed" in out and "no cairo" in out
+        assert "Scene kept at" in out
+        assert list((self.tmp / "anims").glob("*.py"))
+
+    def test_tool_shape_and_discoverable(self):
+        from core.action_loader import discover_actions
+        assert self.ma.TOOL["handler"] is self.ma.manim_anim
+        assert "manim_anim" in discover_actions(Path("actions")).names()
