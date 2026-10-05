@@ -731,6 +731,17 @@ class JarvisLive:
         except Exception as e:
             print(f"[JARVIS] ⚠ Palette wiring failed: {e}")
 
+        # ── Telegram remote control (receive side) — same entry point as
+        # the HUD text box; autostarts only when token+allowlist exist.
+        try:
+            from actions import telegram_rx as _trx
+            _trx.set_dispatch(self._on_text_command)
+            boot = _trx.autostart()
+            if boot:
+                self.ui.write_log(f"SYS: {boot}")
+        except Exception as e:
+            print(f"[JARVIS] ⚠ Telegram rx wiring failed: {e}")
+
         # Mission Control: mirror every activity event to the dashboard feed.
         # Listener may fire from ANY thread — rules tick (to_thread), focus
         # timers, agent runner (run_in_executor) — so the loop is never
@@ -1882,6 +1893,13 @@ class JarvisLive:
                             if full_in:
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.write_log(f"You: {full_in}")
+                                # Dictation mode (Report J): type the
+                                # user's spoken words too — no-op when off.
+                                try:
+                                    from actions import dictation as _dict
+                                    _dict.feed(full_in)
+                                except Exception:
+                                    pass
                                 self._session_log.append(f"User: {full_in}")
                                 # Durable history: survives restarts (the
                                 # session log above is RAM-only).

@@ -5229,3 +5229,79 @@ class TestMissionDagAndMetrics:
         from actions import mission
         assert "No tool events yet" in mission.mission_control(
             {"action": "dag"})
+
+
+class TestMcpCatalog:
+    """4a: official MCP server catalog — preset-based zero-code add."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        import actions.mcp as m
+        self._m = m
+        (tmp_path / "mcp.json").write_text(json.dumps({"servers": {}}),
+                                           encoding="utf-8")
+        monkeypatch.setattr(m, "_cfg_path", lambda: tmp_path / "mcp.json")
+        monkeypatch.setattr(m, "_list_tools", lambda name, force=False: [])
+        m._TOOLS.clear()
+        yield
+        m._TOOLS.clear()
+
+    def test_presets_lists_official_catalog(self):
+        out = self._m.mcp({"action": "presets"})
+        for key in ("filesystem", "fetch", "github", "memory", "sqlite",
+                    "puppeteer", "time", "sequential-thinking"):
+            assert f"preset={key}" in out
+        assert "modelcontextprotocol" in out
+
+    def test_add_preset_fetch_writes_config(self):
+        out = self._m.mcp({"action": "add", "preset": "fetch"})
+        assert "saved and verified" in out
+        cfg = self._m._load_cfg()
+        argv = cfg["servers"]["fetch"]["command"]
+        assert argv[:2] == ["uvx", "mcp-server-fetch"]
+
+    def test_add_preset_substitutes_path(self):
+        out = self._m.mcp({"action": "add", "preset": "filesystem",
+                           "path": "/tmp/notes"})
+        assert "saved" in out
+        cfg = self._m._load_cfg()
+        argv = cfg["servers"]["filesystem"]["command"]
+        assert "/tmp/notes" in argv
+        assert "{path}" not in " ".join(argv)
+
+    def test_add_preset_default_path_used_when_absent(self):
+        # sqlite ships a default DB path — `preset=sqlite` just works
+        out = self._m.mcp({"action": "add", "preset": "sqlite"})
+        assert "saved" in out
+        argv = self._m._load_cfg()["servers"]["sqlite"]["command"]
+        assert "./mcp-data.db" in argv and "{path}" not in " ".join(argv)
+        # a preset WITH {path} and no usable value still refuses honestly:
+        # simulate by clearing the default from the catalog
+        spec = dict(self._m.CATALOG["sqlite"])
+        spec.pop("path", None)
+        self._m.CATALOG["sqlite"] = spec
+        try:
+            out2 = self._m.mcp({"action": "add", "preset": "sqlite",
+                                "name": "sqlite2"})
+            assert "needs a path" in out2
+        finally:
+            self._m.CATALOG["sqlite"] = {"cmd": "uvx mcp-server-sqlite "
+                                                "--db-path {path}",
+                                         "path": "./mcp-data.db",
+                                         "desc": "SQL queries over a "
+                                                 "local sqlite file"}
+
+    def test_unknown_preset_lists_keys(self):
+        out = self._m.mcp({"action": "add", "preset": "nope"})
+        assert "No preset" in out and "filesystem" in out
+
+    def test_env_note_for_keyed_preset(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN", raising=False)
+        out = self._m.mcp({"action": "add", "preset": "github"})
+        assert "saved" in out and "$GITHUB_PERSONAL_ACCESS_TOKEN" in out
+        assert "not in env yet" in out
+
+    def test_tool_schema_documents_presets(self):
+        props = self._m.TOOL["parameters"]["properties"]
+        assert "preset" in props and "path" in props
+        assert "presets" in props["action"]["description"]

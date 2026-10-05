@@ -2623,3 +2623,333 @@ class TestTranslateLens:
     def test_tool_shape(self):
         assert self._tl.TOOL["name"] == "translate_lens"
         assert self._tl.TOOL["handler"] is self._tl.translate_lens
+
+
+class TestObsidian:
+    """4b: Obsidian Local REST API bridge (CRUD + honest offline)."""
+
+    @pytest.fixture(autouse=True)
+    def _server(self, tmp_path, monkeypatch):
+        import actions.obsidian as ob
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from urllib.parse import urlparse, parse_qs
+        self._ob = ob
+        vault = {"notes/a.md": "# A\nhello vault",
+                 "notes/b.md": "# B\nsecond note"}
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body=""):
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def do_GET(self):
+                u = urlparse(self.path)
+                if u.path == "/":
+                    self._send(200, '{"status":"ok"}')
+                elif u.path == "/vault/":
+                    self._send(200, json.dumps(sorted(vault)))
+                elif u.path.startswith("/vault/"):
+                    p = u.path[len("/vault/"):]
+                    if p in vault:
+                        self._send(200, json.dumps(
+                            {"content": vault[p]}))
+                    else:
+                        self._send(404, '{"error":"nf"}')
+                elif u.path == "/tags/":
+                    self._send(200, json.dumps(
+                        {"tags": [{"tag": "#idea", "usage": 3}]}))
+                else:
+                    self._send(404, "")
+
+            def do_PUT(self):
+                p = urlparse(self.path).path[len("/vault/"):]
+                n = int(self.headers.get("Content-Length", 0))
+                vault[p] = self.rfile.read(n).decode()
+                self._send(204, "")
+
+            def do_POST(self):
+                u = urlparse(self.path)
+                n = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(n).decode() if n else ""
+                if u.path.startswith("/vault/"):
+                    p = u.path[len("/vault/"):]
+                    vault[p] = vault.get(p, "") + body
+                    self._send(200, "")
+                elif u.path.startswith("/search/simple"):
+                    q = (parse_qs(u.query).get("query") or [""])[0]
+                    hits = [{"filename": k, "context": "…"}
+                            for k in vault if q.lower() in
+                            vault[k].lower()]
+                    self._send(200, json.dumps({"matches": hits}))
+                elif u.path.startswith("/open/"):
+                    self._send(204, "")
+                else:
+                    self._send(404, "")
+
+            def do_DELETE(self):
+                p = urlparse(self.path).path[len("/vault/"):]
+                vault.pop(p, None)
+                self._send(204, "")
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        import threading
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        monkeypatch.setattr(ob, "_settings", lambda: (base, "test-key"))
+        self.vault = vault
+        yield
+        srv.shutdown()
+
+    def test_status_read_list(self):
+        ob = self._ob
+        assert "is up" in ob.obsidian({"action": "status"})
+        body = ob.obsidian({"action": "read", "path": "notes/a.md"})
+        assert "hello vault" in body
+        listing = ob.obsidian({"action": "list"})
+        assert "notes/a.md" in listing
+
+    def test_write_and_append(self):
+        ob = self._ob
+        assert "Wrote" in ob.obsidian({"action": "write",
+                                       "path": "notes/new.md",
+                                       "content": "# New"})
+        assert "Appended" in ob.obsidian({"action": "append",
+                                          "path": "notes/new.md",
+                                          "content": "more text"})
+        assert "more text" in self.vault["notes/new.md"]
+
+    def test_search_and_tags_and_open(self):
+        ob = self._ob
+        out = ob.obsidian({"action": "search", "query": "second"})
+        assert "notes/b.md" in out
+        tags = ob.obsidian({"action": "tags"})
+        assert "#idea" in tags
+        assert "Opened" in ob.obsidian({"action": "open",
+                                        "path": "notes/a.md"})
+
+    def test_offline_and_missing_path_honest(self, monkeypatch):
+        ob = self._ob
+        monkeypatch.setattr(ob, "_settings",
+                            lambda: ("http://127.0.0.1:1", "k"))
+        out = ob.obsidian({"action": "status"})
+        assert "Local REST API is not reachable" in out
+        monkeypatch.setattr(ob, "_settings",
+                            lambda: ("http://127.0.0.1:1", "k"))
+        assert "Give a `path`" in ob.obsidian({"action": "read"})
+        assert "Unknown obsidian action" in ob.obsidian(
+            {"action": "zap", "path": "x"})
+
+    def test_tool_shape(self):
+        assert self._ob.TOOL["name"] == "obsidian"
+        assert self._ob.TOOL["handler"] is self._ob.obsidian
+
+
+class TestTelegramRx:
+    """4c: Telegram receive — allowlisted long-poll into text-command path."""
+
+    @pytest.fixture(autouse=True)
+    def _rx(self, monkeypatch):
+        import actions.telegram_rx as rx
+        self._rx = rx
+        rx.set_dispatch(None)
+        rx.stop()
+        rx._STATE.update({"running": False, "blocked": 0, "handled": 0,
+                          "last_error": "", "token": ""})
+        monkeypatch.setattr(rx, "_settings",
+                            lambda: ("TESTTOKEN123", ["42"]))
+        yield
+        rx.stop()
+        rx.set_dispatch(None)
+
+    @staticmethod
+    def _updates(messages):
+        return {"result": [
+            {"update_id": 100 + i,
+             "message": {"chat": {"id": cid}, "text": txt}}
+            for i, (cid, txt) in enumerate(messages)]}
+
+    def test_allowlisted_text_reaches_dispatch(self, monkeypatch):
+        rx = self._rx
+        got = []
+        rx.set_dispatch(got.append)
+        monkeypatch.setattr(rx, "_http_get",
+                            lambda *a, **k: self._updates(
+                                [(42, "run system status")]))
+        rx._one_round()
+        assert got == ["run system status"]
+        assert rx._STATE["handled"] == 1
+
+    def test_unknown_chat_blocked_and_counted(self, monkeypatch):
+        rx = self._rx
+        got = []
+        rx.set_dispatch(got.append)
+        monkeypatch.setattr(rx, "_http_get",
+                            lambda *a, **k: self._updates(
+                                [(666, "hack the box"), (42, "hello")]))
+        rx._one_round()
+        assert got == ["hello"]
+        assert rx._STATE["blocked"] == 1
+
+    def test_refuses_without_allowlist(self, monkeypatch):
+        rx = self._rx
+        monkeypatch.setattr(rx, "_settings", lambda: ("TESTTOKEN123", []))
+        out = rx.start()
+        assert "Refusing" in out and "allowed_chats" in out
+
+    def test_refuses_without_token(self, monkeypatch):
+        rx = self._rx
+        monkeypatch.setattr(rx, "_settings", lambda: ("", ["42"]))
+        assert "No Telegram bot token" in rx.start()
+
+    def test_start_stop_status_lifecycle(self, monkeypatch):
+        rx = self._rx
+        # fake long-poll that blocks until stop
+        calls = {"n": 0}
+
+        def fake_get(*a, **k):
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                import time as _t
+                _t.sleep(0.05)
+            return {"result": []}
+
+        monkeypatch.setattr(rx, "_http_get", fake_get)
+        out = rx.start()
+        assert "allowlisted 1 chat" in out
+        assert "already running" in rx.start()
+        st = rx.telegram_rx({"action": "status"})
+        assert "running" in st
+        rx.stop()
+        import time
+        time.sleep(0.2)
+        assert "stopped" in rx.telegram_rx({"action": "status"})
+
+    def test_autostart_silent_when_unconfigured(self, monkeypatch):
+        rx = self._rx
+        monkeypatch.setattr(rx, "_settings", lambda: ("", []))
+        assert rx.autostart() == ""
+
+    def test_dispatch_exception_is_recorded_not_raised(self, monkeypatch):
+        rx = self._rx
+
+        def boom(text):
+            raise RuntimeError("session down")
+
+        rx.set_dispatch(boom)
+        monkeypatch.setattr(rx, "_http_get",
+                            lambda *a, **k: self._updates([(42, "x")]))
+        rx._one_round()                      # must not raise
+        assert "session down" in rx._STATE["last_error"]
+
+    def test_tool_shape(self):
+        assert self._rx.TOOL["name"] == "telegram_rx"
+        assert self._rx.TOOL["handler"] is self._rx.telegram_rx
+
+
+class TestDictation:
+    """J: speech-to-text typing mode (offline segments + live feed)."""
+
+    @pytest.fixture(autouse=True)
+    def _mod(self, monkeypatch):
+        import actions.dictation as d
+        self._d = d
+        d._ON = False
+        d._STOP.set()
+        d._STATE.update({"typed": 0, "chars": 0, "last": "", "error": ""})
+        d._DEST = "clipboard"
+        d._FILE = ""
+        d._PLAYER = None
+        yield
+        d._ON = False
+        d._STOP.set()
+
+    def test_off_by_default_and_status_hint(self):
+        assert "off" in self._d.dictation({"action": "status"})
+        assert "action=on" in self._d.dictation({})
+
+    def test_feed_noop_when_off(self, monkeypatch):
+        got = []
+        monkeypatch.setattr(self._d, "_clip_set", lambda t: got.append(t) or True)
+        assert self._d.feed("hello") is False
+        assert got == []
+
+    def test_on_off_lifecycle_with_seams(self, monkeypatch):
+        d = self._d
+        monkeypatch.setattr(d, "_record_segment", lambda s: object())
+        monkeypatch.setattr(d, "_transcribe", lambda a: "typed words")
+        monkeypatch.setattr(d, "_clip_set", lambda t: True)
+        out = d.dictation({"action": "on"})
+        assert "Dictation ON" in out
+        assert d._ON is True
+        # one explicit tick (thread also runs, seams are safe)
+        d._tick()
+        assert d._STATE["typed"] >= 1 and d._STATE["last"] == "typed words"
+        off = d.dictation({"action": "off"})
+        assert "OFF" in off and "typed" in off
+        assert d._ON is False
+
+    def test_file_destination_appends(self, tmp_path):
+        d = self._d
+        target = tmp_path / "dict.txt"
+        out = d.dictation({"action": "on", "dest": "file",
+                           "path": str(target), "mode": "live"})
+        assert "live feed" in out
+        assert d.feed("line one")
+        assert d.feed("line two")
+        d.dictation({"action": "off"})
+        body = target.read_text(encoding="utf-8")
+        assert "line one" in body and "line two" in body
+
+    def test_file_dest_needs_path(self):
+        out = self._d.dictation({"action": "on", "dest": "file"})
+        assert "needs a path" in out
+
+    def test_bad_dest_honest(self):
+        assert "dest must be" in self._d.dictation(
+            {"action": "on", "dest": "floppy"})
+
+    def test_record_failure_is_status_error_not_crash(self, monkeypatch):
+        d = self._d
+        monkeypatch.setattr(d, "_record_segment",
+                            lambda s: (_ for _ in ()).throw(
+                                RuntimeError("mic unavailable (none)")))
+        monkeypatch.setattr(d, "_transcribe", lambda a: "")
+        out = d.dictation({"action": "on"})
+        assert "ON" in out
+        d._tick()                              # must not raise
+        assert "mic unavailable" in d._STATE["error"]
+        assert "⚠" in d.dictation({"action": "status"})
+        d.dictation({"action": "off"})
+
+    def test_transcribe_empty_skips(self, monkeypatch):
+        d = self._d
+        monkeypatch.setattr(d, "_record_segment", lambda s: object())
+        monkeypatch.setattr(d, "_transcribe", lambda a: "   ")
+        monkeypatch.setattr(d, "_clip_set", lambda t: True)
+        d.dictation({"action": "on", "mode": "live"})
+        d._tick()
+        assert d._STATE["typed"] == 0
+        d.dictation({"action": "off"})
+
+    def test_hud_destination_uses_player(self):
+        d = self._d
+        shown = []
+
+        class P:
+            def show_content(self, t, b):
+                shown.append((t, b))
+        d.dictation({"action": "on", "dest": "hud", "mode": "live"},
+                    player=P())
+        d.feed("spoken line")
+        d.dictation({"action": "off"})
+        assert shown and shown[0][0] == "DICTATION"
+
+    def test_tool_shape(self):
+        assert self._d.TOOL["name"] == "dictation"
+        assert self._d.TOOL["handler"] is self._d.dictation

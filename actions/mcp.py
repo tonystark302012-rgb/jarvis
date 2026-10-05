@@ -15,7 +15,10 @@ WHAT IT DOES
       list    — configured servers + their tools (cached per process)
       call    — run a server tool with JSON arguments
       add     — save a server entry (command as a string, shlex-split —
-                never a shell, so no injection surface)
+                never a shell, so no injection surface) — or preset=<name>
+                to install straight from the OFFICIAL catalog below
+      presets — the official modelcontextprotocol/servers catalog with
+                one-line usage (zero-code setup)
       remove  — delete a server entry
 
 SAFETY
@@ -37,6 +40,51 @@ import time
 from pathlib import Path
 
 _DEFAULT_TIMEOUT = 20.0
+
+# ── Official catalog — modelcontextprotocol/servers (MIT) ───────────────────
+# `mcp action=add preset=filesystem path=~/notes` resolves to the server's
+# real command. {path} is substituted from the `path` param; `env` names a
+# variable the server expects (we note it instead of silently failing).
+CATALOG: dict[str, dict] = {
+    "filesystem": {
+        "cmd": "npx -y @modelcontextprotocol/server-filesystem {path}",
+        "path": "~",
+        "desc": "Read/write/append files inside one allowlisted folder"},
+    "fetch": {
+        "cmd": "uvx mcp-server-fetch",
+        "desc": "Fetch and read web pages (server-side HTTP client)"},
+    "github": {
+        "cmd": "npx -y @modelcontextprotocol/server-github",
+        "env": "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "desc": "Repos, issues, pull requests (needs a token)"},
+    "memory": {
+        "cmd": "npx -y @modelcontextprotocol/server-memory",
+        "desc": "Knowledge-graph memory store (entities + relations)"},
+    "sequential-thinking": {
+        "cmd": "npx -y @modelcontextprotocol/server-sequential-thinking",
+        "desc": "Structured multi-step thinking tool"},
+    "git": {
+        "cmd": "uvx mcp-server-git",
+        "path": ".",
+        "desc": "Status, log, diff, commit in a local repo"},
+    "sqlite": {
+        "cmd": "uvx mcp-server-sqlite --db-path {path}",
+        "path": "./mcp-data.db",
+        "desc": "SQL queries over a local sqlite file"},
+    "puppeteer": {
+        "cmd": "npx -y @modelcontextprotocol/server-puppeteer",
+        "desc": "Headless browser automation (screenshots, clicks)"},
+    "google-maps": {
+        "cmd": "npx -y @modelcontextprotocol/server-google-maps",
+        "env": "GOOGLE_MAPS_API_KEY",
+        "desc": "Directions, places, geocoding (needs a key)"},
+    "time": {
+        "cmd": "uvx mcp-server-time",
+        "desc": "Timezone clocks and time queries"},
+    "everything": {
+        "cmd": "npx -y @modelcontextprotocol/server-everything",
+        "desc": "Official demo server (tools, resources, prompts)"},
+}
 
 
 def _cfg_path() -> Path:
@@ -444,7 +492,35 @@ def mcp(parameters: dict = None, player=None, session_memory=None) -> str:
                 out.append(f"• {name}: unreachable ({str(e)[:80]})")
         return "MCP servers:\n" + "\n".join(out)
 
+    if action in ("presets", "catalog"):
+        lines = ["Official MCP catalog (modelcontextprotocol/servers, MIT):"]
+        for key in sorted(CATALOG):
+            spec = CATALOG[key]
+            env = f"  [needs ${spec['env']}]" if spec.get("env") else ""
+            lines.append(f"• preset={key} — {spec['desc']}{env}")
+        lines.append("Install: mcp action=add preset=<name>"
+                     " [path=…] [name=…]  ·  requires node (npx) or "
+                     "uv/uvx on PATH.")
+        return "\n".join(lines)
+
     if action == "add":
+        preset = str(params.get("preset") or "").strip().lower()
+        if preset:
+            spec = CATALOG.get(preset)
+            if spec is None:
+                return (f"No preset {preset!r} — see "
+                        f"mcp action=presets ({', '.join(sorted(CATALOG))}).")
+            raw = spec["cmd"]
+            path_v = str(params.get("path") or spec.get("path") or "")
+            if "{path}" in raw:
+                if not path_v:
+                    return (f"Preset {preset} needs a path: "
+                            f"mcp action=add preset={preset} path=/some/dir")
+                raw = raw.replace("{path}", path_v)
+            if not str(params.get("command") or "").strip():
+                params = dict(params, command=raw)
+            if not str(params.get("name") or "").strip():
+                params = dict(params, name=preset)
         name = str(params.get("name") or "").strip()
         command = str(params.get("command") or "").strip()
         url = str(params.get("url") or "").strip()
@@ -487,8 +563,17 @@ def mcp(parameters: dict = None, player=None, session_memory=None) -> str:
         # verify it actually speaks MCP before claiming success
         try:
             tools = _list_tools(name)
+            note = ""
+            if preset:
+                envk = CATALOG.get(preset, {}).get("env")
+                if envk:
+                    import os as _os
+                    have = bool(_os.environ.get(envk))
+                    note = (f" NOTE: set ${envk} before calling it"
+                            + (" (found in env)." if have else
+                               " (not in env yet)."))
             return (f"MCP server '{name}' saved and verified — "
-                    f"{len(tools)} tool(s) available.")
+                    f"{len(tools)} tool(s) available.{note}")
         except Exception as e:
             hint = ("Check the url answers MCP POSTs."
                     if url else "Check the command runs standalone.")
@@ -544,7 +629,10 @@ TOOL = {
         "either standard transport: stdio (command) or Streamable HTTP "
         "(url). Actions: list (servers + tools), call (name, tool, "
         "arguments as JSON), add (name + command OR name + url [+ "
-        "headers]), remove (name). Use when the "
+        "headers] OR preset=filesystem|fetch|github|memory|"
+        "sequential-thinking|git|sqlite|puppeteer|google-maps|time|"
+        "everything from the official catalog), presets (list that "
+        "catalog), remove (name). Use when the "
         "user mentions an MCP server or wants external app tools without "
         "new code. For Gmail use the gmail plugin; for local files the "
         "file tools may be simpler."
@@ -552,7 +640,14 @@ TOOL = {
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "action": {"type": "STRING", "description": "list | call | add | remove"},
+            "action": {"type": "STRING",
+                       "description": "list | call | add | presets | remove"},
+            "preset": {"type": "STRING",
+                       "description": "Official catalog key for add "
+                                      "(filesystem, fetch, github, memory, "
+                                      "git, sqlite, puppeteer, time, …)"},
+            "path": {"type": "STRING",
+                     "description": "Folder/DB path for presets that need one"},
             "name": {"type": "STRING", "description": "Server name"},
             "tool": {"type": "STRING", "description": "Tool name for call"},
             "command": {"type": "STRING",
