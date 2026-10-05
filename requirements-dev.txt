@@ -24,3 +24,16 @@ trafilatura>=1.8,<2             # scrape structured mode (optional at runtime �
 tree-sitter>=0.23,<1            # code_outline — CI runs the real AST tier
 tree-sitter-python>=0.23,<1     # code_outline — Python grammar pack
 paho-mqtt>=1.6,<3               # smart_home — import path + optional-guard test
+# RAG pipeline — the suite asserts VECTOR and OCR paths (not just BM25):
+sqlite-vec>=0.1.6,<2            # hybrid vector index + KNN test
+pypdf>=4,<6                     # scanned-PDF writer/reader fixtures
+pypdfium2>=5,<7                 # PDF page render for the OCR path
+pillow>=10,<13                  # page image -> region_ocr (to_pil)
+# code_intel — the suite runs the real jedi/pylsp tiers:
+jedi>=0.19,<1                   # navigation (goto/rename/doc)
+python-lsp-server>=1.10,<2      # diagnostics backend (rope+pycodestyle)
+pyflakes>=3,<4                  # pylsp diagnostics tier (syntax errors)
+pycodestyle>=2.11,<3            # pylsp style tier (clean-file assertion)
+croniter>=2,<3                  # dots scheduler cron test (runtime req, suite asserts it)
+feedparser>=6,<7                # feed RSS/Atom tests (runtime req, suite asserts it)
+duckdb>=0.10,<2                 # data tool KNN/SQL tests (10 skips otherwise)
