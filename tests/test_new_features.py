@@ -3627,3 +3627,101 @@ def _segs():
         {"start": 3.5, "end": 7.0, "text": "the deadline is Friday"},
         {"start": 7.0, "end": 11.0, "text": "any questions about that"},
     ]
+
+
+class TestAtspi:
+    """Report #1: guarded AT-SPI accessibility scanner (Linux)."""
+
+    class _Node:
+        def __init__(self, role="", name="", children=None, actions=0):
+            self.roleName = role
+            self.name = name
+            self.description = ""
+            self.states = "enabled"
+            self._kids = children or []
+            self._acts = actions
+            self.childCount = len(self._kids)
+            self._done = []
+
+        def getChildAtIndex(self, i):
+            return self._kids[i]
+
+        def queryAction(self):
+            node = self
+
+            class A:
+                nActions = node._acts
+
+                def doAction(self, i):
+                    node._done.append(i)
+                    return True
+            return A()
+
+    @pytest.fixture(autouse=True)
+    def _seams(self, monkeypatch):
+        import actions.atspi as at
+        self.at = at
+        desk = self._Node("desktop", "root", [
+            self._Node("application", "Files", [
+                self._Node("frame", "Home",
+                           [self._Node("push button", "Open", actions=1),
+                            self._Node("entry", "Search")]),
+            ]),
+            self._Node("application", "Terminal", []),
+        ])
+        monkeypatch.setattr(at, "_bridge", lambda: object())  # present
+        monkeypatch.setattr(at, "_desktop", lambda bridge: desk)
+
+    def test_no_bridge_is_honest_install(self, monkeypatch):
+        monkeypatch.setattr(self.at, "_bridge", lambda: None)
+        out = self.at.atspi({"action": "scan"})
+        assert "apt install python3-gi" in out
+        assert "never a fabricated" in out
+        # every action refuses identically
+        for act in ("find", "act"):
+            assert "apt install" in self.at.atspi({"action": act, "x": 1})
+
+    def test_scan_shows_tree(self):
+        out = self.at.atspi({"action": "scan", "depth": 3})
+        assert "Desktop tree" in out
+        assert "application: Files" in out
+        assert "push button: Open" in out
+
+    def test_find_breadcrumb_and_honest_empty(self):
+        out = self.at.atspi({"action": "find", "query": "button"})
+        assert "match(es)" in out
+        assert "@ root > Files > Home > Open" in out
+        assert "No accessibility nodes match" in self.at.atspi(
+            {"action": "find", "query": "zzz-nothing"})
+        assert "query=" in self.at.atspi({"action": "find"})
+
+    def test_act_re_resolves_and_performs(self):
+        path = "Files > Home > Open"
+        out = self.at.atspi({"action": "act", "path": path})
+        assert "done" in out and "push button" in out
+
+    def test_act_missing_path_honest(self):
+        out = self.at.atspi({"action": "act",
+                             "path": "Ghost > App > Button"})
+        assert "not found live" in out and "Re-run find" in out
+
+    def test_act_needs_path(self):
+        assert "breadcrumb line" in self.at.atspi({"action": "act"})
+
+    def test_pure_format_and_flatten(self):
+        d = {"role": "app", "name": "X", "children": [
+            {"role": "button", "name": "OK", "children": []}]}
+        text = self.at._format(d)
+        assert text.splitlines()[0] == "app: X"
+        assert "  button: OK" in text
+        flat = self.at._flatten(d)
+        assert len(flat) == 2
+        assert self.at._crumb_text(flat[1]["_crumbs"]) == "X > OK"
+
+    def test_unknown_action_honest(self):
+        assert "scan | find | act" in self.at.atspi({"action": "dance"})
+
+    def test_tool_discoverable(self):
+        from pathlib import Path as P
+        from core.action_loader import discover_actions
+        assert "atspi" in discover_actions(P("actions")).names()
