@@ -400,7 +400,9 @@ def api_create_task(payload: dict = Body(...)) -> dict:
         return store.create_task(payload.get("name"),
                                  payload.get("instruction"),
                                  payload.get("every_seconds", 3600),
-                                 None if raw_dot is None else int(raw_dot))
+                                 None if raw_dot is None else int(raw_dot),
+                                 cron=payload.get("cron") or None,
+                                 run_at=payload.get("run_at"))
     except (ValueError, KeyError, TypeError) as e:
         status = 404 if isinstance(e, KeyError) else 400
         raise HTTPException(status, str(e))

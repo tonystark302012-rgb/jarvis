@@ -1418,6 +1418,67 @@ class TestScheduler:
         finally:
             db.reset_for_tests()                      # never leak old conn
 
+    def test_cron_schedule_create_validate_advance(self, env):
+        import time as _t
+        from actions.dots import dots as dots_action
+        from dots import store
+        c = env["client"]
+        t = store.create_task("dawn", "say hi", 3600, None,
+                              cron="*/5 * * * *")
+        assert t["schedule_kind"] == "cron"
+        assert t["cron_expr"] == "*/5 * * * *"
+        now = _t.time()
+        assert now < t["next_run_at"] <= now + 300
+        with pytest.raises(ValueError, match="bad cron"):
+            store.create_task("x", "y", 60, None, cron="not a cron")
+        with pytest.raises(ValueError, match="ONE schedule"):
+            store.create_task("x", "y", 60, None,
+                              cron="* * * * *", run_at=now + 10)
+        nxt = store.advance_next_run(t["id"], t["next_run_at"], _t.time())
+        assert nxt > _t.time()                        # strictly future
+        # HTTP + brain surfaces
+        r = c.post("/api/tasks", json={"instruction": "cron job",
+                                       "cron": "0 7 * * *"})
+        assert r.status_code == 201
+        assert r.json()["schedule_kind"] == "cron"
+        assert c.post("/api/tasks", json={"instruction": "bad",
+                                          "cron": "70 * * * *"}
+                      ).status_code == 400
+        out = dots_action({"action": "task_create",
+                           "instruction": "am brief", "cron": "0 6 * * *"})
+        assert "cron 0 6 * * *" in out
+        assert "cron 0 6 * * *" in dots_action({"action": "task_list"})
+
+    def test_at_schedule_runs_once_then_done(self, env):
+        import time as _t
+        from actions.dots import dots as dots_action
+        from dots import scheduler, store
+        t = store.create_task("one shot", "do it", 3600, None,
+                              run_at=_t.time() - 1)
+        assert t["schedule_kind"] == "at"
+        assert any(x["id"] == t["id"] for x in store.due_tasks(_t.time()))
+        assert scheduler.tick() == 1                  # due now → spawn
+        run = _wait_for(lambda: store.last_run(t["id"]))
+        assert run is not None and run["status"] == "ok"
+        done = _wait_for(lambda: store.get_task(t["id"])
+                         if store.get_task(t["id"])["status"] == "done"
+                         else None)
+        assert done is not None
+        assert scheduler.tick() == 0                  # one-shot never repeats
+        with pytest.raises(ValueError, match="done"):
+            scheduler.resume(t["id"])
+        # future at → not due
+        t2 = store.create_task("later", "later job", 3600, None,
+                               run_at=_t.time() + 3600)
+        assert all(x["id"] != t2["id"] for x in store.due_tasks(_t.time()))
+        # brain surface: absolute local time + honest parse errors
+        out = dots_action({"action": "task_create", "instruction": "x",
+                           "at": "2099-01-02 03:04"})
+        assert "at 2099-01-02 03:04" in out
+        out2 = dots_action({"action": "task_create", "instruction": "x",
+                            "at": "not-a-date"})
+        assert "YYYY-MM-DD" in out2
+
     def test_run_ok_flow_and_convo_history(self, env):
         from dots import scheduler, store
         c = env["client"]

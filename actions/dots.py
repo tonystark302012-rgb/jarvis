@@ -22,6 +22,42 @@ them.
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime
+
+
+def _parse_at(raw) -> float | None:
+    """at=/run_at= accepts epoch seconds or a local 'YYYY-MM-DD HH:MM(:SS)'.
+    None/'' → None (no one-shot). Raises ValueError with a usable message."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).strip()
+    if s.isdigit():
+        return float(s)
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).timestamp()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except ValueError:
+        raise ValueError(
+            f"at= must be 'YYYY-MM-DD HH:MM' or epoch seconds, got {raw!r}")
+
+
+def _sched_label(t: dict) -> str:
+    """Human schedule for one task row (task_list + messages)."""
+    kind = t.get("schedule_kind") or "every"
+    if kind == "cron":
+        return f"cron {t.get('cron_expr')}"
+    if kind == "at":
+        return time.strftime("at %Y-%m-%d %H:%M",
+                             time.localtime(t.get("run_at") or 0))
+    return f"every {t['every_seconds']}s"
 
 
 def _resolve_dot(params: dict) -> dict | None:
@@ -218,7 +254,8 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
                           params.get("message") or "").strip()
         if not instruction:
             return ("Give the recurring command — dots action=task_create "
-                    "instruction=\"…\" every=3600 dot=…")
+                    "instruction=\"…\" every=3600 (or cron=\"0 7 * * *\" "
+                    "or at=\"2026-10-06 07:00\") dot=…")
         raw_dot = str(params.get("dot") or "").strip()
         if raw_dot:
             d, err = _require_dot(params)
@@ -232,15 +269,21 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
             d = ds[0] if ds else None      # no dots → main brain (dot-less)
         every = params.get("every") or params.get("every_seconds") or 3600
         try:
+            run_at = _parse_at(params.get("at")
+                               if params.get("at") is not None
+                               else params.get("run_at"))
             t = store.create_task(params.get("task") or instruction[:40],
                                   instruction, every,
-                                  d["id"] if d else None)
+                                  d["id"] if d else None,
+                                  cron=str(params.get("cron") or "").strip()
+                                  or None,
+                                  run_at=run_at)
         except (ValueError, KeyError) as e:
             return str(e)
         from dots import scheduler
         scheduler.ensure_started()
         where = f"on Dot '{d['name']}'" if d else "on the main brain"
-        return (f"Task '{t['name']}' scheduled every {t['every_seconds']}s "
+        return (f"Task '{t['name']}' scheduled {_sched_label(t)} "
                 f"{where} (first run on the next tick, "
                 f"hard cap {scheduler.DEADLINE_SECONDS}s per run). "
                 f"List: dots action=task_list")
@@ -258,8 +301,8 @@ def dots(parameters: dict = None, player=None, session_memory=None) -> str:
                 dn = "main brain"
             else:
                 dn = (store.get_dot(t["dot_id"]) or {}).get("name", "?")
-            lines.append(f"#{t['id']} [{t['status']}] every "
-                         f"{t['every_seconds']}s on {dn}: {t['name']}")
+            lines.append(f"#{t['id']} [{t['status']}] {_sched_label(t)} "
+                         f"on {dn}: {t['name']}")
         return "\n".join(lines)
 
     if action in ("task_pause", "task_resume", "task_cancel",
@@ -510,7 +553,18 @@ TOOL = {
                                            "command to run"},
             "every": {"type": "STRING",
                       "description": "task_create: seconds between runs "
-                                     "(e.g. 3600)"},
+                                     "(e.g. 3600) — ignored when cron=/at= "
+                                     "is given"},
+            "cron": {"type": "STRING",
+                     "description": "task_create: cron schedule, 5 fields "
+                                    "local time — e.g. '0 7 * * *' (daily "
+                                    "07:00), '*/15 * * * *' (every 15 min). "
+                                    "Pick ONE of every/cron/at."},
+            "at": {"type": "STRING",
+                   "description": "task_create: one-shot at 'YYYY-MM-DD "
+                                  "HH:MM' (local) or epoch seconds — runs "
+                                  "once then status=done. Pick ONE of "
+                                  "every/cron/at."},
             "task": {"type": "STRING",
                      "description": "task name or #id for task_* actions"},
             "status": {"type": "STRING",

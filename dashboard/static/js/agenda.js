@@ -37,6 +37,16 @@ function everyLabel(s) {
   return `every ${s}s`;
 }
 
+// schedule_kind: 'every' (seconds), 'cron' (5-field expr), 'at' (one-shot)
+function scheduleLabel(t) {
+  if (t.schedule_kind === 'cron') return `cron ${t.cron_expr || '?'}`;
+  if (t.schedule_kind === 'at') {
+    const d = new Date((t.run_at || 0) * 1000);
+    return `at ${d.toLocaleString()}`;
+  }
+  return everyLabel(t.every_seconds || 0);
+}
+
 // ── tasks ───────────────────────────────────────────────────────────────────
 async function loadTasks() {
   let tasks = [];
@@ -58,10 +68,11 @@ async function loadTasks() {
         <td><b>${JV.esc(t.name)}</b><br>
           <span class="muted" style="font-size:11px">${JV.esc((t.instruction || '').slice(0, 90))}</span><br>
           <span class="chip accent">${JV.esc(t.dot_id == null ? 'main brain' : (dot ? dot.name : 'dot #' + t.dot_id))}</span></td>
-        <td class="mono">${everyLabel(t.every_seconds)}<br>
+        <td class="mono">${JV.esc(scheduleLabel(t))}<br>
           <span class="muted" style="font-size:10px">next ${t.next_run_at ? new Date(t.next_run_at * 1000).toLocaleString() : '—'}</span></td>
         <td><span class="chip ${t.status === 'active' ? 'green'
-          : t.status === 'paused' ? 'amber' : 'red'}">${JV.esc(t.status)}</span></td>
+          : t.status === 'paused' ? 'amber'
+          : t.status === 'done' ? '' : 'red'}">${JV.esc(t.status)}</span></td>
         <td><button class="btn-sm" data-a="runs">Runs</button></td>
         <td><div class="row">
           ${t.status === 'active'
@@ -122,8 +133,11 @@ $('ag-add').onclick = async () => {
   const instruction = prompt('Instruction (what should it do?):',
     'Summarize what happened since last run in 5 bullet points.');
   if (!instruction) return;
-  const every = prompt('Repeat every (seconds — e.g. 3600 = hourly):', '3600');
-  if (!every) return;
+  const schedRaw = prompt(
+    'Schedule — a number = seconds between runs (3600 = hourly),\n'
+    + 'or cron:0 7 * * * (daily 07:00),\n'
+    + 'or at:2026-10-06 07:00 (one-shot):', '3600');
+  if (!schedRaw) return;
   // Dot is optional (blank → main brain, like a plain chat prompt)
   const dotLine = S.dots.length
     ? 'Dot ID:\n' + S.dots.map(d => `${d.id}: ${d.name}`).join('\n') +
@@ -131,8 +145,17 @@ $('ag-add').onclick = async () => {
     : '';
   const dotId = dotLine ? prompt(dotLine, String(S.dots[0].id)) : '';
   if (dotId === null) return;                 // cancelled
-  const body = { name, instruction,
-                 every_seconds: parseInt(every, 10) || 3600 };
+  const body = { name, instruction };
+  const s = schedRaw.trim();
+  if (s.startsWith('cron:')) {
+    body.cron = s.slice(5).trim();
+  } else if (s.startsWith('at:')) {
+    const when = Date.parse(s.slice(4).trim().replace(' ', 'T'));
+    if (isNaN(when)) { JV.toast('at: needs YYYY-MM-DD HH:MM'); return; }
+    body.run_at = Math.floor(when / 1000);
+  } else {
+    body.every_seconds = parseInt(s, 10) || 3600;
+  }
   if (String(dotId).trim() !== '') {
     const pid = parseInt(dotId, 10);
     if (isNaN(pid)) { JV.toast('Dot ID must be a number'); return; }

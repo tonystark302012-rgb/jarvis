@@ -123,7 +123,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   status TEXT NOT NULL DEFAULT 'active',
   next_run_at REAL NOT NULL,
   last_run_at REAL,
-  created_at REAL NOT NULL
+  created_at REAL NOT NULL,
+  schedule_kind TEXT NOT NULL DEFAULT 'every',  -- every | cron | at
+  cron_expr TEXT,                               -- valid when kind='cron'
+  run_at REAL                                   -- epoch when kind='at'
 );
 CREATE TABLE IF NOT EXISTS task_runs (
   id INTEGER PRIMARY KEY,
@@ -183,6 +186,11 @@ def _migrate(c: sqlite3.Connection) -> None:
     for ddl in (
         "ALTER TABLE pages ADD COLUMN sources_json TEXT",
         "ALTER TABLE pending_changes ADD COLUMN sources_json TEXT",
+        # cron/at scheduling (guarded — additive, defaults keep old rows)
+        "ALTER TABLE tasks ADD COLUMN schedule_kind TEXT"
+        " NOT NULL DEFAULT 'every'",
+        "ALTER TABLE tasks ADD COLUMN cron_expr TEXT",
+        "ALTER TABLE tasks ADD COLUMN run_at REAL",
     ):
         try:
             c.execute(ddl)
@@ -194,8 +202,12 @@ def _migrate(c: sqlite3.Connection) -> None:
     except sqlite3.Error:
         info = {}
     if info.get("dot_id") and info["dot_id"][3]:     # notnull flag = 1 (old)
+        # NOTE: runs AFTER the additive ALTERs above, so the schedule_*
+        # columns already exist on the old table — carry them through, or a
+        # fully-old DB would lose them the moment the rebuild drops it.
         cols = ["id", "name", "instruction", "every_seconds", "dot_id",
-                "status", "next_run_at", "last_run_at", "created_at"]
+                "status", "next_run_at", "last_run_at", "created_at",
+                "schedule_kind", "cron_expr", "run_at"]
         c.execute(
             "CREATE TABLE tasks_rebuild ("
             " id INTEGER PRIMARY KEY,"
@@ -206,7 +218,10 @@ def _migrate(c: sqlite3.Connection) -> None:
             " status TEXT NOT NULL DEFAULT 'active',"
             " next_run_at REAL NOT NULL,"
             " last_run_at REAL,"
-            " created_at REAL NOT NULL)")
+            " created_at REAL NOT NULL,"
+            " schedule_kind TEXT NOT NULL DEFAULT 'every',"
+            " cron_expr TEXT,"
+            " run_at REAL)")
         c.execute("INSERT INTO tasks_rebuild (" + ",".join(cols) + ")"
                   " SELECT " + ",".join(cols) + " FROM tasks")
         c.execute("DROP TABLE tasks")

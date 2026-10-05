@@ -169,8 +169,8 @@ def pause(tid: int) -> dict:
     t = store.get_task(tid)
     if t is None:
         raise KeyError(f"no task #{tid}")
-    if t["status"] == "cancelled":
-        raise ValueError(f"task #{tid} is cancelled — create a new one")
+    if t["status"] in ("cancelled", "done"):
+        raise ValueError(f"task is {t['status']} — create a new one")
     return store.set_task_status(tid, "paused")
 
 
@@ -178,8 +178,8 @@ def resume(tid: int) -> dict:
     t = store.get_task(tid)
     if t is None:
         raise KeyError(f"no task #{tid}")
-    if t["status"] == "cancelled":
-        raise ValueError(f"task #{tid} is cancelled — create a new one")
+    if t["status"] in ("cancelled", "done"):
+        raise ValueError(f"task is {t['status']} — create a new one")
     return store.set_task_status(tid, "active")
 
 

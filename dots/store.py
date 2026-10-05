@@ -12,9 +12,27 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 
 from . import db
 from .blocks import blocks_to_md, md_to_blocks, validate_blocks
+
+
+def _cron_next(expr: str, after: float) -> float:
+    """Local-time next occurrence of a 5-field cron expression (epoch s)."""
+    try:
+        from croniter import croniter
+    except ImportError:
+        raise ValueError(
+            "cron scheduling needs croniter — pip install croniter "
+            "(it is in requirements.txt)")
+    if not croniter.is_valid(expr):
+        raise ValueError(
+            f"bad cron expression {expr!r} — 5 fields like '0 7 * * *' "
+            "(minute hour day month weekday)")
+    nxt = croniter(expr, datetime.fromtimestamp(float(after))).get_next(
+        datetime)
+    return nxt.timestamp()
 
 
 def _now() -> float:
@@ -591,28 +609,59 @@ def prefs_for_dot(dot: dict) -> list[dict]:
 # ── tasks (recurring instructions) + runs ───────────────────────────────────
 def create_task(name: str, instruction: str, every_seconds,
                 dot_id: int | None,
-                next_run_at: float | None = None) -> dict:
-    """dot_id=None → task runs on the main brain (dot-less, like chat)."""
+                next_run_at: float | None = None,
+                cron: str | None = None,
+                run_at: float | None = None) -> dict:
+    """dot_id=None → task runs on the main brain (dot-less, like chat).
+
+    Schedule (one of, default every-N-seconds):
+      cron='0 7 * * *' — croniter-validated, local time
+      run_at=epoch     — one-shot; after it fires the task status → 'done'
+    """
     instruction = str(instruction or "").strip()
     if not instruction:
         raise ValueError("task needs an instruction")
-    try:
-        every = int(every_seconds)
-    except (TypeError, ValueError):
-        raise ValueError("every_seconds must be an integer")
-    if every < 1:
-        raise ValueError("every_seconds must be >= 1")
+    if cron and run_at is not None:
+        raise ValueError("pick ONE schedule: cron or run_at, not both")
     if dot_id is not None and get_dot(dot_id) is None:
         raise KeyError(f"no dot #{dot_id}")
+
+    kind, cron_expr, at_ts = "every", None, None
+    if cron:
+        expr = str(cron).strip()
+        now0 = _now()
+        nxt = _cron_next(expr, now0)             # validates via croniter
+        kind, cron_expr = "cron", expr
+        every = 0
+    elif run_at is not None:
+        try:
+            at_ts = float(run_at)
+        except (TypeError, ValueError):
+            raise ValueError("run_at must be epoch seconds")
+        if at_ts <= 0:
+            raise ValueError("run_at must be a real timestamp (> 0)")
+        kind, every = "at", 0
+        nxt = at_ts
+    else:
+        try:
+            every = int(every_seconds)
+        except (TypeError, ValueError):
+            raise ValueError("every_seconds must be an integer")
+        if every < 1:
+            raise ValueError("every_seconds must be >= 1")
+        nxt = float(next_run_at if next_run_at is not None else _now())
+
     name = str(name or "").strip() or instruction[:40]
     now = _now()
     with db._LOCK:
         c = db._conn()
         cur = c.execute(
             "INSERT INTO tasks (name, instruction, every_seconds, dot_id,"
-            " status, next_run_at, created_at) VALUES (?,?,?,?,'active',?,?)",
-            (name, instruction, every, dot_id,
-             float(next_run_at if next_run_at is not None else now), now))
+            " status, next_run_at, created_at,"
+            " schedule_kind, cron_expr, run_at)"
+            " VALUES (?,?,?,?,'active',?,?, ?,?,?)",
+            (name, instruction, int(every), dot_id,
+             float(nxt), now, kind, cron_expr, at_ts))
         c.commit()
         tid = cur.lastrowid
     return get_task(tid)
@@ -642,7 +691,7 @@ def due_tasks(now: float) -> list[dict]:
 
 
 def set_task_status(tid: int, status: str) -> dict:
-    if status not in ("active", "paused", "cancelled"):
+    if status not in ("active", "paused", "cancelled", "done"):
         raise ValueError(f"bad task status {status!r}")
     t = get_task(tid)
     if t is None:
@@ -656,12 +705,35 @@ def set_task_status(tid: int, status: str) -> dict:
 
 
 def advance_next_run(tid: int, base: float, finished_at: float) -> float:
-    """next_run_at += every, skipping missed windows — NO thundering
-    catch-up: jump by whole multiples of `every` until > now."""
+    """Pick the next fire time AFTER a run, per schedule_kind:
+      every — next_run_at += every, skipping missed windows (no
+              thundering catch-up: jump by whole multiples until > now)
+      cron  — next croniter occurrence after this run (local time)
+      at    — one-shot: the run completes the task → status 'done'
+    """
     t = get_task(tid)
     if t is None:
         raise KeyError(f"no task #{tid}")
+    kind = t.get("schedule_kind") or "every"
+    if kind == "at":
+        with db._LOCK:
+            c = db._conn()
+            c.execute("UPDATE tasks SET next_run_at = ?, last_run_at = ?,"
+                      " status = 'done' WHERE id = ?",
+                      (float(finished_at), float(finished_at), int(tid)))
+            c.commit()
+        return float(finished_at)
+    if kind == "cron":
+        nxt = _cron_next(str(t.get("cron_expr") or ""), finished_at)
+        with db._LOCK:
+            c = db._conn()
+            c.execute("UPDATE tasks SET next_run_at = ?, last_run_at = ?"
+                      " WHERE id = ?", (nxt, float(finished_at), int(tid)))
+            c.commit()
+        return nxt
     every = int(t["every_seconds"])
+    if every < 1:
+        every = 1                                # defensive: never spin
     nxt = float(base) + every
     while nxt <= finished_at:
         nxt += every
