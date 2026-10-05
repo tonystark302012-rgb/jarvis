@@ -3462,3 +3462,72 @@ class TestEmotionActing:
         i_log = src.index('self.ui.write_log(f"{self._asst_name}: {full_out}")')
         assert i_tag < i_log               # clean first, then log
         assert "self.ui.set_emotion(_e)" in src
+
+
+class TestEvalAB:
+    """R2: A/B reply evaluation with persisted scorecards + honest judges."""
+
+    @pytest.fixture(autouse=True)
+    def _dir(self, tmp_path, monkeypatch):
+        import actions.eval_ab as ev
+        monkeypatch.setattr(ev, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(ev, "_llm_judge", lambda *a, **k: None)
+        self.ev = ev
+
+    def test_missing_prompt_honest(self):
+        assert "Give me a prompt" in self.ev.eval_ab({})
+
+    def test_missing_candidate_honest(self):
+        out = self.ev.eval_ab({"prompt": "how to test", "a": "only a"})
+        assert "BOTH candidates" in out
+
+    def test_heuristic_picks_stronger_a(self):
+        out = self.ev.eval_ab({
+            "prompt": "how do I write unit tests for parsers",
+            "a": ("Use pytest fixtures and parametrize parsers with "
+                  "edge cases: empty input, unicode, oversized buffers. "
+                  "**Assert on structure**, not on formatting details. "
+                  "1. table-driven cases 2. property checks"),
+            "b": "maybe just try stuff and see, i guess"})
+        assert "Winner: A" in out and "judge=heuristic" in out
+        assert "Saved:" in out
+        files = list(self.ev._evals_dir().glob("eval-*.json"))
+        assert len(files) == 1
+        data = json.loads(files[0].read_text(encoding="utf-8"))
+        assert data["result"]["winner"] == "a"
+
+    def test_tie_when_identical(self):
+        same = "Both answers are equally fine for this prompt."
+        out = self.ev.eval_ab({"prompt": "x y z", "a": same, "b": same})
+        assert "Winner: Tie" in out
+
+    def test_gemini_judge_when_available(self, monkeypatch):
+        monkeypatch.setattr(
+            self.ev, "_llm_judge",
+            lambda *a, **k: {"winner": "b", "why": "clearer structure"})
+        out = self.ev.eval_ab({"prompt": "q", "a": "aa", "b": "bb"})
+        assert "Winner: B" in out and "judge=gemini" in out
+        assert "clearer structure" in out
+
+    def test_llm_judge_no_key_returns_none(self, monkeypatch):
+        from core import gemini
+        monkeypatch.setattr(gemini, "api_key", lambda refresh=False: "")
+        assert self.ev._llm_judge("p", "a", "b", "") is None
+
+    def test_report_aggregates(self, tmp_path):
+        d = self.ev._evals_dir()
+        for i, winner in enumerate(("a", "b", "a")):
+            (d / f"eval-{i}.json").write_text(
+                json.dumps({"result": {"winner": winner,
+                                       "judge": "heuristic"}}),
+                encoding="utf-8")
+        out = self.ev.eval_ab({"action": "report"})
+        assert "3 run(s)" in out and "A wins 2" in out and "B wins 1" in out
+
+    def test_report_empty_honest(self):
+        assert "No eval runs yet" in self.ev.eval_ab({"action": "report"})
+
+    def test_tool_discoverable(self):
+        from pathlib import Path as P
+        from core.action_loader import discover_actions
+        assert "eval_ab" in discover_actions(P("actions")).names()
