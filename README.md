@@ -404,6 +404,7 @@ ruff check .                          # lint — pyflakes + statement errors, mu
 python -m pytest tests/ -q            # full suite — offline, no mic/display/API key
 python tools/ui_smoke.py              # offscreen HUD E2E (needs PyQt6 + a display server stub)
 python tools/ui_preview.py            # bootstrap the dashboard preview on :8712 with a PREVIEW token
+python tools/feature_audit.py         # live probe: every feature's real entry point (19 checks, exit≠0 = broken)
 ```
 
 CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`). The suite covers the security invariants: no `shell=True` in `open_app`/`dev_agent`, the run-command allowlist, project-path containment, pip-flag injection, the dashboard AES round-trip, brute-force lockout, memory recall and parallel tool dispatch.

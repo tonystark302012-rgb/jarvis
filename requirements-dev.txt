@@ -37,3 +37,5 @@ pycodestyle>=2.11,<3            # pylsp style tier (clean-file assertion)
 croniter>=2,<3                  # dots scheduler cron test (runtime req, suite asserts it)
 feedparser>=6,<7                # feed RSS/Atom tests (runtime req, suite asserts it)
 duckdb>=0.10,<2                 # data tool KNN/SQL tests (10 skips otherwise)
+ddgs>=9,<10                     # web_search real DDG path (audit probe)
+duckduckgo-search>=6,<7         # legacy-first fallback in _get_ddgs
