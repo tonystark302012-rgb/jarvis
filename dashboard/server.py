@@ -1059,6 +1059,29 @@ class DashboardServer:
             except Exception as e:
                 return JSONResponse({"error": str(e)[:200]}, status_code=500)
 
+        @app.post("/api/webrtc/offer")
+        async def webrtc_offer(req: Request):
+            """SDP offer → answer (aiortc screen track). Guarded: 503
+            with the exact install line when aiortc is missing — the
+            dashboard keeps its JPEG mirror regardless."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "bad json"}, status_code=400)
+            try:
+                from core import webrtc as wrtc
+                answer = await wrtc.answer(str(body.get("sdp", "")))
+                return JSONResponse({"sdp": answer})
+            except RuntimeError as e:
+                return JSONResponse({"error": str(e)}, status_code=503)
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            except Exception as e:
+                return JSONResponse({"error": str(e)[:300]},
+                                    status_code=500)
+
         @app.get("/api/files")
         async def list_files(req: Request):
             if not _auth(req):

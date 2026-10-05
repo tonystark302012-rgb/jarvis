@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#0b1220">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>JARVIS</title>
@@ -69,7 +71,7 @@
     </main>
   </div>
 
-  <div id="mirror-view" style="display:none"><img id="mirror-img" alt="PC screen"></div>
+  <div id="mirror-view" style="display:none"><img id="mirror-img" alt="PC screen"><video id="mirror-video" style="display:none" autoplay playsinline muted></video></div>
   <div id="cam-view">
     <video id="cam-video" autoplay playsinline muted></video>
     <span class="cam-tag" id="cam-tag">LIVE</span>
@@ -683,5 +685,7 @@
   <script src="/static/js/computers.js"></script>
   <script src="/static/js/calls.js"></script>
   <script src="/static/js/agenda.js"></script>
+  <script src="/static/pwa.js"></script>
+  <script src="/static/webrtc.js"></script>
 </body>
 </html>

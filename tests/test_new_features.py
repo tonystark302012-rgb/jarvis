@@ -4495,3 +4495,145 @@ class TestPredictions:
 
     def test_unknown_action_honest(self):
         assert "action must be" in self.pr.predictions({"action": "dance"})
+
+
+class TestWebRTCMirror:
+    """Batch 19 (P2): aiortc WebRTC upgrade over the existing mirror."""
+
+    @pytest.fixture(autouse=True)
+    def _state(self, monkeypatch):
+        import core.webrtc as wrtc
+        self.wrtc = wrtc
+        monkeypatch.setattr(wrtc, "_state",
+                            {"pc": None, "negotiations": 0,
+                             "last_error": ""})
+
+    def test_missing_aiortc_is_exact_install_line(self):
+        with pytest.raises(RuntimeError) as ei:
+            self.wrtc._require()
+        msg = str(ei.value)
+        assert "pip install aiortc" in msg
+        assert "JPEG mirror keeps working" in msg
+        # status surfaces the same honesty
+        assert "unavailable" in self.wrtc.status()
+
+    def test_status_without_session_ready(self, monkeypatch):
+        monkeypatch.setattr(self.wrtc, "_require", lambda: (object, object))
+        out = self.wrtc.status()
+        assert "ready" in out and "JPEG fallback" in out
+
+    def test_answer_with_stub_aiortc(self, monkeypatch):
+        """Full negotiation logic against a faithful fake aiortc."""
+        created = {}
+
+        class FakeSDP:
+            def __init__(self, sdp, type):
+                self.sdp, self.type = sdp, type
+
+        class FakePC:
+            def __init__(self):
+                self.remote = None
+                self.local = None
+                self.tracks = []
+                self.closed = False
+
+            def addTrack(self, t):
+                self.tracks.append(t)
+
+            async def setRemoteDescription(self, desc):
+                self.remote = desc
+
+            async def createAnswer(self):
+                return FakeSDP("v=0\r\na=JARVIS-answer\r\n", "answer")
+
+            async def setLocalDescription(self, desc):
+                self.local = desc
+
+            @property
+            def localDescription(self):
+                return self.local
+
+            async def close(self):
+                self.closed = True
+
+        def fake_require():
+            def factory():
+                created["pc"] = FakePC()
+                return created["pc"]
+            return factory, FakeSDP
+        monkeypatch.setattr(self.wrtc, "_require", fake_require)
+        monkeypatch.setattr(self.wrtc, "_make_track",
+                            lambda: "TRACK-INSTANCE")
+
+        import asyncio
+        out = asyncio.run(self.wrtc.answer("v=0\r\na=offer\r\n"))
+        assert out.startswith("v=0") and "JARVIS-answer" in out
+        pc = created["pc"]
+        assert pc.remote.type == "offer"
+        assert pc.tracks == ["TRACK-INSTANCE"]
+        assert self.wrtc._state["negotiations"] == 1
+        assert self.wrtc._state["pc"] is pc
+        # stop closes it
+        assert asyncio.run(self.wrtc.stop()) is True
+        assert pc.closed and self.wrtc._state["pc"] is None
+        assert asyncio.run(self.wrtc.stop()) is False
+
+    def test_empty_offer_rejected(self, monkeypatch):
+        import asyncio
+        with pytest.raises(ValueError):
+            asyncio.run(self.wrtc.answer("   "))
+
+    def test_failure_closes_pc_and_records_error(self, monkeypatch):
+        class FakeSDP:
+            def __init__(self, sdp, type):
+                self.sdp, self.type = sdp, type
+
+        class FakePC:
+            def __init__(self):
+                self.closed = False
+                self.local = None
+
+            def addTrack(self, t):
+                raise RuntimeError("no track")
+
+            async def setRemoteDescription(self, desc):
+                pass
+
+            async def createAnswer(self):
+                return FakeSDP("x", "answer")
+
+            async def setLocalDescription(self, desc):
+                self.local = desc
+
+            async def close(self):
+                self.closed = True
+        box = {}
+        monkeypatch.setattr(
+            self.wrtc, "_require",
+            lambda: ((lambda: box.setdefault("pc", FakePC())), FakeSDP))
+        monkeypatch.setattr(self.wrtc, "_make_track", lambda: "T")
+        import asyncio
+        with pytest.raises(RuntimeError, match="no track"):
+            asyncio.run(self.wrtc.answer("v=0\r\n"))
+        assert box["pc"].closed
+        assert "no track" in self.wrtc._state["last_error"]
+        assert self.wrtc._state["pc"] is None
+
+    def test_offer_route_wired(self):
+        src = Path("dashboard/server.py").read_text(encoding="utf-8")
+        assert '"/api/webrtc/offer"' in src
+        assert "wrtc.answer" in src
+        assert src.count("_auth(req)") >= 4      # push + webrtc gated
+        # guarded 503 path present
+        assert "status_code=503" in src
+
+    def test_frontend_progressive_upgrade_wired(self):
+        js = Path("dashboard/static/webrtc.js").read_text(encoding="utf-8")
+        assert "/api/webrtc/offer" in js
+        assert "ontrack" in js
+        assert "recvonly" in js
+        # silent fallback — JPEG path survives any failure
+        assert "fallback" in js or "teardown" in js
+        html = Path("dashboard/static/app.html").read_text(encoding="utf-8")
+        assert "mirror-video" in html
+        assert "/static/webrtc.js" in html
