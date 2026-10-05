@@ -3531,3 +3531,99 @@ class TestEvalAB:
         from pathlib import Path as P
         from core.action_loader import discover_actions
         assert "eval_ab" in discover_actions(P("actions")).names()
+
+
+class TestVideoQA:
+    """R2: offline video captions (SRT) + honest transcript Q&A."""
+
+    @pytest.fixture(autouse=True)
+    def _seams(self, tmp_path, monkeypatch):
+        import actions.video_qa as vq
+        self.vq = vq
+        self.tmp = tmp_path
+        self._real_extract = vq._extract_audio   # before the seam patch
+        monkeypatch.setattr(vq, "_ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
+        monkeypatch.setattr(vq, "_extract_audio",
+                            lambda path, timeout=600: _zeros(32000))
+        monkeypatch.setattr(vq, "_transcribe_segments", lambda a: _segs())
+        monkeypatch.setattr(vq, "_answer", lambda q, t: None)
+
+    def test_no_path_honest(self):
+        assert "Give me the video file" in self.vq.video_qa({})
+
+    def test_missing_file_honest(self, tmp_path):
+        out = self.vq.video_qa({"path": str(tmp_path / "nope.mp4")})
+        assert out.startswith("No such file:")
+
+    def test_ffmpeg_missing_is_install_hint(self, monkeypatch):
+        import actions.video_qa as vq
+        monkeypatch.setattr(vq, "_ffmpeg_exe", lambda: None)
+        with pytest.raises(RuntimeError) as ei:
+            self._real_extract("/tmp/x.mp4")
+        assert "imageio-ffmpeg" in str(ei.value)
+
+    def test_captions_write_srt_and_transcript(self):
+        vid = self.tmp / "talk.mp4"
+        vid.write_bytes(b"\x00")
+        out = self.vq.video_qa({"path": str(vid), "action": "captions"})
+        assert "Captions written:" in out
+        srt = vid.with_suffix(".srt")
+        assert srt.is_file()
+        body = srt.read_text(encoding="utf-8")
+        assert "00:00:00,000 --> 00:00:03,500" in body
+        assert "hello from the lecture" in body
+        assert vid.with_suffix(".transcript.txt").is_file()
+        assert "Preview:" in out
+
+    def test_ask_with_answer(self, monkeypatch):
+        monkeypatch.setattr(self.vq, "_answer",
+                            lambda q, t: "It says the deadline is Friday.")
+        vid = self.tmp / "talk.mp4"
+        vid.write_bytes(b"\x00")
+        out = self.vq.video_qa({"path": str(vid), "action": "ask",
+                                "question": "deadline?"})
+        assert out == "Answer: It says the deadline is Friday."
+
+    def test_ask_without_key_returns_context_window(self, monkeypatch):
+        vid = self.tmp / "talk.mp4"
+        vid.write_bytes(b"\x00")
+        out = self.vq.video_qa({"path": str(vid), "action": "ask",
+                                "question": "lecture"})
+        assert "CONTEXT (not an answer)" in out
+        assert "[00:00:0" in out          # timestamps survived
+
+    def test_ask_needs_question(self):
+        vid = self.tmp / "t.mp4"
+        vid.write_bytes(b"\x00")
+        out = self.vq.video_qa({"path": str(vid), "action": "ask"})
+        assert "question=" in out
+
+    def test_no_speech_honest(self, monkeypatch):
+        import actions.video_qa as vq
+        monkeypatch.setattr(vq, "_transcribe_segments", lambda a: [])
+        vid = self.tmp / "quiet.mp4"
+        vid.write_bytes(b"\x00")
+        out = vq.video_qa({"path": str(vid)})
+        assert "Transcribed 0 words" in out
+
+    def test_srt_timestamp_format(self):
+        assert self.vq._srt_ts(0) == "00:00:00,000"
+        assert self.vq._srt_ts(3723.5) == "01:02:03,500"
+
+    def test_tool_discoverable(self):
+        from pathlib import Path as P
+        from core.action_loader import discover_actions
+        assert "video_qa" in discover_actions(P("actions")).names()
+
+
+def _zeros(n: int):
+    import numpy as np
+    return np.zeros(n, dtype="float32")
+
+
+def _segs():
+    return [
+        {"start": 0.0, "end": 3.5, "text": "hello from the lecture"},
+        {"start": 3.5, "end": 7.0, "text": "the deadline is Friday"},
+        {"start": 7.0, "end": 11.0, "text": "any questions about that"},
+    ]

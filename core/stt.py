@@ -70,6 +70,30 @@ class WhisperSTT:
             raise
 
 
+    def transcribe_segments(self, audio: np.ndarray) -> list[dict]:
+        """Timestamped segments for captions/SRT (additive — transcribe()
+        still returns the joined text). [{start, end, text}, …]."""
+        if audio is None or len(audio) == 0:
+            return []
+        segments, _info = self._model.transcribe(
+            audio,
+            language=self._language,
+            beam_size=1,
+            best_of=1,
+            condition_on_previous_text=False,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 300},
+        )
+        out = []
+        for seg in segments:
+            txt = (seg.text or "").strip()
+            if not txt:
+                continue
+            out.append({"start": float(seg.start or 0.0),
+                        "end": float(seg.end or 0.0), "text": txt})
+        return out
+
+
 class VoskSTT:
     """Streaming transcription using Vosk."""
 
