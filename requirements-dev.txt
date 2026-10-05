@@ -39,3 +39,6 @@ feedparser>=6,<7                # feed RSS/Atom tests (runtime req, suite assert
 duckdb>=0.10,<2                 # data tool KNN/SQL tests (10 skips otherwise)
 ddgs>=9,<10                     # web_search real DDG path (audit probe)
 duckduckgo-search>=6,<7         # legacy-first fallback in _get_ddgs
+# avatar — TestEmotionActing imports core.avatar → PyQt6.QtCore/QtGui (CI needs
+# the system GL stack too: see the "Qt system libs" step in the workflow):
+PyQt6>=6.6,<7                   # holographic avatar renderer (core/avatar.py)
