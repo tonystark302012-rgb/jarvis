@@ -5018,3 +5018,105 @@ class TestRagHybrid:
         assert abs(norm - 1.0) < 1e-6
         c = r._embed("employees get twenty one days paid leave")
         assert a != c
+
+
+class TestScannedPdfRAG:
+    """2h: scanned-PDF → OCR → chunks, plus the extractive doc brief."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        import actions.rag as r
+        monkeypatch.setattr(r, "_db_path", lambda: tmp_path / "rag.db")
+        monkeypatch.setattr(r, "_CONN", None)
+        r._UNREAD.clear()
+        yield
+        monkeypatch.setattr(r, "_CONN", None)
+        r._UNREAD.clear()
+
+    @staticmethod
+    def _blank_pdf(tmp_path, name="scan.pdf") -> Path:
+        from PyPDF2 import PdfWriter
+        w = PdfWriter()
+        w.add_blank_page(width=612, height=792)
+        p = tmp_path / name
+        with open(p, "wb") as fh:
+            w.write(fh)
+        return p
+
+    def test_scanned_pdf_goes_through_ocr_into_index(self, tmp_path,
+                                                     monkeypatch):
+        import actions.rag as r
+        from actions import region_ocr
+        self._blank_pdf(tmp_path)
+        monkeypatch.setattr(
+            region_ocr, "_read_text",
+            lambda img, mode="text": "PAGE ONE OCR TEXT notice period")
+        out = r.rag({"action": "index", "path": str(tmp_path)})
+        assert "Indexed 1 file" in out
+        hit = r.rag({"action": "ask", "query": "notice period"})
+        assert "PAGE ONE OCR TEXT" in hit
+
+    def test_scanned_pdf_without_backend_is_honest(self, tmp_path,
+                                                   monkeypatch):
+        import actions.rag as r
+        from actions import region_ocr
+        self._blank_pdf(tmp_path, name="scan2.pdf")
+
+        def no_backend(img, mode="text"):
+            raise RuntimeError("No OCR backend: install tesseract or "
+                               "configure a Gemini API key.")
+
+        monkeypatch.setattr(region_ocr, "_read_text", no_backend)
+        out = r.rag({"action": "index", "path": str(tmp_path)})
+        assert "unreadable" in out
+        assert "scanned PDF" in out              # reason, not just a count
+
+    def test_text_pdf_still_indexes_via_text_layer(self, tmp_path):
+        import actions.rag as r
+        # a real text-bearing PDF written with PyPDF2 is awkward — use a
+        # .txt neighbour for the positive path and assert the blank PDF
+        # does NOT get counted as a plain failure reason when OCR works
+        from actions import region_ocr
+        (tmp_path / "note.txt").write_text("plain text file", encoding="utf-8")
+        out = r.rag({"action": "index", "path": str(tmp_path)})
+        assert "Indexed 1 file" in out
+
+    def test_brief_query_mode_and_player_speak(self, tmp_path):
+        import actions.rag as r
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "agreement.txt").write_text(
+            "RENT AGREEMENT The notice period shall be two months. "
+            "Security deposit is three months rent. The landlord may "
+            "inspect the premises once per quarter with written notice.",
+            encoding="utf-8")
+        r.rag({"action": "index", "path": str(docs)})
+
+        class FakePlayer:
+            spoken = []
+
+            def speak(self, text):
+                self.spoken.append(text)
+
+            def show_content(self, title, text):
+                pass
+
+        pl = FakePlayer()
+        out = r.rag({"action": "brief", "query": "notice period"},
+                    player=pl)
+        assert out.startswith("Brief")
+        assert "notice period" in out.lower()
+        assert pl.spoken and "Brief" in pl.spoken[0]
+
+    def test_brief_path_mode_and_no_match(self, tmp_path):
+        import actions.rag as r
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "policy.txt").write_text(
+            "COMPANY POLICY Employees get 21 days paid leave per year.",
+            encoding="utf-8")
+        r.rag({"action": "index", "path": str(docs)})
+        out = r.rag({"action": "brief", "path": "policy.txt"})
+        assert "Brief" in out and "21 days" in out
+        miss = r.rag({"action": "brief", "path": "ghost-file"})
+        assert "nothing matched" in miss

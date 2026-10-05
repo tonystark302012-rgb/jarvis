@@ -3,9 +3,11 @@
 
 WHAT IT DOES
     1. index   — walk a folder (or one file): text, markdown, code, CSV
-                 are read directly; PDF/DOCX go through the stdlib-free
-                 path file_processor already owns (best-effort — unreadable
-                 files are listed, not fatal).
+                 are read directly; PDFs go pypdfium2 text layer →
+                 file_processor (pdfplumber) → SCANNED-PDF OCR (page
+                 render + region_ocr's tesseract/Gemini reader) — a
+                 photo-scanned agreement becomes searchable chunks, not
+                 an 'unreadable' line. DOCX still rides file_processor.
     2. ask     — HYBRID retrieval: FTS5 BM25 ∪ sqlite-vec vector KNN fused
                  with Reciprocal Rank Fusion, then an extractive
                  answer: the top passages quoted with file:line context.
@@ -38,6 +40,7 @@ _LOCK = Lock()
 _CONN: sqlite3.Connection | None = None
 _VEC = False                 # sqlite-vec available on the live connection
 _DIM = 256                   # embedding dimensions (hashing n-gram space)
+_UNREAD: dict[str, str] = {}  # path → honest reason (last index run)
 _MAX_DIST = 1.20             # cosine-distance cut: relevant neighbours
                              # measured 0.97–1.11, unrelated ≥ 1.28 on the
                              # 256-d n-gram space (empirical, both sides
@@ -129,23 +132,121 @@ def _chunk(text: str) -> list[str]:
     return [c for c in chunks if c]
 
 
+def _pdf_text_pdfium(path: Path) -> str | None:
+    """Fast native text layer via pypdfium2 (already a pdfplumber dep).
+    None = no text at all (scanned / image-only pages)."""
+    try:
+        import pypdfium2 as pdfium
+    except Exception:
+        return None
+    doc = None
+    try:
+        doc = pdfium.PdfDocument(str(path))
+        parts = []
+        for i in range(len(doc)):
+            tp = doc[i].get_textpage()
+            txt = tp.get_text_range() or ""
+            if txt.strip():
+                parts.append(txt)
+            tp.close()
+            if sum(len(x) for x in parts) > 400_000:
+                break
+        return "\n".join(parts) or None
+    except Exception:
+        return None
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+
+
+_OCR_MAX_PAGES = 15
+
+
+def _pdf_ocr(path: Path) -> str | None:
+    """SCANNED-PDF path: render each page (pypdfium2) and read it with
+    actions.region_ocr._read_text (tesseract offline → Gemini vision).
+    No OCR backend → None + honest reason in _UNREAD."""
+    _UNREAD[str(path)] = ""
+    try:
+        import pypdfium2 as pdfium
+    except Exception:
+        _UNREAD[str(path)] = "pypdfium2 missing (pip install pypdfium2)"
+        return None
+    doc = None
+    try:
+        doc = pdfium.PdfDocument(str(path))
+        n = len(doc)
+        if n == 0:
+            _UNREAD[str(path)] = "PDF has zero pages"
+            return None
+        from PIL import Image
+        from actions.region_ocr import _read_text as _ocr
+        pages = []
+        for i in range(min(n, _OCR_MAX_PAGES)):
+            bitmap = doc[i].render(scale=2.0)
+            try:
+                img = bitmap.to_pil()
+            except Exception:
+                img = Image.frombytes("RGB",
+                                      (int(bitmap.width),
+                                       int(bitmap.height)),
+                                      bitmap.buffer, "raw", "BGRX")
+            txt = _ocr(img, mode="text")          # may raise RuntimeError
+            if txt:
+                pages.append(f"[page {i + 1}]\n{txt}")
+        if not pages:
+            _UNREAD[str(path)] = (
+                f"scanned PDF — OCR found no text on "
+                f"{min(n, _OCR_MAX_PAGES)} page(s)")
+            return None
+        extra = ("" if n <= _OCR_MAX_PAGES else
+                 f"\n[ocr capped at {_OCR_MAX_PAGES} of {n} pages]")
+        return "\n\n".join(pages) + extra
+    except RuntimeError as e:
+        _UNREAD[str(path)] = f"scanned PDF, no OCR backend ({e})"
+        return None
+    except Exception as e:
+        _UNREAD[str(path)] = f"PDF OCR failed ({type(e).__name__}: {e})"
+        return None
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+
+
 def _read_text(path: Path) -> str | None:
     ext = path.suffix.lower()
     if ext in _TEXT_EXT:
         try:
             return path.read_text(encoding="utf-8", errors="replace")
         except Exception:
+            _UNREAD[str(path)] = "unreadable text file"
             return None
     if ext in _DOC_EXT:
-        # reuse file_processor's extractor — it already handles PDF/DOCX
+        # 1) native text layer — pypdfium2 (pdfplumber ships it)
+        if ext == ".pdf":
+            txt = _pdf_text_pdfium(path)
+            if txt and txt.strip():
+                return txt
+        # 2) reuse file_processor's extractor (pdfplumber tables etc.)
         try:
             from actions import file_processor as fp
             out = fp.file_processor({"action": "extract_text", "path": str(path)})
             if isinstance(out, str) and not out.startswith(
-                    ("Couldn", "Failed", "Error", "No ", "not installed")):
+                    ("Couldn", "Failed", "Error", "No ", "not installed"))                     and out.strip():
                 return out
         except Exception:
-            return None
+            pass
+        # 3) scanned PDF → OCR through region_ocr's reader
+        if ext == ".pdf":
+            return _pdf_ocr(path)
+        _UNREAD[str(path)] = "no text extracted (binary DOCX?)"
+        return None
     return None
 
 
@@ -241,6 +342,7 @@ def index_paths(raw_paths: list[str], max_files: int = 400) -> str:
 
     indexed = unread = 0
     t0 = time.time()
+    _UNREAD.clear()
     with _LOCK:
         c = _conn()
         for f in files:
@@ -263,6 +365,9 @@ def index_paths(raw_paths: list[str], max_files: int = 400) -> str:
            f"corpus now {n_chunks} chunk(s).")
     if unread:
         msg += f" {unread} file(s) unreadable (skipped)."
+        first = next((f"{k}: {v}" for k, v in _UNREAD.items() if v), "")
+        if first:
+            msg += f" First: {first}"
     if len(files) >= max_files:
         msg += f" Capped at {max_files} files — index a narrower folder."
     return msg
@@ -396,6 +501,52 @@ def _synthesize(query: str, hits: list[tuple[str, int, str]]) -> str | None:
         return None
 
 
+def _extract_brief(rows, topic: str = "") -> str:
+    """Extractive document brief: sentences ranked by cosine similarity
+    of the hashing embedding to the passage centroid (top ~8 lines,
+    original order). Uses the SAME _embed space as retrieval — no model."""
+    import re as _re
+    seen: set[str] = set()
+    sentences: list[str] = []
+    embeds: list[list[float]] = []
+    for _p, _s, text in rows:
+        for sent in _re.split(r"(?<=[.!?])\s+|\n+", text or ""):
+            sent = sent.strip()
+            if len(sent) < 25 or sent.lower() in seen:
+                continue
+            seen.add(sent.lower())
+            sentences.append(sent)
+            embeds.append(_embed(sent))
+            if len(sentences) >= 400:
+                break
+        if len(sentences) >= 400:
+            break
+    if not sentences:
+        return "Nothing substantial to brief."
+    dim = _DIM
+    centroid = [0.0] * dim
+    for v in embeds:
+        for i, x in enumerate(v):
+            centroid[i] += x
+    norm = sum(x * x for x in centroid) ** 0.5 or 1.0
+    centroid = [x / norm for x in centroid]
+    scored = []
+    for i, (sent, v) in enumerate(zip(sentences, embeds)):
+        sim = sum(a * b for a, b in zip(v, centroid))
+        if topic:                            # slight boost for topic words
+            sim += 0.05 * sum(1 for w in _re.findall(r"\w+", topic.lower())
+                              if w in sent.lower())
+        scored.append((sim, i, sent))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    top = sorted(scored[:8], key=lambda t: t[1])     # original order
+    lines = [s for _sim, _i, s in top]
+    srcs = sorted({r[0] for r in rows})
+    head = f"Brief ({len(lines)} key line(s) from {len(srcs)} passage(s))"
+    if topic:
+        head += f" — {topic}"
+    return head + ":\n" + "\n".join(f"• {ln}" for ln in lines)
+
+
 def rag(parameters: dict = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "").lower().strip()
@@ -407,6 +558,34 @@ def rag(parameters: dict = None, player=None, session_memory=None) -> str:
         return index_paths([str(p) for p in paths])
     if action == "status" or (not action and not params.get("query")):
         return _status()
+
+    if action == "brief":
+        query0 = str(params.get("query") or "").strip()
+        target = str(params.get("path") or "").strip()
+        if target:
+            with _LOCK:
+                c = _conn()
+                rows = c.execute(
+                    "SELECT path, seq, text FROM chunks WHERE path LIKE ?"
+                    " ORDER BY id", (f"%{target}%",)).fetchall()
+        elif query0:
+            rows = _retrieve(query0, k=8)      # takes _LOCK itself — never
+        else:                                  # nest it (non-reentrant Lock)
+            rows = []
+        if not rows:
+            return ("Give a `path` (document to brief) or a `query` "
+                    "(topic to brief) — nothing matched.")
+        brief = _extract_brief(rows, topic=query0 or target)
+        if player is not None:
+            try:
+                player.speak(brief)
+            except Exception:
+                pass
+            try:
+                player.show_content("DOC BRIEF", brief[:4000])
+            except Exception:
+                pass
+        return brief
 
     query = str(params.get("query") or params.get("question") or "").strip()
     if not query:
@@ -429,7 +608,9 @@ TOOL = {
         "— sqlite FTS5 BM25 + sqlite-vec vector KNN fused (RRF), no "
         "API needed). Actions: index (pass `path` — folder or file; text, "
         "markdown, code, CSV read directly, PDF/DOCX via file_processor), "
-        "ask (default — pass `query`; returns cited passages, or a "
+        "brief (extractive spoken summary of a document `path` or a "
+        "`query` — top key lines, spoken via player when present), "
+        "ask (pass `query`; returns cited passages, or a "
         "synthesized answer when a key is configured and privacy mode is "
         "off), status. Use for 'what does my rent agreement say about "
         "notice period', 'summarise this folder', 'index my notes'."
@@ -437,7 +618,8 @@ TOOL = {
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "action": {"type": "STRING", "description": "index | ask | status"},
+            "action": {"type": "STRING",
+                       "description": "index | ask | brief | status"},
             "path": {"type": "STRING", "description": "Folder/file to index"},
             "query": {"type": "STRING", "description": "Question to answer"},
         },
