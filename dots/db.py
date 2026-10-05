@@ -191,6 +191,9 @@ def _migrate(c: sqlite3.Connection) -> None:
         " NOT NULL DEFAULT 'every'",
         "ALTER TABLE tasks ADD COLUMN cron_expr TEXT",
         "ALTER TABLE tasks ADD COLUMN run_at REAL",
+        # skills verify-loop (batch 5): lint verdict per skill
+        "ALTER TABLE skills ADD COLUMN verify_json TEXT",
+        "ALTER TABLE skills ADD COLUMN verified_at REAL",
     ):
         try:
             c.execute(ddl)

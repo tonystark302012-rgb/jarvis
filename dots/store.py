@@ -10,6 +10,8 @@ Invariants (see docs/DOT_PLATFORM.md §3.2):
 """
 from __future__ import annotations
 
+import re
+
 import json
 import time
 from datetime import datetime
@@ -791,6 +793,7 @@ def create_skill_draft(title: str, body_md: str,
              str(body_md or ""), str(source_note or ""), now))
         c.commit()
         sid = cur.lastrowid
+    verify_skill(sid)          # auto-verify every new draft (loop step 1)
     return get_skill(sid)
 
 
@@ -837,6 +840,7 @@ def publish_skill(sid: int) -> dict:
         c.execute("UPDATE skills SET status='published', published_at=?"
                   " WHERE id = ?", (now, int(sid)))
         c.commit()
+    verify_skill(sid)          # re-run before it goes live (loop step 2)
     return get_skill(sid)
 
 
@@ -852,6 +856,64 @@ def archive_skill(sid: int) -> dict:
                   (int(sid),))
         c.commit()
     return get_skill(sid)
+
+
+# ── skills verify-loop (Report #2 §9) ───────────────────────────────────────
+_PLACEHOLDERS = ("todo", "tbd", "fixme", "{{", "lorem ipsum", "coming soon")
+
+
+def _lint_skill(title: str, body: str) -> list[str]:
+    """Structural checks a markdown skill must pass. Pure — unit tested."""
+    issues: list[str] = []
+    t = str(title or "").strip()
+    b = str(body or "")
+    if not t or t.lower() in ("untitled skill",):
+        issues.append("missing a real title")
+    if len(b.strip()) < 160:
+        issues.append("body too short (<160 chars)")
+    if not re.search(r"^#{1,3} ", b, re.M):
+        issues.append("no heading")
+    if not (re.search(r"^(\s*[-*] |\s*\d+\. )", b, re.M)
+            or "```" in b):
+        issues.append("no steps or example (need a list or code fence)")
+    low = b.lower()
+    for ph in _PLACEHOLDERS:
+        if ph in low:
+            issues.append(f"placeholder text: {ph!r}")
+            break
+    if b.count("```") % 2:
+        issues.append("unbalanced code fences")
+    return issues
+
+
+def verify_skill(sid: int, persist: bool = True) -> dict:
+    """Run the structural verify pass for one skill; store the verdict."""
+    s = get_skill(sid)
+    if s is None:
+        raise KeyError(f"no skill #{sid}")
+    issues = _lint_skill(s.get("title", ""), s.get("body_md", ""))
+    verdict = {"ok": not issues, "issues": issues, "at": _now()}
+    if persist:
+        with db._LOCK:
+            c = db._conn()
+            c.execute("UPDATE skills SET verify_json=?, verified_at=?"
+                      " WHERE id = ?",
+                      (json.dumps(verdict), verdict["at"], int(sid)))
+            c.commit()
+    return {**(get_skill(sid) or {}), "verify": verdict}
+
+
+def verify_all(status: str = "published") -> dict:
+    """Periodic re-run across a status bucket (the sweep behind
+    POST /api/skills/verify-all). Returns counts + failing skills."""
+    rows = list_skills(status if status not in ("", "any") else None)
+    failed = []
+    for s in rows:
+        v = verify_skill(s["id"])
+        if not v["verify"]["ok"]:
+            failed.append({"id": s["id"], "title": s["title"],
+                           "issues": v["verify"]["issues"]})
+    return {"checked": len(rows), "failed": failed}
 
 
 def scan_for_mining(convo_prefixes=("dot:", "page:", "task:")) -> list[dict]:

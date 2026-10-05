@@ -1056,6 +1056,7 @@ class TestResearch:
         import actions.research as r
         monkeypatch.setattr(r, "_base_dir", lambda: tmp_path)
         monkeypatch.setattr(r, "_synth_report", lambda t, d: None)  # offline
+        monkeypatch.setattr(r, "_extra_sources", lambda t: [])       # no net
         self.r = r
         self.tmp = tmp_path
 
@@ -2953,3 +2954,127 @@ class TestDictation:
     def test_tool_shape(self):
         assert self._d.TOOL["name"] == "dictation"
         assert self._d.TOOL["handler"] is self._d.dictation
+
+
+class TestResearchCritic:
+    """Deep-research loop: authority critic + citation verify + extras."""
+
+    def test_authority_scores(self):
+        import actions.research as r
+        assert r._authority("https://docs.python.org/3/") == 1.0
+        assert r._authority("https://arxiv.org/abs/1234") == 1.0
+        assert r._authority("https://www.reuters.com/x") == 0.7
+        assert r._authority("https://medium.com/@a/post") == 0.4
+        assert r._authority("https://reddit.com/r/x") == 0.3
+        assert r._authority("https://random.example.com/") == 0.5
+
+    def test_critic_ranks_and_prunes(self):
+        import actions.research as r
+        docs = [
+            {"title": "social", "url": "https://reddit.com/a",
+             "excerpt": "x" * 200},
+            {"title": "official", "url": "https://docs.official.dev/guide",
+             "excerpt": "y" * 200},
+            {"title": "blog", "url": "https://dev.to/p", "excerpt": "z" * 200},
+        ]
+        kept = r._critique(docs, 2)
+        assert [d["title"] for d in kept] == ["official", "blog"]
+
+    def test_citation_verify_counts(self):
+        import actions.research as r
+        docs = [{"title": "Study", "url": "https://x",
+                 "excerpt": "The aquifer fell 12.5% in 2024 after weak rains."}]
+        report = "Water tables fell 12.5% [1]. Also 99.9% nowhere [1]."
+        ok, total = r._verify_citations(report, docs)
+        assert total == 2 and ok == 1
+
+    def test_citation_header_landed_in_file(self, tmp_path, monkeypatch):
+        import actions.research as r
+        monkeypatch.setattr(r, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(r, "_synth_report", lambda t, d: None)
+        monkeypatch.setattr(r, "_extra_sources", lambda t: [])
+        monkeypatch.setattr(
+            r, "_search",
+            lambda q, max_results=6: [{"title": "A",
+                                       "url": "https://docs.a.gov/g"}])
+        monkeypatch.setattr(
+            r, "_fetch_url",
+            lambda u, timeout=15:
+            "<html><head><title>Gov study</title></head><body><main>"
+            "<p>Report: usage rose 42.0% during 2025 across districts, "
+            "with steady growth each quarter and no decline recorded at "
+            "any monitoring station across the whole year reliably.</p>"
+            "</main></body></html>")
+        out = r.research({"topic": "water", "depth": "standard"})
+        assert "Research report saved:" in out
+        path = Path(out.split("saved: ", 1)[1].split(" ", 1)[0])
+        body = path.read_text(encoding="utf-8")
+        assert "Citation check:" in body
+
+    def test_extra_sources_use_seams(self, monkeypatch):
+        import actions.research as r
+        # arXiv path uses raw requests — stub via _http_json + requests
+        import requests
+        atom = (
+            '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">'
+            "<entry><title>Quantum paper</title>"
+            "<summary>We show a result about qubits in 2025 with error "
+            "rates below previous estimates.</summary>"
+            "<id>http://arxiv.org/abs/1234.5678</id></entry></feed>")
+
+        class R:
+            text = atom
+            def raise_for_status(self):
+                pass
+
+        monkeypatch.setattr(requests, "get",
+                            lambda *a, **k: R())
+
+        def fake_json(url, timeout=12, headers=None):
+            if "semanticscholar" in url:
+                return {"data": [{"title": "S2 Paper", "year": 2025,
+                                  "abstract": "An abstract about models.",
+                                  "url": "https://s2.example/p"}]}
+            if "opensearch" in url:
+                return ["q", ["Quantum mechanics"]]
+            if "rest_v1/page/summary" in url:
+                return {"title": "Quantum mechanics",
+                        "extract": "Quantum mechanics is fundamental.",
+                        "content_urls": {"desktop": {
+                            "page": "https://en.wikipedia.org/wiki/"
+                                    "Quantum_mechanics"}}
+                        if False else {"desktop": {"page":
+                                    "https://en.wikipedia.org/wiki/QM"}}}
+            return {}
+
+        monkeypatch.setattr(r, "_http_json", fake_json)
+        out = r._extra_sources("quantum mechanics")
+        titles = " | ".join(d["title"] for d in out)
+        assert "arXiv" in titles and "S2 Paper" in titles
+        assert "Wikipedia" in titles
+
+    def test_github_metadata_only_for_repo_topics(self, monkeypatch):
+        import actions.research as r
+        import requests
+        monkeypatch.setattr(requests, "get",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("no net")))
+
+        def fake_json(url, timeout=12, headers=None):
+            if "api.github.com" in url:
+                return {"items": [{"full_name": "x/cool",
+                                   "stargazers_count": 1234,
+                                   "license": {"spdx_id": "MIT"},
+                                   "html_url": "https://github.com/x/cool",
+                                   "description": "A cool tool",
+                                   "pushed_at": "2026-10-01"}]}
+            raise RuntimeError("no net")
+
+        monkeypatch.setattr(r, "_http_json", fake_json)
+        # repo-flavoured topic → GitHub entry present
+        out = r._extra_sources("best flutter library")
+        assert any("GitHub: x/cool" in d["title"] and "★1234" in d["title"]
+                   and "MIT" in d["title"] for d in out)
+        # non-repo topic → no GitHub entry
+        out2 = r._extra_sources("monsoon rains rajasthan")
+        assert not any(d["title"].startswith("GitHub:") for d in out2)

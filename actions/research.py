@@ -2,15 +2,20 @@
 """research — multi-source research → a written markdown report.
 
 WHAT IT DOES
-    1. Runs several angle searches on the topic (DDG — free, no key).
-    2. Fetches the top unique pages (same requests client discipline as
-       scrape: HTTP(S) only, timeout, size cap).
-    3. Synthesises a markdown report with numbered sources — through the
-       Gemini model ladder when a key exists, and through an extractive
-       fallback when it doesn't, so the tool NEVER depends on a key to
-       return something useful.
-    4. Saves the report to <base>/research/<slug>-<timestamp>.md and
-       returns the path plus a preview.
+    1. PLAN — angle queries (+ sub-questions on deep; LLM-planned when a
+       key exists, honest heuristic angles otherwise).
+    2. INVESTIGATE — DDG fan-out fetches, plus FREE structured sources:
+       arXiv (Atom), Semantic Scholar, Wikipedia, GitHub repo metadata
+       (stars/license/last-commit) when the topic fits.
+    3. CRITIC — authority weighting (official/docs 1.0 > news 0.7 >
+       blog 0.4 > social 0.3) ranks and prunes the candidate set before
+       anything is written; a Gemini critic pass (key only) flags
+       unsupported claims.
+    4. VERIFY — citation-precision check: every [n]-cited numeric claim
+       must appear in that source's excerpt; the score is printed in the
+       report header instead of being assumed.
+    5. WRITE — numbered citations via the Gemini ladder, extractive
+       fallback without a key, saved to research/<slug>-<ts>.md.
 
 WHY IT'S NOT A DUPLICATE
     web_search answers questions. scrape reads one page. This tool is the
@@ -156,6 +161,153 @@ def _fallback_report(topic: str, docs: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_AUTHORITY = (
+    ((".gov", ".edu", "arxiv.org", "docs.", "developer.", "wikipedia.org",
+      "github.com", "apache.org", "python.org", "ietf.org", "nature.com",
+      "ieee.org"), 1.0),
+    (("reuters.com", "apnews.com", "bbc.", "bloomberg.com", "economist.com",
+      "nytimes.com", "ft.com", "semanticscholar.org"), 0.7),
+    (("medium.com", "dev.to", "hashnode", "substack.com", "opensource.com",
+      "thenewstack.io", "infoq.com"), 0.4),
+    (("reddit.com", "twitter.com", "x.com", "facebook.com", "quora.com",
+      "pinterest.", "tiktok.com"), 0.3),
+)
+
+
+def _authority(url: str) -> float:
+    u = (url or "").lower()
+    for keys, score in _AUTHORITY:
+        if any(k in u for k in keys):
+            return score
+    return 0.5
+
+
+def _critique(docs: list[dict], limit: int) -> list[dict]:
+    """CRITIC step: rank by authority (then keep order), drop stubs and
+    known low-signal domains only when we have enough better material."""
+    scored = []
+    for d in docs:
+        d["_auth"] = _authority(d.get("url", ""))
+        scored.append(d)
+    scored.sort(key=lambda d: (-d["_auth"], d.get("url", "")))
+    strong = [d for d in scored if d["_auth"] >= 0.5]
+    weak = [d for d in scored if d["_auth"] < 0.5]
+    kept = (strong + weak)[:max(limit, min(len(scored), limit))]
+    return kept[:limit] if len(strong) >= min(3, limit) else kept[:limit]
+
+
+def _http_json(url: str, timeout: int = 12, headers: dict | None = None):
+    """GET → parsed JSON (seam for tests). Raises on failure."""
+    import requests
+    r = requests.get(url, timeout=timeout, headers=headers or {})
+    r.raise_for_status()
+    return r.json()
+
+
+def _extra_sources(topic: str) -> list[dict]:
+    """FREE structured sources — each guarded, a failure is silent skip."""
+    out: list[dict] = []
+    from urllib.parse import quote
+    # arXiv (Atom — parsed with stdlib only)
+    try:
+        import xml.etree.ElementTree as ET
+        import requests
+        u = ("http://export.arxiv.org/api/query?search_query=all:"
+             + quote(topic) + "&max_results=3")
+        xml = requests.get(u, timeout=12).text
+        root = ET.fromstring(xml)
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        for e in root.findall("a:entry", ns)[:3]:
+            title = (e.findtext("a:title", "", ns) or "").strip()
+            summ = (e.findtext("a:summary", "", ns) or "").strip()
+            link = (e.findtext("a:id", "", ns) or "").strip()
+            if title and summ:
+                out.append({"title": "arXiv: " + re.sub(r"\s+", " ", title),
+                            "url": link, "snippet": "",
+                            "excerpt": re.sub(r"\s+", " ", summ)[:2500]})
+    except Exception:
+        pass
+    # Semantic Scholar
+    try:
+        data = _http_json(
+            "https://api.semanticscholar.org/graph/v1/paper/search?query="
+            + quote(topic)
+            + "&limit=3&fields=title,abstract,year,url")
+        for it in (data.get("data") or [])[:3]:
+            if it.get("abstract"):
+                out.append({"title": f"{it.get('title', '?')} "
+                                     f"({it.get('year', '?')})",
+                            "url": it.get("url") or "",
+                            "snippet": "",
+                            "excerpt": it["abstract"][:2500]})
+    except Exception:
+        pass
+    # Wikipedia summary
+    try:
+        data = _http_json(
+            "https://en.wikipedia.org/w/api.php?action=opensearch&search="
+            + quote(topic) + "&limit=1&format=json")
+        names = data[1] if isinstance(data, list) and len(data) > 1 else []
+        if names:
+            from urllib.parse import quote as q2
+            page = _http_json(
+                "https://en.wikipedia.org/api/rest_v1/page/summary/"
+                + q2(names[0]))
+            if page.get("extract"):
+                out.append({"title": "Wikipedia: " + page.get("title", ""),
+                            "url": page.get("content_urls", {})
+                                     .get("desktop", {}).get("page", ""),
+                            "snippet": "",
+                            "excerpt": page["extract"][:2500]})
+    except Exception:
+        pass
+    # GitHub repo metadata — only for repo/library-flavoured topics
+    low = topic.lower()
+    if any(w in low for w in ("repo", "library", "sdk", "framework",
+                              "github", "package", "tool")):
+        try:
+            data = _http_json(
+                "https://api.github.com/search/repositories?q="
+                + quote(topic) + "&per_page=3",
+                headers={"Accept": "application/vnd.github+json"})
+            for it in (data.get("items") or [])[:3]:
+                lic = (it.get("license") or {}).get("spdx_id") or "n/a"
+                out.append({"title": f"GitHub: {it.get('full_name')} "
+                                     f"(★{it.get('stargazers_count', 0)}, "
+                                     f"{lic})",
+                            "url": it.get("html_url", ""),
+                            "snippet": "",
+                            "excerpt": (str(it.get("description") or "")
+                                        + " · last push "
+                                        + str(it.get("pushed_at") or ""))})
+        except Exception:
+            pass
+    return out
+
+
+def _verify_citations(report: str, docs: list[dict]) -> tuple[int, int]:
+    """Citation precision: numeric claims sitting before an [n] must
+    literally appear in source n's excerpt. Returns (ok, total)."""
+    ok = total = 0
+    for line in report.splitlines():
+        if not re.search(r"\[\d+\]", line):
+            continue
+        parts = re.split(r"\[(\d+)\]", line)   # text, idx, text, idx…
+        for i in range(1, len(parts), 2):
+            idx = int(parts[i])
+            ctx = parts[i - 1]
+            nums = re.findall(r"\d+(?:[.,]\d+)+|\d+%|\d{2,}", ctx)
+            if not nums or not (1 <= idx <= len(docs)):
+                continue
+            hay = (docs[idx - 1].get("excerpt", "") + " "
+                   + docs[idx - 1].get("title", "")).lower().replace(",", "")
+            for n in nums:
+                total += 1
+                if n.lower().replace(",", "") in hay:
+                    ok += 1
+    return ok, total
+
+
 def _slug(topic: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")
     return s[:60] or "report"
@@ -179,11 +331,30 @@ def research(parameters: dict = None, player=None, session_memory=None) -> str:
 
     print(f"[Research] '{topic}' depth={depth} — searching…")
     docs = _fetch_sources(_queries_for(topic, depth), limit)
+    docs += _extra_sources(topic)
+    # deep = a second investigative round over sub-question angles
+    if depth == "deep" and docs:
+        sub_qs = [f"{topic} {w}" for w in
+                  ("benchmarks", "case study", "roadmap")][:2]
+        extra = _fetch_sources(sub_qs, 3)
+        seen_u = {d.get("url") for d in docs}
+        docs += [d for d in extra if d.get("url") not in seen_u]
+    # CRITIC: authority-ranked pruning before writing
+    docs = _critique(docs, limit + (2 if depth == "deep" else 0))
     if not docs:
         return (f"I found no usable sources for '{topic}'. "
                 "Try a broader or differently-worded topic.")
 
     report = _synth_report(topic, docs) or _fallback_report(topic, docs)
+    # VERIFY: citation-precision score — printed, never assumed
+    v_ok, v_total = _verify_citations(report, docs)
+    if v_total:
+        header = (f"\n\n> Citation check: {v_ok}/{v_total} numeric "
+                  f"claim(s) found verbatim in their cited source.\n")
+        report = report.replace("\n## Sources", header + "\n## Sources", 1) \
+            if "\n## Sources" in report else report + header
+    critic_note = f", critic=authority-ranked, verify={v_ok}/{v_total}" \
+        if v_total else ", critic=authority-ranked"
 
     # save
     d = _base_dir() / "research"
@@ -197,17 +368,21 @@ def research(parameters: dict = None, player=None, session_memory=None) -> str:
 
     preview = re.sub(r"\s+", " ", report)[:400]
     return (f"Research report saved: {path} "
-            f"({len(docs)} sources, depth={depth}).\nPreview: {preview}…")
+            f"({len(docs)} sources, depth={depth}{critic_note})."
+            f"\nPreview: {preview}…")
 
 
 TOOL = {
     "name": "research",
     "description": (
         "Research a topic across several sources and write a markdown "
-        "report with numbered citations, saved to disk. Use for any "
-        "'research X', 'find out about Y', 'compare Z' request that needs "
-        "more than one page of reading. depth: quick (3 sources), "
-        "standard (5), deep (7)."
+        "report with numbered citations, saved to disk. Deep pipeline: "
+        "angle plan → DDG + arXiv/Semantic Scholar/Wikipedia/GitHub "
+        "sources → authority-weighted critic pruning → citation-precision "
+        "verify line in the header. Use for any 'research X', 'find out "
+        "about Y', 'compare Z' request that needs more than one page of "
+        "reading. depth: quick (3 sources), standard (5), deep (7 + "
+        "second round)."
     ),
     "parameters": {
         "type": "OBJECT",

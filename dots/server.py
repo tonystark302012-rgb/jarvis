@@ -493,6 +493,22 @@ def api_publish_skill(sid: int) -> dict:
         raise HTTPException(409, str(e))
 
 
+@router.post("/api/skills/verify-all")
+def api_verify_all_skills(status: str = "published") -> dict:
+    """Periodic verify sweep — re-runs structural checks across a bucket
+    (called by tests/cron; failing published skills are surfaced, never
+    silently unpublished)."""
+    return store.verify_all(status)
+
+
+@router.post("/api/skills/{sid}/verify")
+def api_verify_skill(sid: int) -> dict:
+    try:
+        return store.verify_skill(sid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
 @router.post("/api/skills/{sid}/archive")
 def api_archive_skill(sid: int) -> dict:
     try:

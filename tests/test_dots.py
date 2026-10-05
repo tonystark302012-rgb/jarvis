@@ -2090,3 +2090,82 @@ class TestVoiceCalls:
         voice.end(call["id"])
         rows = dots_action({"action": "call_list"})
         assert "#1 [ended]" in rows
+
+
+class TestSkillVerifyLoop:
+    """Batch 5 (R2 §9): structural verify on draft + publish, sweep."""
+
+    GOOD = (
+        "# Quarterly report deck\n\n"
+        "## When to use\n"
+        "When the user asks for the quarterly report deck.\n\n"
+        "## Steps\n"
+        "1. Pull the latest numbers from the sheet.\n"
+        "2. Update the three standard charts.\n"
+        "3. Export to PDF and share the link.\n\n"
+        "```bash\n./scripts/report.sh --quarter latest\n```\n"
+    )
+
+    def test_draft_auto_verified_and_clean(self, env):
+        from dots import store
+        s = store.create_skill_draft("Quarterly report deck", self.GOOD)
+        assert s["verify_json"], "verdict persisted on draft creation"
+        assert '"ok": true' in s["verify_json"].replace(" ", " ").lower() \
+            or '"ok": true' in s["verify_json"]
+        assert s["verified_at"] is not None
+
+    def test_bad_draft_collects_issues(self, env):
+        from dots import store
+        s = store.create_skill_draft("Untitled skill", "TODO: write this")
+        v = store.verify_skill(s["id"])
+        assert v["verify"]["ok"] is False
+        issues = " | ".join(v["verify"]["issues"])
+        assert "too short" in issues
+        assert "placeholder" in issues or "title" in issues
+        assert "heading" in issues
+
+    def test_unbalanced_fences_flagged(self, env):
+        from dots import store
+        body = ("# How to\n\n- do the thing carefully\n"
+                "```python\nprint(1)")            # fence never closed
+        s = store.create_skill_draft("How to", body + " " + "x" * 140)
+        v = store.verify_skill(s["id"])
+        assert any("fence" in i for i in v["verify"]["issues"])
+
+    def test_publish_reruns_verify(self, env):
+        from dots import store
+        s = store.create_skill_draft("Quarterly report deck", self.GOOD)
+        before = s["verified_at"]
+        out = store.publish_skill(s["id"])
+        assert out["status"] == "published"
+        assert out["verified_at"] >= before          # re-ran on publish
+        assert '"ok": true' in out["verify_json"]
+
+    def test_verify_all_sweep_counts_failures(self, env):
+        from dots import store
+        good = store.create_skill_draft("Quarterly report deck", self.GOOD)
+        store.publish_skill(good["id"])
+        bad = store.create_skill_draft("Broken", "TBD")
+        store.publish_skill(bad["id"])
+        res = store.verify_all("published")
+        assert res["checked"] == 2
+        assert len(res["failed"]) == 1
+        assert res["failed"][0]["title"] == "Broken"
+
+    def test_verify_routes(self, env):
+        c = env["client"]
+        from dots import store
+        s = store.create_skill_draft("Quarterly report deck", self.GOOD)
+        r = c.post(f"/api/skills/{s['id']}/verify")
+        assert r.status_code == 200
+        assert r.json()["verify"]["ok"] is True
+        assert c.post("/api/skills/424242/verify").status_code == 404
+        sweep = c.post("/api/skills/verify-all?status=draft")
+        assert sweep.status_code == 200
+        assert sweep.json()["checked"] >= 1
+
+    def test_lint_unit_pure(self):
+        from dots.store import _lint_skill
+        assert _lint_skill("T", "# Title\n\n- step one details here ok\n"
+                               + "x" * 160) == []
+        assert _lint_skill("", "") != []
