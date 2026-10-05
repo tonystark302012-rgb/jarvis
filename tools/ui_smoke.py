@@ -565,6 +565,11 @@ check("get_action_names" in pal_slice, "C8 action index in palette (M)")
 check('"\u25b8"' in pal_slice or "\u25b8" in pal_slice, "C8 tool entries marked")
 check("palette_run" in main_src, "C8 main wires palette_run")
 
+# C15 — translate lens overlay (Report I)
+check("class _LensOverlay" in src2, "C15 _LensOverlay class")
+check("_lens_sig" in src2 and "def show_lens" in src2, "C15 thread-safe show_lens")
+check("def _show_lens" in src2, "C15 _show_lens handler")
+
 # C10 — skill detail dialog
 check("def _detail" in src2[src2.index("class SkillsPanel"):], "C10 skill _detail method")
 check('"DETAIL"' in src2, "C10 DETAIL button")

@@ -2421,6 +2421,75 @@ class ConfirmBanner(_HudOverlay):
         no.setFocus()
 
 
+class _LensOverlay(_HudOverlay):
+    """Floating translate-lens panel: up to 8 original → translated pairs
+    from actions.translate_lens, auto-dismissing."""
+
+    _OW = 460
+
+    def __init__(self, pairs, src: str, dst: str, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            _LensOverlay {{
+                background: rgba(0, 6, 10, 244);
+                border: 1px solid {C.PRI};
+                border-radius: 6px;
+            }}
+        """)
+        self.setFixedWidth(self._OW)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 12)
+        lay.setSpacing(6)
+
+        hdr = QHBoxLayout()
+        pair = f"{(src or 'auto').upper()} → {(dst or 'default').upper()}"
+        title = QLabel(f"◈  LENS  {pair}")
+        title.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(16, 16)
+        close_btn.setFont(QFont("Courier New", 8))
+        close_btn.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.hide)
+        hdr.addWidget(close_btn)
+        lay.addLayout(hdr)
+
+        for orig, trans in list(pairs)[:8]:
+            o = QLabel(str(orig))
+            o.setWordWrap(True)
+            o.setFont(QFont("Courier New", 8))
+            o.setStyleSheet(
+                f"color: {C.TEXT_DIM}; background: transparent;")
+            lay.addWidget(o)
+            t = QLabel(str(trans) if trans else "(untranslated)")
+            t.setWordWrap(True)
+            t.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+            t.setStyleSheet(
+                f"color: {C.WHITE}; background: transparent;")
+            lay.addWidget(t)
+            sep = QLabel("·")
+            sep.setStyleSheet(f"color: {C.BORDER}; background: transparent;")
+            lay.addWidget(sep)
+        if lay.count():
+            # drop the trailing separator
+            sep_item = lay.takeAt(lay.count() - 1)
+            w = sep_item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+        self._timer.start(14_000)
+        self.hide()
+
+
 class AudioDeviceOverlay(_HudOverlay):
     """Choose which microphone JARVIS listens to and which speakers it uses.
 
@@ -5500,6 +5569,7 @@ class MainWindow(QMainWindow):
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
+    _lens_sig       = pyqtSignal(list, str, str)  # translate-lens pairs (thread-safe)
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
@@ -5856,6 +5926,7 @@ class MainWindow(QMainWindow):
         self._camera_sig.connect(self._show_camera_frame)
         self._confirm_sig.connect(self._show_confirm_banner)
         self._confirm_hide_sig.connect(self._hide_confirm_banner)
+        self._lens_sig.connect(self._show_lens)
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._wake_btns_sig.connect(self._refresh_wake_btns)
@@ -8446,6 +8517,25 @@ class MainWindow(QMainWindow):
         ov = getattr(self, "_confirm_overlay", None)
         if ov is not None:
             ov.hide()
+
+    # ── Translate lens overlay ────────────────────────────────────────────────
+    def _show_lens(self, pairs, src: str, dst: str) -> None:
+        """Floating original → translated panel (Report I). Replaces any
+        live frame already up; auto-dismisses on its own timer."""
+        try:
+            prev = getattr(self, "_lens_ov", None)
+            if prev is not None:
+                try:
+                    prev.hide()
+                except Exception:
+                    pass
+            ov = _LensOverlay(pairs, src, dst, parent=self.centralWidget())
+            self._lens_ov = ov
+            self._centre_overlay(ov)
+            ov.show()
+            ov.raise_()
+        except Exception:
+            pass
             ov.deleteLater()
             self._confirm_overlay = None
 
@@ -8843,6 +8933,15 @@ class JarvisUI:
                 hook(title, text)
             except Exception:
                 pass
+
+    def show_lens(self, pairs, src: str = "", dst: str = "") -> None:
+        """Thread-safe: floating translate-lens overlay (original →
+        translated). No-op when the HUD window is gone."""
+        try:
+            self._win._lens_sig.emit(list(pairs), str(src or ""),
+                                     str(dst or ""))
+        except Exception:
+            pass
 
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.

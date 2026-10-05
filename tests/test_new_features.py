@@ -2550,3 +2550,74 @@ class TestSpokenBrief:
     def test_tool_shape(self):
         assert self._sb.TOOL["name"] == "spoken_brief"
         assert self._sb.TOOL["handler"] is self._sb.spoken_brief
+
+
+class TestTranslateLens:
+    """I: capture → OCR → translate → floating HUD overlay."""
+
+    @pytest.fixture(autouse=True)
+    def _wired(self, monkeypatch):
+        import actions.region_ocr as ro
+        import actions.translate_lens as tl
+        self._tl = tl
+        monkeypatch.setattr(ro, "_capture", lambda region: object())
+        monkeypatch.setattr(ro, "_read_text",
+                            lambda img, mode="text":
+                            "HELLO WORLD\nSECOND LINE HERE")
+        monkeypatch.setattr("actions.translate.translate",
+                            lambda p: f"[{p.get('target') or 'hi'}] "
+                                      f"{p['text']}")
+        class P:
+            def __init__(self):
+                self.lens = []
+                self.content = []
+            def show_lens(self, pairs, src="", dst=""):
+                self.lens.append((list(pairs), src, dst))
+            def show_content(self, t, b):
+                self.content.append((t, b))
+        self.player = P()
+        yield
+
+    def test_lens_translates_and_pushes_overlay(self):
+        out = self._tl.translate_lens(
+            {"to": "es"}, player=self.player)
+        assert "2 line(s), 2 translated" in out
+        assert "HELLO WORLD" in out and "[es] HELLO WORLD" in out
+        assert self.player.lens, "overlay must be pushed"
+        pairs, src, dst = self.player.lens[0]
+        assert pairs[0][1].startswith("[es]")
+        assert self.player.content and self.player.content[0][0] == "TRANSLATE LENS"
+
+    def test_no_capture_backend_is_honest(self, monkeypatch):
+        import actions.region_ocr as ro
+        monkeypatch.setattr(ro, "_capture", lambda region: None)
+        out = self._tl.translate_lens({}, player=self.player)
+        assert "nothing readable" in out
+
+    def test_no_text_in_region_is_honest(self, monkeypatch):
+        import actions.region_ocr as ro
+        monkeypatch.setattr(ro, "_capture", lambda region: object())
+        monkeypatch.setattr(ro, "_read_text",
+                            lambda img, mode="text": "   \n  ")
+        out = self._tl.translate_lens({})
+        assert "nothing readable" in out
+
+    def test_translation_unavailable_surfaces_reason(self, monkeypatch):
+        monkeypatch.setattr(
+            "actions.translate.translate",
+            lambda p: "No translation engine available: install "
+                      "`argostranslate` for offline translation, or "
+                      "configure a Gemini key.")
+        out = self._tl.translate_lens({}, player=self.player)
+        assert "translation unavailable" in out
+        assert "No translation engine" in out
+
+    def test_repeat_two_frames(self):
+        out = self._tl.translate_lens({"repeat": "2", "pause": "0.5"},
+                                      player=self.player)
+        assert "frame 1:" in out and "frame 2:" in out
+        assert len(self.player.lens) == 2
+
+    def test_tool_shape(self):
+        assert self._tl.TOOL["name"] == "translate_lens"
+        assert self._tl.TOOL["handler"] is self._tl.translate_lens
