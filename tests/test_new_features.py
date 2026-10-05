@@ -4011,3 +4011,137 @@ class TestVideoQAWhisperXEngine:
         out = self.vq.video_qa({"path": str(vid)})
         assert "[engine: whisper]" in out
         assert "plain text" in vid.with_suffix(".transcript.txt").read_text()
+
+
+class TestGo2rtc:
+    """Batch 16: guarded RTSP/WebRTC stream bridge."""
+
+    class _Proc:
+        def __init__(self, alive=True):
+            self._alive = alive
+            self.terminated = False
+            self.killed = False
+            self.stderr = None
+
+        def poll(self):
+            return None if self._alive else 0
+
+        def terminate(self):
+            self.terminated = True
+            self._alive = False
+
+        def wait(self, timeout=None):
+            self._alive = False
+            return 0
+
+        def kill(self):
+            self.killed = True
+            self._alive = False
+
+    @pytest.fixture(autouse=True)
+    def _seams(self, tmp_path, monkeypatch):
+        import actions.go2rtc as g
+        self.g = g
+        monkeypatch.setattr(g, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(g, "_STATE",
+                            {"proc": None, "port": 1984, "url": "",
+                             "streams": [], "error": ""})
+        self.tmp = tmp_path
+
+    def test_status_without_binary_is_honest(self, monkeypatch):
+        monkeypatch.setattr(self.g, "_binary", lambda: None)
+        out = self.g.go2rtc({"action": "status"})
+        assert "MISSING" in out and "action=install" in out
+
+    def test_start_without_streams_hints(self, monkeypatch):
+        monkeypatch.setattr(self.g, "_binary", lambda: "/usr/bin/go2rtc")
+        out = self.g.go2rtc({"action": "start"})
+        assert "streams=" in out
+
+    def test_start_without_binary_never_fakes(self, monkeypatch):
+        monkeypatch.setattr(self.g, "_binary", lambda: None)
+        out = self.g.go2rtc({"action": "start",
+                             "streams": "cam=rtsp://x"})
+        assert "never\nfake" in out or "never fake" in out
+        assert "action=install" in out
+
+    def test_config_text_pure(self):
+        txt = self.g._config_text(["cam1=rtsp://a", "bare"])
+        assert "streams:" in txt
+        assert "  cam1: rtsp://a" in txt
+        assert "  bare: bare" in txt
+        assert self.g._parse_streams("a=b, c=d ") == ["a=b", "c=d"]
+        assert self.g._parse_streams(None) == []
+        assert self.g._parse_streams(["x=y"]) == ["x=y"]
+
+    def test_start_running_lifecycle(self, monkeypatch):
+        monkeypatch.setattr(self.g, "_binary", lambda: "/fake/go2rtc")
+        spawned = {}
+
+        def fake_spawn(binary, cfg, port):
+            spawned["cfg"] = cfg.read_text(encoding="utf-8")
+            spawned["port"] = port
+            return self._Proc(alive=True)
+        monkeypatch.setattr(self.g, "_spawn", fake_spawn)
+        monkeypatch.setattr(self.g, "_port_ready", lambda port, **k: True)
+        out = self.g.go2rtc({"action": "start",
+                             "streams": "cam1=rtsp://user@host/1",
+                             "port": 1985})
+        assert "go2rtc running: http://127.0.0.1:1985" in out
+        assert "cam1: rtsp://user@host/1" in spawned["cfg"]
+        assert spawned["port"] == 1985
+        # already running
+        assert "already running" in self.g.go2rtc({"action": "start",
+                                                   "streams": "x=y"})
+        # status reflects it
+        assert "RUNNING" in self.g.go2rtc({"action": "status"})
+        # stop
+        assert "stopped" in self.g.go2rtc({"action": "stop"})
+        assert "not running" in self.g.go2rtc({"action": "stop"})
+
+    def test_port_never_ready_is_honest(self, monkeypatch):
+        monkeypatch.setattr(self.g, "_binary", lambda: "/fake/go2rtc")
+        monkeypatch.setattr(self.g, "_spawn",
+                            lambda b, c, p: self._Proc(alive=True))
+        monkeypatch.setattr(self.g, "_port_ready",
+                            lambda port, **k: False)
+        out = self.g.go2rtc({"action": "start", "streams": "cam=rtsp://x"})
+        assert "never opened" in out
+
+    def test_install_extracts_official_tarball(self, monkeypatch):
+        import io as _io
+        import tarfile as _tf
+
+        def fake_json(url, timeout=20):
+            return {"tag_name": "v1.9.0",
+                    "assets": [{"name": "go2rtc_1.9.0_linux_amd64.tar.gz",
+                                "browser_download_url": "https://x/y.tgz"}]}
+
+        def fake_download(url, dest, timeout=120):
+            buf = _io.BytesIO()
+            with _tf.open(fileobj=buf, mode="w:gz") as tar:
+                info = _tf.TarInfo(name="go2rtc")
+                data = b"#!/bin/sh\necho go2rtc"
+                info.size = len(data)
+                tar.addfile(info, _io.BytesIO(data))
+            dest.write_bytes(buf.getvalue())
+            return dest
+        monkeypatch.setattr(self.g, "_fetch_json", fake_json)
+        monkeypatch.setattr(self.g, "_download", fake_download)
+        out = self.g.go2rtc({"action": "install"})
+        assert "installed" in out and "v1.9.0" in out
+        dest = self.g._bin_dir() / "go2rtc"
+        assert dest.is_file()
+        assert dest.stat().st_mode & 0o100          # exec bit
+
+    def test_install_failure_points_to_manual(self, monkeypatch):
+        def boom(url, timeout=20):
+            raise OSError("network down")
+        monkeypatch.setattr(self.g, "_fetch_json", boom)
+        out = self.g.go2rtc({"action": "install"})
+        assert "install failed" in out
+        assert "github.com/AlexxIT/go2rtc/releases" in out
+
+    def test_tool_discoverable(self):
+        from core.action_loader import discover_actions
+        assert "go2rtc" in discover_actions(Path("actions")).names()
