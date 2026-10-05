@@ -5557,6 +5557,7 @@ class SkillsPanel(_DashPanel):
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
+    _emo_sig        = pyqtSignal(str)   # content-driven emotion acting
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
@@ -5921,6 +5922,7 @@ class MainWindow(QMainWindow):
         self._log_sig.connect(self._log.append_log)
         self._dash_api.done.connect(self._on_dash_heartbeat)
         self._state_sig.connect(self._apply_state)
+        self._emo_sig.connect(self._apply_emotion)
         self._content_sig.connect(self._show_content)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
@@ -8666,6 +8668,15 @@ class MainWindow(QMainWindow):
         if self.on_text_command:
             threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
 
+    def _apply_emotion(self, emotion: str):
+        """Act a content-driven emotion on the avatar (R2 acting)."""
+        av = getattr(self, "_avatar", None)
+        if av is not None and hasattr(av, "set_emotion"):
+            try:
+                av.set_emotion(emotion)
+            except Exception:
+                pass
+
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
@@ -8897,6 +8908,10 @@ class JarvisUI:
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
+
+    def set_emotion(self, emotion: str):
+        """Thread-safe: model replies act an emotion on the avatar."""
+        self._win._emo_sig.emit(emotion)
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)

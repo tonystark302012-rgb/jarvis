@@ -1927,6 +1927,16 @@ class JarvisLive:
                                 if full_out in self._last_out_logged:
                                     full_out = ""
                             if full_out:
+                                # Emotion-tag acting (R2): tag BEFORE logging
+                                # so markers never reach TTS/history/HUD text.
+                                try:
+                                    from core import emotion as _emo_mod
+                                    _e, full_out = _emo_mod.tag_and_clean(
+                                        full_out)
+                                    if _e != "neutral":
+                                        self.ui.set_emotion(_e)
+                                except Exception:
+                                    pass
                                 self._last_out_logged = full_out
                                 self.ui.write_log(f"{self._asst_name}: {full_out}")
                                 self._session_log.append(f"{self._asst_name}: {full_out}")

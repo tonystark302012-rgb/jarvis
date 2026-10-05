@@ -3402,3 +3402,63 @@ class TestResearchJSRender:
         out = r.research({"topic": "thick", "depth": "quick"})
         assert "saved:" in out
         assert calls == []          # thick pages never pay render cost
+
+
+class TestEmotionActing:
+    """R2: content-driven emotion → avatar face (offline heuristics)."""
+
+    def test_tag_heuristics(self):
+        from core.emotion import tag
+        assert tag("That was awesome, congrats!") == "happy"
+        assert tag("Sorry, that command didn't work.") == "concerned"
+        assert tag("Hmm, let me think about it.") == "thinking"
+        assert tag("Whoa, that's unexpected!") == "surprised"
+        assert tag("The sky is blue.") == "neutral"
+        assert tag("") == "neutral"
+        assert tag("[emotion:happy] Great!") == "happy"     # marker wins
+
+    def test_bad_marker_falls_back(self):
+        from core.emotion import tag
+        assert tag("[emotion:banana] whatever") == "neutral"
+
+    def test_strip_and_tag_and_clean(self):
+        from core.emotion import strip, tag_and_clean
+        assert strip("[emotion:happy] hi there") == "hi there"
+        assert strip("plain text") == "plain text"
+        e, clean = tag_and_clean("[emotion:concerned] it failed")
+        assert e == "concerned" and clean == "it failed"
+
+    def test_avatar_overlay_pure(self):
+        from core.avatar import emotion_overlay
+        b, l, bias = emotion_overlay("happy", 0.0, 1.0, [0.0, 0.0])
+        assert b > 0.0 and l >= 1.0 and bias == [0.0, 0.06]
+        b2, l2, bias2 = emotion_overlay("concerned", 0.0, 1.0, [0.0, 0.0])
+        assert b2 < 0.0 and l2 < 1.0
+        b3, l3, bias3 = emotion_overlay("thinking", 0.0, 1.0, [0.0, 0.0])
+        assert bias3 != [0.0, 0.0]        # glances aside
+        b4, l4, bias4 = emotion_overlay("neutral", 0.2, 0.9, [0.1, 0.1])
+        assert (b4, l4, bias4) == (0.2, 0.9, [0.1, 0.1])  # passthrough
+
+    def test_set_emotion_validation_and_expiry(self):
+        from core.avatar import HoloAvatar
+        av = object.__new__(HoloAvatar)
+        av._t = 100.0
+        av._emo = ("", 0.0)
+        assert av.set_emotion("HAPPY", hold=3) == "happy"
+        assert av._emo == ("happy", 103.0)
+        assert av.set_emotion("nope") == "neutral"
+        assert av.set_emotion("sad") == "neutral"      # unknown → neutral
+
+    def test_ui_wires_emo_signal(self):
+        src = Path("ui.py").read_text(encoding="utf-8")
+        assert "_emo_sig        = pyqtSignal(str)" in src
+        assert "_emo_sig.connect(self._apply_emotion)" in src
+        assert "def _apply_emotion" in src
+        assert "def set_emotion(self, emotion: str)" in src
+
+    def test_main_tags_before_logging(self):
+        src = Path("main.py").read_text(encoding="utf-8")
+        i_tag = src.index("tag_and_clean(")
+        i_log = src.index('self.ui.write_log(f"{self._asst_name}: {full_out}")')
+        assert i_tag < i_log               # clean first, then log
+        assert "self.ui.set_emotion(_e)" in src
