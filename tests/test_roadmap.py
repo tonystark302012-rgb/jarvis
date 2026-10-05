@@ -5125,3 +5125,107 @@ class TestScannedPdfRAG:
         assert "Brief" in out and "21 days" in out
         miss = r.rag({"action": "brief", "path": "ghost-file"})
         assert "nothing matched" in miss
+
+
+class TestMissionDagAndMetrics:
+    """L: mission step-graph SVG + metric time-series store."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, tmp_path, monkeypatch):
+        from core import activity
+        from core import metrics_store as ms
+        monkeypatch.setattr(ms, "_db_path", lambda: tmp_path / "m.db")
+        ms.reset_for_tests()
+        activity.clear()
+        yield
+        activity.clear()
+        ms.reset_for_tests()
+
+    def test_metrics_sample_series_and_stats(self):
+        from core import metrics_store as ms
+        for i in range(30):
+            ms.sample({"cpu_percent": 10 + i, "ram_percent": 50,
+                       "cpu_temp_c": None, "gpu_percent": None})
+        assert ms.count(1) == 30
+        st = ms.stats("cpu", 1)
+        assert st and st["n"] == 30 and st["min"] == 10 and st["max"] == 39
+        ser = ms.series("cpu", hours=0.1, buckets=6)
+        assert ser and all(v is not None for _l, v in ser)
+        # null-excluded metric → honest empty
+        assert ms.stats("temp", 1) is None
+
+    def test_anomaly_needs_history_and_flags_spike(self):
+        from core import metrics_store as ms
+        import time
+        # not enough data yet → honest empty
+        ms.sample({"cpu_percent": 50})
+        assert ms.anomaly("cpu") == ""
+        # seed: same hour YESTERDAY calm (inside [now-25h, now-24h)),
+        # plenty of background samples, and a hot current hour
+        c = ms._conn()
+        now = time.time()
+        for i in range(60):                       # yesterday's same hour
+            c.execute("INSERT INTO samples VALUES (?,?,?,?,?)",
+                      (now - 90000 + i * 60, 20.0, 40.0, None, None))
+        for i in range(120):                      # background, 24h→14h ago
+            c.execute("INSERT INTO samples VALUES (?,?,?,?,?)",
+                      (now - 86400 + i * 600, 22.0, 41.0,
+                       None, None))
+        c.execute("INSERT INTO samples VALUES (?,?,?,?,?)",
+                  (now - 1800, 75.0, 40.0, None, None))   # current hour
+        c.execute("INSERT INTO samples VALUES (?,?,?,?,?)",
+                  (now - 900, 80.0, 40.0, None, None))
+        c.commit()
+        out = ms.anomaly("cpu")
+        assert "x higher" in out
+
+    def test_system_history_report_and_chart(self, tmp_path, monkeypatch):
+        from core import metrics_store as ms
+        from actions import system_history, charts
+        monkeypatch.setattr(charts, "_base_dir", lambda: tmp_path)
+        import time
+        c = ms._conn()
+        now = time.time()
+        for i in range(10):                       # spread over 10 minutes
+            c.execute("INSERT INTO samples VALUES (?,?,?,?,?)",
+                      (now - i * 60, 30.0 + i, 55.0, 60.0, None))
+        c.commit()
+        rep = system_history.system_history({"action": "report"})
+        assert "cpu: avg" in rep and "Metric history" in rep
+        assert "samples last 24h" in rep
+        ch = system_history.system_history({"action": "chart",
+                                            "metric": "cpu", "hours": "1"})
+        assert "Chart saved" in ch
+        an = system_history.system_history({"action": "anomaly"})
+        assert "No cpu anomaly" in an or "x higher" in an
+
+    def test_system_history_no_data_honest(self):
+        from actions import system_history
+        out = system_history.system_history({})
+        assert "No metric history yet" in out
+        out2 = system_history.system_history({"action": "chart"})
+        assert "Not enough" in out2
+
+    def test_mission_dag_renders_svg(self, tmp_path, monkeypatch):
+        from core import activity
+        from actions import mission
+        import time
+        # two finished events
+        e1 = activity.begin("tool", "weather_report", {"city": "Jaipur"})
+        activity.finish(e1, True, "sunny")
+        e2 = activity.begin("tool", "web_search", {"query": "x"})
+        activity.finish(e2, False, "timeout")
+        out = mission.mission_control({"action": "dag"})
+        assert "Mission DAG saved" in out
+        assert "weather_report" in out and "web_search" in out
+        # svg exists and has nodes + arrows
+        path = out.split("saved: ", 1)[1].splitlines()[0].strip()
+        svg = open(path, encoding="utf-8").read()
+        assert "<svg" in svg and "weather_report" in svg
+        assert "marker-end" in svg
+        assert "✗" in svg                      # failed step marked
+
+    def test_mission_dag_empty_honest(self):
+        from actions import mission
+        assert "No tool events yet" in mission.mission_control(
+            {"action": "dag"})

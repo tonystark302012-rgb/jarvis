@@ -2251,9 +2251,17 @@ class JarvisLive:
     # ── System monitor ──────────────────────────────────────────────────────────
 
     async def _run_system_monitor(self) -> None:
-        """Background task: voice alerts when metrics exceed thresholds."""
+        """Background task: voice alerts when metrics exceed thresholds —
+        and, every tick, a metric sample appended to core.metrics_store
+        (Report L time-series: charts + same-hour-yesterday anomaly)."""
         while True:
             await asyncio.sleep(10)
+            try:
+                from core import metrics_store
+                await asyncio.to_thread(metrics_store.sample,
+                                        get_system_status())
+            except Exception:
+                pass                       # sampling never breaks alerts
             alert = await asyncio.to_thread(self._sys_monitor.check)
             if not alert or not self.session or not self._awake:
                 continue
