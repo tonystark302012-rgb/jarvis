@@ -4145,3 +4145,203 @@ class TestGo2rtc:
     def test_tool_discoverable(self):
         from core.action_loader import discover_actions
         assert "go2rtc" in discover_actions(Path("actions")).names()
+
+
+class TestPWAPush:
+    """Batch 17: installable dashboard + RFC 8291 web push (zero deps)."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self, tmp_path, monkeypatch):
+        import dashboard.push as pu
+        self.pu = pu
+        monkeypatch.setattr(pu, "_base_dir", lambda: tmp_path)
+        (tmp_path / "config").mkdir(exist_ok=True)
+        self.tmp = tmp_path
+
+    def test_vapid_keygen_persists_and_matches(self):
+        priv, pub_pem, priv_pem = self.pu._vapid_pair()
+        assert pub_pem.is_file() and priv_pem.is_file()
+        # second call loads the SAME key
+        priv2, _, _ = self.pu._vapid_pair()
+        assert (priv.private_numbers() ==
+                priv2.private_numbers())
+        key = self.pu.public_key_b64()
+        assert len(key) in (86, 87) and "=" not in key
+        nums = priv.public_key().public_numbers()
+        import base64 as _b64
+        raw = _b64.urlsafe_b64decode(key + "=" * (-len(key) % 4))
+        assert raw[0] == 4
+        assert int.from_bytes(raw[1:33], "big") == nums.x
+        assert int.from_bytes(raw[33:], "big") == nums.y
+
+    def test_subscribe_dedupe_cap_and_validation(self):
+        sub = {"endpoint": "https://push.example/a",
+               "keys": {"p256dh": "x", "auth": "y"}}
+        assert self.pu.subscribe(sub) == {"stored": 1}
+        self.pu.subscribe(sub)                        # dedupe by endpoint
+        assert len(self.pu._load_subs()) == 1
+        with pytest.raises(ValueError):
+            self.pu.subscribe({"keys": {}})
+        # cap — oldest evicted first
+        for i in range(30):
+            self.pu.subscribe({"endpoint": f"https://e/{i}",
+                               "keys": {"p256dh": "a", "auth": "b"}})
+        assert len(self.pu._load_subs()) == 20
+        self.pu.subscribe(sub)                        # re-add after cap
+        assert self.pu.unsubscribe("https://push.example/a")["stored"] == 19
+
+    def test_notify_happy_path_counts_sent(self, monkeypatch):
+        captured = []
+
+        def fake_post(endpoint, headers, body, timeout=15):
+            captured.append((endpoint, headers, body))
+            return 201, ""
+        monkeypatch.setattr(self.pu, "_post_push", fake_post)
+        self.pu.subscribe({"endpoint": "https://push.example/x",
+                           "keys": {
+                               "p256dh": self.pu.public_key_b64().replace(
+                                   "A", "B")[:80] + "A",
+                               "auth": "AAAAAAAAAAAAAAAAAAAAAA"}})
+        # use a REAL valid subscriber key for the encrypt path
+        from cryptography.hazmat.primitives.asymmetric import ec as _ec
+        sub_key = _ec.generate_private_key(_ec.SECP256R1())
+        nums = sub_key.public_key().public_numbers()
+        import base64 as _b64
+        p256 = _b64.urlsafe_b64encode(
+            b"\x04" + nums.x.to_bytes(32, "big") +
+            nums.y.to_bytes(32, "big")).rstrip(b"=").decode()
+        auth = _b64.urlsafe_b64encode(b"0123456789abcdef").rstrip(
+            b"=").decode()
+        self.pu._subs_path().write_text(
+            __import__("json").dumps([{"endpoint": "https://push.example/x",
+                                       "keys": {"p256dh": p256,
+                                                "auth": auth}}]),
+            encoding="utf-8")
+        out = self.pu.notify("Reminder", "stand up")
+        assert out["sent"] == 1 and out["errors"] == []
+        endpoint, headers, body = captured[0]
+        assert headers["Content-Encoding"] == "aes128gcm"
+        assert headers["Authorization"].startswith("vapid t=")
+        assert headers["TTL"] == "60"
+        # RFC 8291 layout: 16-byte salt + 2-byte rs + 1-byte idlen(65)
+        assert len(body) > 16 + 3 + 65
+        assert body[18] == 65
+
+    def test_notify_decrypt_roundtrip_rfc8291(self, monkeypatch):
+        """Real crypto check: our output decrypts with the sub key."""
+        from cryptography.hazmat.primitives.asymmetric import ec as _ec
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+        from cryptography.hazmat.primitives import hashes as _h
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        import base64 as _b64
+        import json as _json
+
+        sub_key = _ec.generate_private_key(_ec.SECP256R1())
+        nums = sub_key.public_key().public_numbers()
+        p256 = _b64.urlsafe_b64encode(
+            b"\x04" + nums.x.to_bytes(32, "big") +
+            nums.y.to_bytes(32, "big")).rstrip(b"=").decode()
+        auth = _b64.urlsafe_b64encode(b"0123456789abcdef").rstrip(
+            b"=").decode()
+        monkeypatch.setattr(self.pu, "_post_push",
+                            lambda e, h, b, timeout=15: (201, ""))
+        self.pu._subs_path().write_text(_json.dumps(
+            [{"endpoint": "https://push.example/x",
+              "keys": {"p256dh": p256, "auth": auth}}]), encoding="utf-8")
+        out = self.pu.notify("T", "hello push")
+        assert out["sent"] == 1
+        # decrypt what notify produced — re-derive by capturing body
+        bodies = []
+        monkeypatch.setattr(self.pu, "_post_push",
+                            lambda e, h, b, timeout=15:
+                            (bodies.append((h, b)) or (201, "")))
+        self.pu.notify("T2", "secret body")
+        headers, ct = bodies[0]
+        salt, rs = ct[:16], int.from_bytes(ct[16:18], "big")
+        assert rs == 8426                    # RFC 8291 record size
+        idlen = ct[18]
+        eph_pub = ct[19:19 + idlen]
+        assert idlen == 65 and eph_pub[0] == 4     # uncompressed point
+        payload = ct[19 + idlen:]
+        ua_pub = _b64.urlsafe_b64decode(p256 + "=" * (-len(p256) % 4))
+        auth_raw = _b64.urlsafe_b64decode(auth + "=" * (-len(auth) % 4))
+        # ECDH with OUR ephemeral pub (we are the "browser" in this test)
+        from cryptography.hazmat.primitives.asymmetric.ec import \
+            EllipticCurvePublicNumbers
+        eph_pubkey = EllipticCurvePublicNumbers(
+            int.from_bytes(eph_pub[1:33], "big"),
+            int.from_bytes(eph_pub[33:], "big"),
+            _ec.SECP256R1()).public_key()
+        prk = HKDF(algorithm=_h.SHA256(), length=32, salt=auth_raw,
+                   info=b"WebPush: info\x00" + ua_pub + eph_pub
+                   ).derive(sub_key.exchange(_ec.ECDH(), eph_pubkey))
+        cek = HKDF(algorithm=_h.SHA256(), length=16, salt=salt,
+                   info=b"Content-Encoding: aes128gcm\x00").derive(prk)
+        nonce = HKDF(algorithm=_h.SHA256(), length=12, salt=salt,
+                     info=b"Content-Encoding: nonce\x00").derive(prk)
+        plain = AESGCM(cek).decrypt(nonce, payload, None)
+        assert plain.endswith(b"\x01")
+        data = _json.loads(plain[:-1].decode())
+        assert data["title"] == "T2" and data["body"] == "secret body"
+
+    def test_notify_honest_when_no_subs(self):
+        out = self.pu.notify("x", "y")
+        assert out["sent"] == 0 and "no subscriptions" in out["note"]
+
+    def test_notify_drops_gone_endpoints(self, monkeypatch):
+        import json as _json
+        from cryptography.hazmat.primitives.asymmetric import ec as _ec
+        k = _ec.generate_private_key(_ec.SECP256R1())
+        n = k.public_key().public_numbers()
+        import base64 as _b64
+        p256 = _b64.urlsafe_b64encode(
+            b"\x04" + n.x.to_bytes(32, "big") +
+            n.y.to_bytes(32, "big")).rstrip(b"=").decode()
+        auth = _b64.urlsafe_b64encode(b"0123456789abcdef").rstrip(
+            b"=").decode()
+        self.pu._subs_path().write_text(_json.dumps(
+            [{"endpoint": "https://gone/1",
+              "keys": {"p256dh": p256, "auth": auth}}]), encoding="utf-8")
+        monkeypatch.setattr(self.pu, "_post_push",
+                            lambda e, h, b, timeout=15: (410, ""))
+        out = self.pu.notify("t", "b")
+        assert out["sent"] == 0 and "dropped" in out["errors"][0]
+        assert self.pu._load_subs() == []        # dead sub removed
+
+    def test_vapid_jwt_shape(self):
+        jwt = self.pu._vapid_jwt("https://push.example", "mailto:a@b")
+        h, c, sig = jwt.split(".")
+        import json as _json
+        import base64 as _b64
+        header = _json.loads(_b64.urlsafe_b64decode(
+            h + "=" * (-len(h) % 4)))
+        assert header["alg"] == "ES256"
+        claims = _json.loads(_b64.urlsafe_b64decode(
+            c + "=" * (-len(c) % 4)))
+        assert claims["aud"] == "https://push.example"
+        assert claims["exp"] > __import__("time").time()
+
+    def test_frontend_assets_exist_and_wire(self):
+        static = Path("dashboard/static")
+        assert (static / "manifest.json").is_file()
+        assert (static / "sw.js").is_file()
+        assert (static / "pwa.js").is_file()
+        assert (static / "icons" / "icon-192.png").is_file()
+        assert (static / "icons" / "icon-512.png").is_file()
+        app = (static / "app.html").read_text(encoding="utf-8")
+        assert 'rel="manifest" href="/static/manifest.json"' in app
+        assert "/static/pwa.js" in app
+        sw = (static / "sw.js").read_text(encoding="utf-8")
+        assert "showNotification" in sw and "notificationclick" in sw
+        pwa = (static / "pwa.js").read_text(encoding="utf-8")
+        assert "/api/push/subscribe" in pwa
+        assert "/api/push/public-key" in pwa
+
+    def test_server_routes_wired(self):
+        src = Path("dashboard/server.py").read_text(encoding="utf-8")
+        for route in ('"/manifest.json"', '"/sw.js"',
+                      '"/api/push/public-key"', '"/api/push/subscribe"',
+                      '"/api/push/notify"'):
+            assert route in src, route
+        assert 'Service-Worker-Allowed' in src
+        assert src.count("_auth(req)") >= 3        # push routes gated

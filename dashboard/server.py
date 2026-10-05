@@ -1009,6 +1009,56 @@ class DashboardServer:
                     status_code=503,
                 )
 
+        # ── PWA: installable manifest + service worker + web push ────────
+        @app.get("/manifest.json")
+        async def pwa_manifest():
+            return FileResponse(str(STATIC_DIR / "manifest.json"),
+                                media_type="application/manifest+json")
+
+        @app.get("/sw.js")
+        async def pwa_sw():
+            resp = FileResponse(str(STATIC_DIR / "sw.js"),
+                                media_type="application/javascript")
+            resp.headers["Service-Worker-Allowed"] = "/"
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
+        @app.get("/api/push/public-key")
+        async def push_public_key(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from dashboard import push as push_mod
+                return JSONResponse({"key": push_mod.public_key_b64()})
+            except Exception as e:
+                return JSONResponse({"error": str(e)[:200]}, status_code=500)
+
+        @app.post("/api/push/subscribe")
+        async def push_subscribe(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+                from dashboard import push as push_mod
+                return JSONResponse(push_mod.subscribe(body))
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            except Exception as e:
+                return JSONResponse({"error": str(e)[:200]}, status_code=500)
+
+        @app.post("/api/push/notify")
+        async def push_notify(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+                from dashboard import push as push_mod
+                out = push_mod.notify(str(body.get("title", "JARVIS")),
+                                      str(body.get("body", "")))
+                return JSONResponse(out)
+            except Exception as e:
+                return JSONResponse({"error": str(e)[:200]}, status_code=500)
+
         @app.get("/api/files")
         async def list_files(req: Request):
             if not _auth(req):
