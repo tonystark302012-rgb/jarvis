@@ -4345,3 +4345,153 @@ class TestPWAPush:
             assert route in src, route
         assert 'Service-Worker-Allowed' in src
         assert src.count("_auth(req)") >= 3        # push routes gated
+
+
+class TestTelegramTx:
+    """Batch 18: outbound bot sendMessage (allowlist-enforced)."""
+
+    @pytest.fixture(autouse=True)
+    def _seams(self, monkeypatch):
+        import actions.telegram_tx as tx
+        self.tx = tx
+        monkeypatch.setattr(tx, "_settings", lambda: ("TOK", ["111", "222"]))
+
+    def test_empty_text_honest(self):
+        assert "Nothing to send" in self.tx.send("   ")
+
+    def test_no_token_honest(self, monkeypatch):
+        monkeypatch.setattr(self.tx, "_settings", lambda: ("", ["111"]))
+        out = self.tx.send("hi")
+        assert "telegram_bot_token" in out and "Nothing sent" in out
+
+    def test_no_allowed_chat_honest(self, monkeypatch):
+        monkeypatch.setattr(self.tx, "_settings", lambda: ("TOK", []))
+        out = self.tx.send("hi")
+        assert "telegram_allowed_chats" in out and "Nothing sent" in out
+
+    def test_send_defaults_to_first_allowed(self, monkeypatch):
+        calls = []
+
+        def post(url, data, timeout=15):
+            calls.append((url, data))
+            return {"ok": True, "result": {"message_id": 7}}
+        monkeypatch.setattr(self.tx, "_http_post", post)
+        out = self.tx.send("hello phone")
+        assert "Sent to Telegram chat 111" in out and "7" in out
+        assert calls[0][0].endswith("botTOK/sendMessage")
+        assert calls[0][1]["chat_id"] == "111"
+
+    def test_unlisted_chat_refused(self, monkeypatch):
+        monkeypatch.setattr(
+            self.tx, "_http_post",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call")))
+        out = self.tx.send("hi", chat="999")
+        assert "not in telegram_allowed_chats" in out and "refusing" in out
+
+    def test_api_failure_honest(self, monkeypatch):
+        monkeypatch.setattr(self.tx, "_http_post",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("boom")))
+        assert "Telegram send failed: boom" in self.tx.send("x")
+
+    def test_rejected_payload_reported(self, monkeypatch):
+        monkeypatch.setattr(self.tx, "_http_post",
+                            lambda *a, **k: {"ok": False,
+                                             "description": "chat not found"})
+        assert "Telegram rejected" in self.tx.send("x")
+
+    def test_tool_discoverable(self):
+        from core.action_loader import discover_actions
+        names = discover_actions(Path("actions")).names()
+        assert "telegram_send" in names and "predictions" in names
+
+
+class TestPredictions:
+    """Batch 18 (M): prediction → ground-truth annotation → chip/telegram."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self, tmp_path, monkeypatch):
+        import actions.predictions as pr
+        self.pr = pr
+        monkeypatch.setattr(pr, "_path",
+                            lambda: tmp_path / "predictions.json")
+        self.tmp = tmp_path
+
+    def test_verdict_rules_numeric_and_text(self):
+        v = self.pr.verdict_for
+        assert v("CPU 75%", "cpu now 74%") == "confirmed"     # 5% tol
+        assert v("ship Friday", "we ship friday evening") == "confirmed"
+        assert v("ship Friday", "delayed to monday") == "refuted"
+        assert v("temp 100", "temp 50") == "refuted"
+        assert v("", "anything") == ""          # no expected → caller decides
+
+    def test_predict_then_list_pending(self):
+        out = self.pr.predictions({"action": "predict",
+                                   "text": "Will ship Friday",
+                                   "expected": "ship Friday"})
+        assert "recorded" in out and "resolve it later" in out
+        listing = self.pr.predictions({"action": "pending"})
+        assert "Will ship Friday" in listing and "[pending]" in listing
+
+    def test_predict_needs_text(self):
+        assert "Give me the claim" in self.pr.predictions(
+            {"action": "predict"})
+
+    def test_resolve_confirmed_with_chip(self):
+        self.pr.predictions({"action": "predict",
+                             "text": "Rain by 6pm", "expected": "rain"})
+
+        class P:
+            shown = []
+            def show_content(self, t, b):
+                self.shown.append((t, b))
+        p = P()
+        out = self.pr.predictions({"action": "resolve", "id": "Rain by",
+                                   "observed": "light rain at 18:10"},
+                                  player=p)
+        assert "confirmed" in out and "Annotated" in out
+        assert p.shown and p.shown[0][0] == "PREDICTION"
+        assert "CONFIRMED" in p.shown[0][1]
+        assert "[resolved]" in self.pr.predictions({"action": "resolved"})
+
+    def test_resolve_refuted_numeric(self):
+        self.pr.predictions({"action": "predict",
+                             "text": "Latency will be 100ms",
+                             "expected": "100 ms"})
+        out = self.pr.predictions({"action": "resolve", "id": "Latency",
+                                   "observed": "480 ms p99"})
+        assert "refuted" in out
+
+    def test_ground_truth_append_only(self):
+        self.pr.predictions({"action": "predict", "text": "X happens"})
+        self.pr.predictions({"action": "resolve", "id": "X happens",
+                             "observed": "it did", "verdict": "confirmed"})
+        out = self.pr.predictions({"action": "resolve", "id": "X happens",
+                                   "observed": "changed my mind"})
+        assert "append-only" in out and "record a NEW prediction" in out
+
+    def test_resolve_without_rules_is_honest(self):
+        self.pr.predictions({"action": "predict", "text": "Y someday"})
+        out = self.pr.predictions({"action": "resolve", "id": "Y someday",
+                                   "observed": "maybe"})
+        assert "No expected value" in out and "verdict=confirmed" in out
+
+    def test_announce_routes_through_telegram_tx(self, monkeypatch):
+        import actions.telegram_tx as tx
+        self.pr.predictions({"action": "predict", "text": "Z by noon"})
+        self.pr.predictions({"action": "resolve", "id": "Z by noon",
+                             "observed": "late", "verdict": "refuted"})
+        got = []
+        monkeypatch.setattr(tx, "send", lambda text, chat="": (
+            got.append(text) or "SENT"))
+        out = self.pr.predictions({"action": "announce", "id": "Z by"})
+        assert out == "SENT"
+        assert "[refuted]" in got[0] and "observed: late" in got[0]
+
+    def test_announce_pending_honest(self):
+        self.pr.predictions({"action": "predict", "text": "W pending"})
+        out = self.pr.predictions({"action": "announce", "id": "W pending"})
+        assert "Still pending" in out
+
+    def test_unknown_action_honest(self):
+        assert "action must be" in self.pr.predictions({"action": "dance"})
