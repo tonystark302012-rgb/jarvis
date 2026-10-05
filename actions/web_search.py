@@ -165,6 +165,60 @@ def _ddg_news(query: str, max_results: int = 8) -> list[dict]:
     return results
 
 
+# ── SearXNG (Report #3 A) — optional self-hosted metasearch ─────────────────
+# AGPL-3.0 service run as a SEPARATE local process (docker or pip). JARVIS
+# only speaks to its JSON API — no license coupling, free, 269 engines
+# behind one endpoint. Unconfigured → this layer simply does not exist
+# in the ladder (DDG path unchanged).
+
+def _config_value(key: str) -> str:
+    """Read one key from config/api_keys.json (empty on any failure)."""
+    try:
+        from config import get_base_dir
+        import json as _json
+        data = _json.loads(
+            (get_base_dir() / "config" / "api_keys.json")
+            .read_text(encoding="utf-8"))
+        return str(data.get(key) or "").strip()
+    except Exception:
+        return ""
+
+
+def _searxng_url() -> str:
+    """Instance URL — env SEARXNG_URL wins over config `searxng_url`."""
+    import os
+    return (os.environ.get("SEARXNG_URL", "").strip()
+            or _config_value("searxng_url"))
+
+
+def _searx_get(url: str, params: dict, timeout: float = 8.0):
+    """Seam for tests — real GET via requests."""
+    import requests
+    r = requests.get(url, params=params, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def _searx_search(query: str, max_results: int = 8) -> list[dict]:
+    """Query the local SearXNG JSON API → DDG-shaped rows. Returns []
+    when unconfigured; RAISES on instance failure (caller falls back)."""
+    base = _searxng_url()
+    if not base:
+        return []
+    data = _searx_get(base.rstrip("/") + "/search",
+                      {"q": query, "format": "json"})
+    hits = []
+    for r in (data.get("results") or [])[:max_results]:
+        title = str(r.get("title") or "")
+        url = str(r.get("url") or "")
+        if not url:
+            continue
+        hits.append({"title": title,
+                     "snippet": str(r.get("content") or ""),
+                     "url": url})
+    return hits
+
+
 def _format_ddg(query: str, results: list[dict]) -> str:
     if not results:
         return f"No results found for: {query}"
@@ -241,13 +295,21 @@ def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
 # ── Modes ──────────────────────────────────────────────────────────────────────
 
 def _search(query: str) -> str:
-    """Default search — Gemini grounded, DDG fallback."""
+    """Default search — Gemini grounded; then a LOCAL SearXNG instance
+    when configured; then DDG. Each rung only fires when it can."""
     try:
         return _gemini_search(query)
     except Exception as e:
         _log_gemini_failure("Gemini search", e)
-        results = _ddg_search(query)
-        return _format_ddg(query, results)
+    # rung 2: self-hosted SearXNG (only when configured)
+    try:
+        searx_hits = _searx_search(query)
+        if searx_hits:
+            return _format_ddg(query, searx_hits)
+    except Exception as e:
+        print(f"[WebSearch] SearXNG failed, falling back to DDG: {e}")
+    results = _ddg_search(query)
+    return _format_ddg(query, results)
 
 
 def _news(query: str) -> str:
@@ -297,8 +359,14 @@ def _research(query: str) -> str:
         return _gemini_search(research_query)
     except Exception as e:
         _log_gemini_failure("Gemini research", e)
-        results = _ddg_search(query, max_results=10)
-        return _format_ddg(query, results)
+    try:
+        searx_hits = _searx_search(query, max_results=10)
+        if searx_hits:
+            return _format_ddg(query, searx_hits)
+    except Exception as e:
+        print(f"[WebSearch] SearXNG failed, falling back to DDG: {e}")
+    results = _ddg_search(query, max_results=10)
+    return _format_ddg(query, results)
 
 
 def _price(query: str) -> str:

@@ -4637,3 +4637,214 @@ class TestWebRTCMirror:
         html = Path("dashboard/static/app.html").read_text(encoding="utf-8")
         assert "mirror-video" in html
         assert "/static/webrtc.js" in html
+
+
+class TestSearXNG:
+    """Report #3 A: optional self-hosted metasearch rung in web_search."""
+
+    @pytest.fixture(autouse=True)
+    def _seams(self, monkeypatch):
+        import actions.web_search as ws
+        self.ws = ws
+        monkeypatch.setattr(ws, "_log_gemini_failure", lambda *a: None)
+
+    def test_unconfigured_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(self.ws, "_searxng_url", lambda: "")
+        assert self.ws._searx_search("anything") == []
+
+    def test_env_beats_config(self, monkeypatch):
+        import actions.web_search as ws
+        monkeypatch.delenv("SEARXNG_URL", raising=False)
+        monkeypatch.setattr(ws, "_config_value", lambda k: "http://cfg:8888")
+        assert ws._searxng_url() == "http://cfg:8888"
+        monkeypatch.setenv("SEARXNG_URL", "http://env:4000")
+        assert ws._searxng_url() == "http://env:4000"
+
+    def test_parses_json_api_shape(self, monkeypatch):
+        monkeypatch.setattr(self.ws, "_searxng_url", lambda: "http://sx")
+        got = {}
+
+        def fake_get(url, params, timeout=8.0):
+            got["url"], got["params"] = url, params
+            return {"results": [
+                {"title": "Alpha", "url": "https://a.ex/1",
+                 "content": "first result body"},
+                {"title": "no-url", "content": "skip me"},
+                {"title": "Beta", "url": "https://b.ex/2"},
+            ]}
+        monkeypatch.setattr(self.ws, "_searx_get", fake_get)
+        hits = self.ws._searx_search("jaipur weather")
+        assert got["url"] == "http://sx/search"
+        assert got["params"] == {"q": "jaipur weather", "format": "json"}
+        assert [h["title"] for h in hits] == ["Alpha", "Beta"]
+        assert hits[0]["snippet"] == "first result body"
+
+    def test_search_uses_searx_when_gemini_down(self, monkeypatch):
+        def boom(q):
+            raise RuntimeError("no key/down")
+        monkeypatch.setattr(self.ws, "_gemini_search", boom)
+        monkeypatch.setattr(self.ws, "_searx_search",
+                            lambda q, max_results=8: [
+                                {"title": "S1", "snippet": "s",
+                                 "url": "https://s.ex"}])
+        ddg_called = []
+        monkeypatch.setattr(self.ws, "_ddg_search",
+                            lambda q, max_results=6: ddg_called.append(q) or [])
+        out = self.ws._search("some query")
+        assert "S1" in out and "https://s.ex" in out
+        assert ddg_called == []                 # DDG untouched
+
+    def test_searx_failure_falls_back_to_ddg(self, monkeypatch):
+        monkeypatch.setattr(self.ws, "_gemini_search",
+                            lambda q: (_ for _ in ()).throw(RuntimeError("x")))
+
+        def bad(q, max_results=8):
+            raise RuntimeError("instance down")
+        monkeypatch.setattr(self.ws, "_searx_search", bad)
+        monkeypatch.setattr(self.ws, "_ddg_search",
+                            lambda q, max_results=6: [
+                                {"title": "DDG", "snippet": "d",
+                                 "url": "https://d.ex"}])
+        out = self.ws._search("q")
+        assert "DDG" in out
+
+    def test_gemini_up_means_no_searx_call(self, monkeypatch):
+        monkeypatch.setattr(self.ws, "_gemini_search",
+                            lambda q: "GROUNDED ANSWER")
+        monkeypatch.setattr(self.ws, "_searx_search",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError("should not run")))
+        assert self.ws._search("q") == "GROUNDED ANSWER"
+
+    def test_research_ladder_same_rung(self, monkeypatch):
+        monkeypatch.setattr(self.ws, "_gemini_search",
+                            lambda q: (_ for _ in ()).throw(RuntimeError("x")))
+        monkeypatch.setattr(self.ws, "_searx_search",
+                            lambda q, max_results=10: [
+                                {"title": "Deep", "snippet": "x",
+                                 "url": "https://deep.ex"}])
+        monkeypatch.setattr(self.ws, "_ddg_search",
+                            lambda q, max_results=10: [])
+        assert "Deep" in self.ws._research("topic")
+
+
+class TestDevLoop:
+    """Report #3 E: background edit→test loop."""
+
+    @pytest.fixture(autouse=True)
+    def _mod(self, monkeypatch):
+        import actions.dev_loop as dl
+        self.dl = dl
+        monkeypatch.setattr(dl, "_STATE",
+                            {"running": False, "path": "", "cmd": "",
+                             "runs": 0, "fails": 0, "last_run": 0.0,
+                             "last_status": "", "error": "",
+                             "thread": None, "stop": None})
+        monkeypatch.setattr(dl, "_seen", {})
+        self.calls = []
+        monkeypatch.setattr(
+            dl, "_run_cmd",
+            lambda cmd, cwd, timeout=600: (
+                self.calls.append((cmd, cwd)) or (0, "all good\n")))
+        yield
+        st = dl._STATE.get("stop")
+        if st is not None:
+            st.set()
+
+    def test_default_cmd_detection(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        assert "pytest" in self.dl._default_cmd(tmp_path)
+        js = tmp_path / "jsproj"
+        js.mkdir()
+        (js / "package.json").write_text(
+            '{"scripts": {"test": "jest"}}', encoding="utf-8")
+        assert self.dl._default_cmd(js) == "npm test"
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        assert self.dl._default_cmd(empty) == ""
+
+    def test_start_needs_path(self):
+        assert "Give me the project" in self.dl.dev_loop({"action": "start"})
+
+    def test_start_bad_dir_honest(self, tmp_path):
+        out = self.dl.dev_loop({"action": "start",
+                                "path": str(tmp_path / "nope")})
+        assert out.startswith("No such directory")
+
+    def test_start_run_status_stop_lifecycle(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "main.py").write_text("x = 1", encoding="utf-8")
+        out = self.dl.dev_loop({"action": "start", "path": str(tmp_path)})
+        assert "Test loop STARTED" in out and "pytest" in out
+        # watcher thread does its initial run; give it a moment
+        import time as _t
+        _t.sleep(1.2)
+        status = self.dl.dev_loop({"action": "status"})
+        assert "RUNNING" in status and "run(s)" in status
+        # one-shot tick after a file change (thread-safe seam)
+        _t.sleep(0.05)
+        (tmp_path / "main.py").write_text("x = 2", encoding="utf-8")
+        assert self.dl._tick(str(tmp_path), "pytest -q") in ("ran", "clean")
+        stop = self.dl.dev_loop({"action": "stop"})
+        assert "STOPPED" in stop
+        assert "not running" in self.dl.dev_loop({"action": "stop"})
+
+    def test_tick_initial_runs_even_without_changes(self, tmp_path):
+        (tmp_path / "a.py").write_text("v = 1", encoding="utf-8")
+        self.dl._STATE["path"] = str(tmp_path)
+        out = self.dl._tick(str(tmp_path), "pytest", initial=True)
+        assert out == "ran" and len(self.calls) == 1
+        assert self.dl._STATE["last_status"] == "PASS"
+        # no changes → clean
+        assert self.dl._tick(str(tmp_path), "pytest") == "clean"
+        assert len(self.calls) == 1
+        # touch → ran again
+        (tmp_path / "a.py").write_text("v = 2", encoding="utf-8")
+        assert self.dl._tick(str(tmp_path), "pytest") == "ran"
+        assert len(self.calls) == 2
+
+    def test_fail_recorded_in_log(self, tmp_path):
+        import actions.dev_loop as dl
+        (tmp_path / "b.py").write_text("v = 1", encoding="utf-8")
+
+        def failing(cmd, cwd, timeout=600):
+            return 1, "E  tests/test_x.py:42 boom\n"
+        monkey_ok = dl._run_cmd
+        dl._run_cmd = failing
+        try:
+            dl._STATE["path"] = str(tmp_path)
+            dl._tick(str(tmp_path), "pytest", initial=True)
+        finally:
+            dl._run_cmd = monkey_ok
+        assert dl._STATE["last_status"].startswith("FAIL")
+        assert dl._STATE["fails"] == 1
+        log = (tmp_path / ".jarvis_testloop.log").read_text(
+            encoding="utf-8")
+        assert "FAIL" in log and "boom" in log
+
+    def test_cmd_error_is_logged_not_crashing(self, tmp_path):
+        import actions.dev_loop as dl
+
+        def boom(cmd, cwd, timeout=600):
+            raise RuntimeError("shell exploded")
+        orig = dl._run_cmd
+        dl._run_cmd = boom
+        try:
+            dl._STATE["path"] = str(tmp_path)
+            assert dl._tick(str(tmp_path), "x", initial=True) == "clean"
+        finally:
+            dl._run_cmd = orig
+        assert "shell exploded" in dl._STATE["error"]
+        assert "ERROR" in (tmp_path / ".jarvis_testloop.log").read_text(
+            encoding="utf-8")
+
+    def test_no_cmd_detected_honest(self, tmp_path):
+        out = self.dl.dev_loop({"action": "start", "path": str(tmp_path)})
+        assert "No test command detected" in out and "cmd=" in out
+
+    def test_status_before_start_honest(self):
+        assert "No dev loop yet" in self.dl.dev_loop({"action": "status"})
+
+    def test_tool_discoverable(self):
+        from core.action_loader import discover_actions
+        assert "dev_loop" in discover_actions(Path("actions")).names()
