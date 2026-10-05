@@ -54,6 +54,30 @@ def _fetch_url(url: str, timeout: int = 20) -> str:
     return _fetch(url, timeout=timeout)
 
 
+def _fetch_rendered(url: str, timeout: int = 15) -> str:
+    """JS-rendered fetch for SPA shells — Playwright (already vendored
+    for browser_control). Raises on any failure; caller keeps the raw
+    HTML excerpt."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        browser = None
+        for engine in ("firefox", "chromium"):
+            try:
+                browser = getattr(pw, engine).launch(headless=True)
+                break
+            except Exception:
+                continue
+        if browser is None:
+            raise RuntimeError("no playwright browser available")
+        try:
+            page = browser.new_page()
+            page.goto(url, timeout=int(timeout * 1000),
+                      wait_until="networkidle")
+            return page.content()
+        finally:
+            browser.close()
+
+
 def _synth_report(topic: str, docs: list[dict]) -> str | None:
     """Gemini-written markdown report, or None when no key / every model down."""
     from core import gemini
@@ -138,6 +162,20 @@ def _fetch_sources(queries: list[str], limit: int) -> list[dict]:
         title, text = clean_html(html, h["url"], max_chars=6000)
         h["title"] = title or h["title"]
         h["excerpt"] = text or h["snippet"]
+        # JS-heavy SPA shell? render it once and re-extract (kept
+        # original on any failure — raw fetch is never worse)
+        if len(h["excerpt"]) < 400:
+            try:
+                rendered = _fetch_rendered(h["url"])
+                r_title, r_text = clean_html(rendered, h["url"],
+                                             max_chars=6000)
+                if len(r_text or "") > len(h["excerpt"]):
+                    h["excerpt"] = r_text
+                    if r_title:
+                        h["title"] = r_title
+                    h["rendered"] = True
+            except Exception as e:
+                print(f"[Research] render fallback skip {h['url']}: {e}")
         if len(h["excerpt"]) >= 120:               # real content, not a stub
             docs.append(h)
     return docs

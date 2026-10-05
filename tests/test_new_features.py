@@ -1057,6 +1057,7 @@ class TestResearch:
         monkeypatch.setattr(r, "_base_dir", lambda: tmp_path)
         monkeypatch.setattr(r, "_synth_report", lambda t, d: None)  # offline
         monkeypatch.setattr(r, "_extra_sources", lambda t: [])       # no net
+        monkeypatch.setattr(r, "_fetch_rendered", lambda u, timeout=15: "")
         self.r = r
         self.tmp = tmp_path
 
@@ -3317,3 +3318,87 @@ class TestProactive30:
         src = Path("main.py").read_text(encoding="utf-8")
         assert "decisions    = _decisions" in src
         assert "_confirm.stats()" in src
+
+
+class TestResearchJSRender:
+    """JS-heavy pages: one Playwright render fallback, honest on failure."""
+
+    def _run(self, monkeypatch, tmp_path, excerpt_html, rendered_html=""):
+        import actions.research as r
+        monkeypatch.setattr(r, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(r, "_synth_report", lambda t, d: None)
+        monkeypatch.setattr(r, "_extra_sources", lambda t: [])
+        monkeypatch.setattr(
+            r, "_search",
+            lambda q, max_results=6: [{"title": "A",
+                                       "url": "https://spa.example/app"}])
+        monkeypatch.setattr(r, "_fetch_url",
+                            lambda u, timeout=15: excerpt_html)
+        monkeypatch.setattr(r, "_fetch_rendered",
+                            lambda u, timeout=15: rendered_html)
+        return r.research({"topic": "spa", "depth": "quick"})
+
+    def test_thin_shell_upgraded_by_render(self, tmp_path, monkeypatch):
+        shell = ("<html><body><div id='root'></div>"
+                 "<script>renderMe()</script></body></html>")
+        rich = ("<html><head><title>SPA doc</title></head><body><main>"
+                "<p>This application guide explains everything about the "
+                "dashboard, including settings, billing, teams and "
+                "reporting workflows in plenty of detail for readers who "
+                "need the full picture rather than a stub page.</p>"
+                "</main></body></html>")
+        out = self._run(monkeypatch, tmp_path, shell, rich)
+        assert "Research report saved:" in out
+        path = Path(out.split("saved: ", 1)[1].split(" ", 1)[0])
+        body = path.read_text(encoding="utf-8")
+        assert "dashboard, including settings" in body
+
+    def test_render_failure_keeps_raw(self, tmp_path, monkeypatch):
+        import actions.research as r
+        def boom(u, timeout=15):
+            raise RuntimeError("no browser")
+        # rebuild with the boom seam
+        monkeypatch.setattr(r, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(r, "_synth_report", lambda t, d: None)
+        monkeypatch.setattr(r, "_extra_sources", lambda t: [])
+        monkeypatch.setattr(
+            r, "_search",
+            lambda q, max_results=6: [{"title": "A",
+                                       "url": "https://spa.example/app"}])
+        monkeypatch.setattr(
+            r, "_fetch_url",
+            lambda u, timeout=15:
+            "<html><body><div id='root'></div>"
+            "<script>boot()</script></body></html>")
+        monkeypatch.setattr(r, "_fetch_rendered", boom)
+        out = r.research({"topic": "spa", "depth": "quick"})
+        # shell is a stub → honest no-sources (raw stayed stub, no crash)
+        assert "no usable sources" in out or "saved:" in out
+
+    def test_thick_page_skips_render(self, tmp_path, monkeypatch):
+        calls = []
+
+        def render(u, timeout=15):
+            calls.append(u)
+            return "<html><body><p>x</p></body></html>"
+        import actions.research as r
+        monkeypatch.setattr(r, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(r, "_synth_report", lambda t, d: None)
+        monkeypatch.setattr(r, "_extra_sources", lambda t: [])
+        monkeypatch.setattr(
+            r, "_search",
+            lambda q, max_results=6: [{"title": "A",
+                                       "url": "https://thick.example/p"}])
+        monkeypatch.setattr(
+            r, "_fetch_url",
+            lambda u, timeout=15:
+            "<html><head><title>Thick</title></head><body><main>"
+            "<p>" + ("Very long server-rendered content that easily "
+                     "clears the thin-shell threshold with a long "
+                     "passage about infrastructure, testing, releases "
+                     "and observability practices. ") * 3 + "</p>"
+            "</main></body></html>")
+        monkeypatch.setattr(r, "_fetch_rendered", render)
+        out = r.research({"topic": "thick", "depth": "quick"})
+        assert "saved:" in out
+        assert calls == []          # thick pages never pay render cost
