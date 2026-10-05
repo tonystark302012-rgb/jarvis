@@ -5305,3 +5305,111 @@ class TestMcpCatalog:
         props = self._m.TOOL["parameters"]["properties"]
         assert "preset" in props and "path" in props
         assert "presets" in props["action"]["description"]
+
+
+class TestSelfHealingLocators:
+    """Batch 8: fallback ladder for stale css/text locators (pure + fakes)."""
+
+    def test_ladder_primary_is_always_first(self):
+        from actions.browser_control import _heal_ladder
+        lad = _heal_ladder("#login-btn", None)
+        assert lad[0] == ("css", "#login-btn")
+
+    def test_ladder_id_selector_adds_id_attr_and_text(self):
+        from actions.browser_control import _heal_ladder
+        lad = dict(_heal_ladder("#login-btn", None))
+        assert lad.get("id-attr") == '[id="login-btn"]'
+        assert lad.get("text-contains") == "login btn"
+
+    def test_ladder_class_selector(self):
+        from actions.browser_control import _heal_ladder
+        kinds = dict(_heal_ladder("form > button.btn.primary", None))
+        assert kinds.get("css-last-segment") == "button.btn.primary"
+        assert kinds.get("class-attr") == '[class*="primary"]'
+        assert "xpath" in kinds and "primary" in kinds.get("xpath", "")
+
+    def test_ladder_text_primary_first(self):
+        from actions.browser_control import _heal_ladder
+        lad = _heal_ladder(None, "Save changes")
+        assert lad[0] == ("text", "Save changes")
+
+    def test_ladder_dedupes(self):
+        from actions.browser_control import _heal_ladder
+        lad = _heal_ladder("#x", None)
+        assert len(lad) == len(set(lad))
+
+    def _sess(self, page):
+        from actions.browser_control import _BrowserSession
+        sess = object.__new__(_BrowserSession)
+
+        async def _gp():
+            return page
+        sess._get_page = _gp
+        return sess
+
+    def test_click_heals_via_class_attr(self):
+        import asyncio
+        from actions.browser_control import _BrowserSession  # noqa: F401
+        calls = []
+
+        class FakePage:
+            async def click(self, sel, timeout=0):
+                calls.append(sel)
+                if sel == ".go":
+                    raise RuntimeError("stale selector")
+                if sel == '[class*="go"]':
+                    return
+                raise RuntimeError(f"unexpected {sel}")
+
+            def get_by_text(self, *a, **k):
+                raise RuntimeError("no text node")
+        out = asyncio.run(self._sess(FakePage()).click(".go"))
+        assert "Healed click via class-attr" in out
+        assert "Use this locator next time" in out
+        assert calls[0] == ".go"
+
+    def test_click_all_strategies_fail_is_honest(self):
+        import asyncio
+
+        class FakePage:
+            async def click(self, sel, timeout=0):
+                raise RuntimeError("gone")
+
+            def get_by_text(self, *a, **k):
+                raise RuntimeError("nope")
+        out = asyncio.run(self._sess(FakePage()).click(".vanished"))
+        assert out.startswith("Element not found — tried")
+        assert "locator strategies" in out
+
+    def test_type_text_heals(self):
+        import asyncio
+
+        class FakeLoc:
+            def __init__(self, present):
+                self._present = present
+            @property
+            def first(self):
+                return self
+            async def count(self):
+                return 1 if self._present else 0
+            async def clear(self):
+                pass
+            async def type(self, t, delay=0):
+                pass
+
+        class FakePage:
+            def __init__(self):
+                self.tried = []
+            def locator(self, sel):
+                self.tried.append(sel)
+                return FakeLoc(sel == '[class*="email"]')
+
+        pg = FakePage()
+        out = asyncio.run(self._sess(pg).type_text("input.email", "a@b.c"))
+        assert "HEALED class-attr" in out
+        assert pg.tried[0] == "input.email"
+
+    def test_click_no_args_honest(self):
+        import asyncio
+        out = asyncio.run(self._sess(object()).click())
+        assert out == "No selector or text provided."

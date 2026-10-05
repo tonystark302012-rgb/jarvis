@@ -458,6 +458,43 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
         return f"Could not open a browser for: {url}"
 
 
+
+def _heal_ladder(selector: str | None, text: str | None) -> list[tuple[str, str]]:
+    """Self-healing locator strategies in fallback order. Pure — unit
+    tested. First entry is always the primary (as the caller wrote it)."""
+    steps: list[tuple[str, str]] = []
+    if text:
+        steps.append(("text", str(text)))
+    if selector:
+        sel = str(selector).strip()
+        steps.append(("css", sel))
+        seg = sel.split(">")[-1].strip()
+        if seg and seg != sel:
+            steps.append(("css-last-segment", seg))
+        m_id = re.match(r"^#([\w-]+)$", sel)
+        if m_id:
+            steps.append(("id-attr", f'[id="{m_id.group(1)}"]'))
+            words = m_id.group(1).replace("-", " ").replace("_", " ")
+            steps.append(("text-contains", words))
+        classes = re.findall(r"\.([\w-]+)", sel)
+        if classes:
+            cls = classes[-1]
+            steps.append(("class-attr", f'[class*="{cls}"]'))
+            if not any(k == "text-contains" for k, _ in steps):
+                steps.append(("text-contains",
+                              cls.replace("-", " ").replace("_", " ")))
+            steps.append(("xpath",
+                          f'//*[contains(@class, "{cls}")]'))
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for k, v in steps:
+        if (k, v) in seen or not v:
+            continue
+        seen.add((k, v))
+        out.append((k, v))
+    return out
+
+
 class _BrowserSession:
     """
     A full session for one browser instance.
@@ -697,31 +734,84 @@ class _BrowserSession:
         return await self.go_to(base + query.replace(" ", "+"))
 
     async def click(self, selector: str = None, text: str = None) -> str:
+        """Click with SELF-HEALING locators: if the primary css/text
+        misses, walk a fallback ladder (last css segment, id/class
+        attribute selectors, visible-text contains, xpath) and report
+        WHICH strategy healed — so the caller can learn the new locator.
+        """
         page = await self._get_page()
-        try:
-            if text:
-                await page.get_by_text(text, exact=False).first.click(timeout=8_000)
-                return f"Clicked text: '{text}'"
-            if selector:
-                await page.click(selector, timeout=8_000)
-                return f"Clicked selector: {selector}"
+        if not selector and not text:
             return "No selector or text provided."
-        except PlaywrightTimeout:
-            return "Element not found (timeout)."
-        except Exception as e:
-            return f"Click error: {e}"
+        ladder = _heal_ladder(selector, text)
+        errors: list[str] = []
+        for i, (kind, val) in enumerate(ladder):
+            try:
+                if kind == "text":
+                    await page.get_by_text(val, exact=False).first.click(
+                        timeout=8_000)
+                elif kind == "text-contains":
+                    await page.get_by_text(val, exact=False).first.click(
+                        timeout=8_000)
+                elif kind == "xpath":
+                    await page.click(f"xpath={val}", timeout=8_000)
+                else:
+                    await page.click(val, timeout=8_000)
+                if i == 0:
+                    return (f"Clicked text: '{text}'" if kind == "text"
+                            else f"Clicked selector: {selector}")
+                return (f"Healed click via {kind}={val!r} — primary "
+                        f"{(selector or text)!r} missed"
+                        + (f" ({errors[0][:100]})" if errors else "")
+                        + ". Use this locator next time.")
+            except Exception as e:
+                errors.append(str(e))
+                continue
+        return (f"Element not found — tried {len(ladder)} locator "
+                "strategies"
+                + (f"; first error: {errors[0][:200]}" if errors else "."))
+
 
     async def type_text(self, selector: str = None, text: str = "",
                         clear_first: bool = True) -> str:
+        """Type into a field — same self-healing ladder as click(): a
+        stale selector degrades through fallbacks instead of failing."""
         page = await self._get_page()
-        try:
-            el = page.locator(selector).first if selector else page.locator(":focus")
-            if clear_first:
-                await el.clear()
-            await el.type(text, delay=50)
-            return "Text typed."
-        except Exception as e:
-            return f"Type error: {e}"
+        if not selector:
+            try:
+                el = page.locator(":focus")
+                if clear_first:
+                    await el.clear()
+                await el.type(text, delay=50)
+                return "Text typed."
+            except Exception as e:
+                return f"Type error: {e}"
+        ladder = _heal_ladder(selector, None)
+        errors: list[str] = []
+        for i, (kind, val) in enumerate(ladder):
+            if kind in ("text", "text-contains"):
+                target = val
+            elif kind == "xpath":
+                target = f"xpath={val}"
+            else:
+                target = val
+            try:
+                el = page.locator(target).first
+                if await el.count() == 0:
+                    errors.append(f"{kind}={val}: not present")
+                    continue
+                if clear_first:
+                    await el.clear()
+                await el.type(text, delay=50)
+                if i == 0:
+                    return "Text typed."
+                return (f"Text typed via HEALED {kind}={val!r} (primary "
+                        f"{selector!r} missed). Use this locator next time.")
+            except Exception as e:
+                errors.append(str(e))
+                continue
+        return (f"Field not found — tried {len(ladder)} locator "
+                "strategies"
+                + (f"; first: {errors[0][:160]}" if errors else "."))
 
     async def scroll(self, direction: str = "down", amount: int = 500) -> str:
         page = await self._get_page()
