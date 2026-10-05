@@ -3078,3 +3078,161 @@ class TestResearchCritic:
         # non-repo topic → no GitHub entry
         out2 = r._extra_sources("monsoon rains rajasthan")
         assert not any(d["title"].startswith("GitHub:") for d in out2)
+
+
+class TestMermaid:
+    """R2 §12: real mermaid-cli render with an honest missing-tool path."""
+
+    def test_no_source_hints(self):
+        import actions.mermaid as m
+        assert "``` fences are fine" in m.mermaid({"source": ""})
+
+    def test_garbage_source_rejected(self):
+        import actions.mermaid as m
+        out = m.mermaid({"source": "just some prose with no diagram"})
+        assert "doesn't look like Mermaid" in out
+
+    def test_normalize_strips_fences(self):
+        import actions.mermaid as m
+        src = "```mermaid\nflowchart TD; A-->B\n```"
+        assert m._normalize(src).startswith("flowchart TD")
+
+    def test_missing_cli_is_honest_install_hint(self, monkeypatch):
+        import actions.mermaid as m
+        monkeypatch.setattr(m, "_cli_candidates", lambda: [])
+        out = m.mermaid({"source": "flowchart TD; A-->B"})
+        assert "not installed" in out and "npm install -g" in out
+        assert "never a fake" in out
+
+    def test_successful_render_writes_svg(self, tmp_path, monkeypatch):
+        import actions.mermaid as m
+        monkeypatch.setattr(m, "_base_dir", lambda: tmp_path)
+
+        def fake_run(argv, mmd_path, svg_path, timeout=90):
+            assert mmd_path.read_text(encoding="utf-8").startswith("flowchart")
+            svg_path.write_text("<svg xmlns='http://www.w3.org/2000/svg'/>",
+                                encoding="utf-8")
+            return svg_path.read_text(encoding="utf-8")
+        monkeypatch.setattr(m, "_cli_candidates", lambda: [["npx", "-y", "x"]])
+        monkeypatch.setattr(m, "_run_cli", fake_run)
+        out = m.mermaid({"source": "flowchart TD; A-->B"})
+        assert "Mermaid diagram rendered:" in out
+        path = Path(out.split("rendered: ", 1)[1].split(". Open", 1)[0])
+        assert path.is_file() and path.suffix == ".svg"
+        assert path.with_suffix(".mmd").is_file()   # source kept for edits
+
+    def test_timeout_then_honest_failure(self, tmp_path, monkeypatch):
+        import subprocess as sp
+        import actions.mermaid as m
+        monkeypatch.setattr(m, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(m, "_cli_candidates", lambda: [["npx", "-y", "x"]])
+
+        def boom(argv, mmd_path, svg_path, timeout=90):
+            raise sp.TimeoutExpired(argv, 90)
+        monkeypatch.setattr(m, "_run_cli", boom)
+        out = m.mermaid({"source": "sequenceDiagram\nA->>B: hi"})
+        assert "timed out" in out and "saved at" in out
+        # the .mmd landed so the user can fix it externally
+        assert list((tmp_path / "diagrams").glob("*.mmd"))
+
+    def test_all_candidates_fail_reports_last_error(self, tmp_path,
+                                                    monkeypatch):
+        import actions.mermaid as m
+        monkeypatch.setattr(m, "_base_dir", lambda: tmp_path)
+        monkeypatch.setattr(m, "_cli_candidates", lambda: [["mmdc"]])
+
+        def fail(argv, mmd_path, svg_path, timeout=90):
+            raise RuntimeError("chromium missing")
+        monkeypatch.setattr(m, "_run_cli", fail)
+        out = m.mermaid({"source": "graph LR; X-->Y"})
+        assert "Mermaid render failed:" in out and "chromium missing" in out
+
+    def test_tool_discoverable(self):
+        from pathlib import Path as P
+        from core.action_loader import discover_actions
+        reg = discover_actions(P("actions"))
+        assert "mermaid" in reg.names()
+
+
+class TestKGraph:
+    """R2 §4: Graphiti-lite temporal knowledge graph (local sqlite)."""
+
+    @pytest.fixture(autouse=True)
+    def _db(self, tmp_path, monkeypatch):
+        import memory.graph as g
+        monkeypatch.setattr(g, "_db_path", lambda: tmp_path / "graph.db")
+        self.g = g
+
+    def test_upsert_dedupes_and_guesses_kind(self):
+        a = self.g.upsert_entity("Priya")
+        b = self.g.upsert_entity("priya")            # case-insensitive
+        assert a == b
+        assert self.g._guess_kind("Acme Labs Inc") == "org"
+        assert self.g._guess_kind("jaipur") == "place"
+
+    def test_link_and_affirm(self):
+        r1 = self.g.link("Priya", "Rahul", "works_with")
+        assert r1["mode"] == "linked"
+        r2 = self.g.link("Priya", "Rahul", "works_with")
+        assert r2["mode"] == "affirmed" and r2["id"] == r1["id"]
+
+    def test_refusals(self):
+        with pytest.raises(ValueError):
+            self.g.link("Priya", "Priya", "knows")
+        with pytest.raises(ValueError):
+            self.g.link("A", "B", "  ")
+        with pytest.raises(ValueError):
+            self.g.upsert_entity("  ")
+
+    def test_extract_free_offline(self):
+        made = self.g.extract(
+            "Priya works_with Rahul. Rahul lives in Jaipur. "
+            "Meera is the founder of Acme Labs.")
+        rels = {m["rel"] for m in made}
+        assert "works_with" in rels
+        assert "lives_in" in rels
+        assert "founded" in rels
+        assert all(m["a"] for m in made)
+
+    def test_close_makes_fact_stale(self):
+        self.g.link("Priya", "Acme", "works_at", at=1_000_000.0)
+        self.g.close("Priya", "Acme", "works_at", at=2_000_000.0)
+        out = self.g.search("Priya")
+        assert "no active relations" in out or "works_at" not in out
+        tl = self.g.timeline("Priya")
+        assert "works_at" in tl and "→ 1970-01-24" in tl  # valid_to shown
+
+    def test_multi_hop_search(self):
+        self.g.link("Priya", "Rahul", "works_with")
+        self.g.link("Rahul", "Jaipur", "lives_in")
+        out = self.g.search("Priya", hops=2)
+        assert "works_with" in out and "lives_in" in out
+        assert "active relation" in out
+
+    def test_search_honest_empty(self):
+        assert "No graph entities match" in self.g.search("Ghost")
+        self.g.upsert_entity("Lonely")
+        assert "no active relations" in self.g.search("Lonely")
+
+    def test_tool_dispatch_and_errors(self):
+        out = self.g.graph({"action": "remember",
+                            "text": "Priya works_with Rahul"})
+        assert "Extracted + linked" in out
+        out2 = self.g.graph({"action": "search", "query": "Priya"})
+        assert "works_with" in out2
+        out3 = self.g.graph({"action": "close", "a": "Nope", "b": "Nada",
+                             "rel": "x"})
+        assert out3.startswith("graph:")
+        out4 = self.g.graph({"action": "timeline", "query": "Ghost"})
+        assert "No relations" in out4
+
+    def test_explicit_remember_via_ab(self):
+        out = self.g.graph({"action": "remember", "a": "Sam",
+                            "b": "OpenAI", "rel": "works_at"})
+        assert "works_at" in out
+
+    def test_tool_discoverable(self):
+        from pathlib import Path as P
+        from core.action_loader import discover_actions
+        reg = discover_actions(P("actions"))
+        assert "graph" in reg.names()
