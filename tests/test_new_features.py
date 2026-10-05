@@ -419,14 +419,15 @@ class TestDiagramAndCharts:
 
 class TestClipHistory:
     @pytest.fixture(autouse=True)
-    def _clean(self):
+    def _clean(self, tmp_path, monkeypatch):
         from actions import clip_history as ch
-        ch._HISTORY.clear()
-        ch._LAST = ""
+        monkeypatch.setattr(ch, "_db_path", lambda: tmp_path / "clip.db")
+        ch.reset_for_tests()
+        ch._STOP.set()
+        ch._CLIP_IMAGES.clear()
         yield
         ch._STOP.set()
-        ch._HISTORY.clear()
-        ch._LAST = ""
+        ch.reset_for_tests()
 
     def test_record_dedupes(self):
         from actions import clip_history as ch
@@ -2118,3 +2119,89 @@ class TestRulesV2SitePortProc:
         out2 = r.manage_rules({"action": "add", "trigger_type": "bogus",
                                "value": "x", "tool": "scan"})
         assert "Rule added" in out2                # unknown types stay honest
+
+
+class TestClipHistoryV2:
+    """clip v2: SQLite persistence, hybrid search, redaction, images, OCR."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, tmp_path, monkeypatch):
+        from actions import clip_history as ch
+        monkeypatch.setattr(ch, "_db_path", lambda: tmp_path / "clip.db")
+        ch.reset_for_tests()
+        ch._STOP.set()
+        ch._CLIP_IMAGES.clear()
+        yield
+        ch._STOP.set()
+        ch.reset_for_tests()
+
+    def test_persists_across_restart(self):
+        from actions import clip_history as ch
+        assert ch.record("survives restart")
+        ch.reset_for_tests()                      # app restart
+        assert "survives restart" in ch.clip_history({"action": "list"})
+
+    def test_hybrid_search_fts_and_substring(self):
+        from actions import clip_history as ch
+        ch.record("https://example.com/page")
+        ch.record("some secret text")
+        found = ch.clip_history({"action": "list", "query": "example"})
+        assert "example.com" in found and "secret" not in found
+        # substring inside a token — pure FTS would miss this
+        found2 = ch.clip_history({"action": "list", "query": "xample"})
+        assert "example.com" in found2
+
+    def test_redact_masks_pii_before_disk(self):
+        from actions import clip_history as ch
+        raw = ("mail a@b.com / +91 98765 43210 / 4111 1111 1111 1111 "
+               "/ host 192.168.1.1")
+        assert ch.record(raw, redact=True)
+        listing = ch.clip_history({"action": "list"})
+        assert "[email]" in listing and "a@b.com" not in listing
+        assert "[phone]" in listing and "98765" not in listing
+        assert "[card]" in listing and "4111" not in listing
+        assert "[ip]" in listing and "192.168.1.1" not in listing
+        # without redact → stored verbatim
+        assert ch.record("plain a@b.com")
+        assert "a@b.com" in ch.clip_history({"action": "list"})
+
+    def test_image_entry_saved_and_use_is_honest(self, tmp_path, monkeypatch):
+        from actions import clip_history as ch
+
+        class FakeImg:
+            size = (4, 4)
+            mode = "RGB"
+
+            def tobytes(self):
+                return b"pixels" * 8
+
+            def save(self, path, format=None):
+                Path(path).write_bytes(b"\x89PNG-fake")
+
+        monkeypatch.setattr(ch, "_clip_image", lambda: FakeImg())
+        # first grab → stored; identical second grab → deduped
+        assert ch._record_image(FakeImg(), tmp_path)
+        assert not ch._record_image(FakeImg(), tmp_path)
+        listing = ch.clip_history({"action": "list"})
+        assert "[image]" in listing and "clip_images" in listing
+        used = ch.clip_history({"action": "use", "index": "1"})
+        assert "is an image" in used and "open it" in used
+        # OCR on a fake png has no backend in the sandbox → honest failure
+        out = ch.clip_history({"action": "ocr", "index": "1"})
+        assert "OCR unavailable" in out or "no text found" in out
+
+    def test_ocr_on_text_entry_refused(self):
+        from actions import clip_history as ch
+        ch.record("just text")
+        assert "not an image" in ch.clip_history({"action": "ocr",
+                                                  "index": "1"})
+
+    def test_prune_keeps_newest_500(self):
+        from actions import clip_history as ch
+        for i in range(520):
+            ch.record(f"entry {i}")
+        c = ch._conn()
+        n = c.execute("SELECT COUNT(*) FROM clips").fetchone()[0]
+        assert n <= 500
+        newest = ch.clip_history({"action": "list"})
+        assert "entry 519" in newest and "entry 0\n" not in newest
