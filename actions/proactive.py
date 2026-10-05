@@ -1,5 +1,6 @@
 """
-ProactiveEngine 2.0 — context-aware, time-aware, non-repetitive background prompting.
+ProactiveEngine 3.0 — context-aware, time-aware prompting WITH
+pending-decision injection (confirm queue + recent outcomes from core.confirm).
 Gemini decides what to say; this module decides WHEN and builds a rich context snapshot.
 """
 import time
@@ -52,6 +53,7 @@ class ProactiveEngine:
         memory:       dict,
         monitors:     list[str] | None = None,
         recent_turns: list[str] | None = None,
+        decisions:    dict | None = None,
     ) -> str:
         """
         Build a context snapshot for Gemini.
@@ -103,6 +105,9 @@ class ProactiveEngine:
             snippet = "\n".join(recent_turns[-6:])
             recent_ctx = f"\nRecent conversation:\n{snippet}"
 
+        # Proactive 3.0: pending + recent user decisions (core.confirm)
+        decisions_ctx = self._decisions_block(decisions)
+
         return "\n".join([
             "[PROACTIVE_CHECK] You are initiating a proactive check-in.",
             f"Current time : {time_str}  ({period})",
@@ -111,6 +116,7 @@ class ProactiveEngine:
             mem_str,
             monitor_ctx,
             recent_ctx,
+            decisions_ctx,
             "",
             "Task:",
             focus,
@@ -125,3 +131,31 @@ class ProactiveEngine:
             "- Do NOT call any tools.",
             "- If nothing genuinely useful comes to mind, stay silent (say nothing).",
         ])
+
+    @staticmethod
+    def _decisions_block(decisions: dict | None) -> str:
+        """3.0: surface what the user still owes an answer on — and what
+        already got answered/expired so the check-in never re-asks."""
+        if not decisions:
+            return ""
+        lines: list[str] = []
+        pd = decisions.get("pending") or {}
+        if pd:
+            lines.append(
+                f"- WAITING on screen: {pd.get('title')!r} "
+                f"(asked {pd.get('age_s', 0)}s ago). You may gently remind "
+                "the user it needs their yes/no on the HUD.")
+        for r in (decisions.get("recent") or [])[-4:]:
+            out = str(r.get("outcome", ""))
+            title = repr(r.get("title", ""))[:80]
+            if out == "expired":
+                lines.append(f"- {title} expired unanswered — mention it "
+                             "once as something you could redo if wanted; "
+                             "never re-run it silently.")
+            elif out == "cancelled":
+                lines.append(f"- {title} was declined — do NOT re-ask it.")
+            # 'confirmed' → handled, no need to narrate
+        if not lines:
+            return ""
+        return ("\nPending user decisions:\n" + "\n".join(lines)
+                + "\n(If nothing fits naturally, ignore this block.)")

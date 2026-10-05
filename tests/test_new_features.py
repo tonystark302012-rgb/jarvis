@@ -3236,3 +3236,84 @@ class TestKGraph:
         from core.action_loader import discover_actions
         reg = discover_actions(P("actions"))
         assert "graph" in reg.names()
+
+
+class TestProactive30:
+    """R2 §6: pending-decision injection into the proactive prompt."""
+
+    @pytest.fixture(autouse=True)
+    def _confirm(self, monkeypatch):
+        import core.confirm as cf
+        self.cf = cf
+        monkeypatch.setattr(cf, "_show_cb", lambda t, d: None)
+        monkeypatch.setattr(cf, "_hide_cb", lambda: None)
+        monkeypatch.setattr(cf, "_log_cb", lambda m: None)
+        monkeypatch.setattr(cf, "_pending", None)
+        monkeypatch.setattr(cf, "_history", [])
+        yield
+        monkeypatch.setattr(cf, "_pending", None)
+
+    def test_stats_empty_initially(self):
+        st = self.cf.stats()
+        assert st == {"pending": {}, "recent": [], "total": 0}
+
+    def test_pending_and_confirmed_history(self):
+        out = self.cf.request("k1", "Delete logs?", "disk cleanup",
+                              lambda: "deleted")
+        assert "CONFIRMATION_PENDING" in out
+        st = self.cf.stats()
+        assert st["pending"]["title"] == "Delete logs?"
+        assert "age_s" in st["pending"]
+        self.cf.resolve(True)                      # accepted → runs worker
+        st2 = self.cf.stats()
+        assert st2["pending"] == {}
+        assert st2["recent"][-1]["outcome"] == "confirmed"
+        assert self.cf.pending_title() == ""
+
+    def test_cancelled_and_expired_recorded(self):
+        self.cf.request("k2", "Reboot?", "", lambda: "ok")
+        self.cf.resolve(False)
+        assert self.cf.stats()["recent"][-1]["outcome"] == "cancelled"
+        # expired: shrink the timeout for this check
+        import core.confirm as cf
+        self.cf.request("k3", "Run old job?", "", lambda: "ok")
+        monkey_timeout = cf.TIMEOUT_SECONDS
+        object.__getattribute__(cf, "_pending").at -= monkey_timeout + 5
+        self.cf.resolve(True)
+        assert self.cf.stats()["recent"][-1]["outcome"] == "expired"
+
+    def test_prompt_includes_waiting_and_expired(self):
+        from actions.proactive import ProactiveEngine
+        eng = ProactiveEngine()
+        decisions = {
+            "pending": {"title": "Delete logs?", "age_s": 12},
+            "recent": [{"title": "Reboot box", "outcome": "expired",
+                        "at": 0},
+                       {"title": "Wipe disk", "outcome": "cancelled",
+                        "at": 0}],
+            "total": 2,
+        }
+        p = eng.build_prompt(memory={}, decisions=decisions)
+        assert "Pending user decisions" in p
+        assert "WAITING on screen" in p and "Delete logs?" in p
+        assert "expired unanswered" in p
+        assert "was declined" in p
+        assert "confirmed" not in p.split("Pending user decisions")[1]
+
+    def test_prompt_without_decisions_unchanged(self):
+        from actions.proactive import ProactiveEngine
+        eng = ProactiveEngine()
+        p = eng.build_prompt(memory={})
+        assert "Pending user decisions" not in p
+        assert "[PROACTIVE_CHECK]" in p
+
+    def test_prompt_with_empty_stats_no_block(self):
+        from actions.proactive import ProactiveEngine
+        eng = ProactiveEngine()
+        p = eng.build_prompt(memory={}, decisions=self.cf.stats())
+        assert "Pending user decisions" not in p
+
+    def test_main_wires_confirm_stats_into_prompt(self):
+        src = Path("main.py").read_text(encoding="utf-8")
+        assert "decisions    = _decisions" in src
+        assert "_confirm.stats()" in src

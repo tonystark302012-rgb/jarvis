@@ -2425,10 +2425,16 @@ class JarvisLive:
                 memory       = await asyncio.to_thread(load_memory)
                 monitors     = await asyncio.to_thread(list_monitors)
                 recent_turns = self._session_log[-8:] if self._session_log else []
+                try:
+                    from core import confirm as _confirm
+                    _decisions = _confirm.stats()
+                except Exception:
+                    _decisions = None
                 prompt = self._proactive.build_prompt(
                     memory       = memory,
                     monitors     = monitors or None,
                     recent_turns = recent_turns or None,
+                    decisions    = _decisions,
                 )
                 await self.session.send_client_content(
                     turns={"role": "user", "parts": [{"text": prompt}]},
