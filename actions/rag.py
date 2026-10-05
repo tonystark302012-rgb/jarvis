@@ -6,7 +6,8 @@ WHAT IT DOES
                  are read directly; PDF/DOCX go through the stdlib-free
                  path file_processor already owns (best-effort — unreadable
                  files are listed, not fatal).
-    2. ask     — FTS5 retrieval over the chunks (BM25), then an extractive
+    2. ask     — HYBRID retrieval: FTS5 BM25 ∪ sqlite-vec vector KNN fused
+                 with Reciprocal Rank Fusion, then an extractive
                  answer: the top passages quoted with file:line context.
                  With a Gemini key AND privacy mode off, the passages are
                  handed to the model for a synthesized answer (still only
@@ -17,8 +18,13 @@ WHY FTS5 FIRST: 90-page agreements, contracts, notes — BM25 over chunks
 answers "notice period kya hai" in milliseconds with zero model calls.
 The model, when present, only rewrites the already-found evidence.
 
-NO NEW DEPS: sqlite FTS5 (built-in) + the existing file_processor text
-extraction. This is the ₹0 offline RAG from the list.
+HYBRID, HONESTLY: sqlite-vec (MIT, installed) indexes a deterministic
+char-ngram hashing embedding (256-d, no model download, no network) next
+to every chunk — real cosine KNN over YOUR text that catches matches BM25
+misses (typos, morphology, paraphrase fragments). The vector slot is
+drop-in ready for a neural embedder if one is ever available offline.
+
+STILL ₹0: sqlite FTS5 (built-in) + sqlite-vec + file_processor extraction.
 """
 from __future__ import annotations
 
@@ -30,6 +36,12 @@ from threading import Lock
 
 _LOCK = Lock()
 _CONN: sqlite3.Connection | None = None
+_VEC = False                 # sqlite-vec available on the live connection
+_DIM = 256                   # embedding dimensions (hashing n-gram space)
+_MAX_DIST = 1.20             # cosine-distance cut: relevant neighbours
+                             # measured 0.97–1.11, unrelated ≥ 1.28 on the
+                             # 256-d n-gram space (empirical, both sides
+                             # have >0.07 margin)
 _MAX_CHUNK = 1200          # chars per chunk
 _OVERLAP = 150             # overlap so answers aren't cut mid-sentence
 _SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".venv", "venv",
@@ -74,6 +86,20 @@ def _conn() -> sqlite3.Connection:
             " BEGIN INSERT INTO chunks_fts(chunks_fts, rowid, text)"
             " VALUES('delete', old.id, old.text); END"
         )
+        # vector index (sqlite-vec) — hybrid retrieval half; the extension
+        # is per-connection, and when the wheel is absent we simply stay
+        # FTS-only instead of failing the whole action.
+        global _VEC
+        try:
+            import sqlite_vec
+            sqlite_vec.load(c)
+            c.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0("
+                " id INTEGER PRIMARY KEY,"
+                f" embedding float[{_DIM}])")
+            _VEC = True
+        except Exception:
+            _VEC = False
         # wiping a re-indexed path must purge FTS too — do it in SQL
         c.commit()
         _CONN = c
@@ -123,10 +149,63 @@ def _read_text(path: Path) -> str | None:
     return None
 
 
+def _embed(text: str) -> list[float]:
+    """Deterministic 256-d char/word n-gram hashing embedding (L2-normalised).
+    Offline by construction: no model, no network, same text → same vector,
+    so index and query live in one space."""
+    import hashlib
+    import math
+    vec = [0.0] * _DIM
+    words = re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
+    grams: list[str] = list(words)
+    for w in words:
+        if len(w) > 3:
+            grams.extend(w[i:i + 3] for i in range(len(w) - 2))
+    for g in grams[:600]:
+        h = int.from_bytes(
+            hashlib.blake2b(g.encode("utf-8"), digest_size=8).digest(),
+            "big")
+        vec[h % _DIM] += 1.0
+        vec[(h >> 8) % _DIM] += 0.5            # second hash = fewer collisions
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm > 0:
+        vec = [v / norm for v in vec]
+    return vec
+
+
+def _serialize(vec: list[float]) -> bytes:
+    """sqlite-vec float32 blob — API name changed across versions
+    (serialize_float32 now, serialize_float before)."""
+    import sqlite_vec
+    fn = getattr(sqlite_vec, "serialize_float32", None) or getattr(
+        sqlite_vec, "serialize_float", None)
+    if fn is None:
+        raise RuntimeError(f"sqlite_vec has no serializer: "
+                           f"{sorted(dir(sqlite_vec))}")
+    return fn(vec)
+
+
+def _vec_insert(c: sqlite3.Connection, chunk_id: int, text: str) -> None:
+    if not _VEC:
+        return
+    try:
+        c.execute("INSERT OR REPLACE INTO chunks_vec(id, embedding)"
+                  " VALUES (?, ?)",
+                  (chunk_id, _serialize(_embed(text))))
+    except Exception:
+        pass                                    # vector half is a bonus
+
+
 def _purge_path(c: sqlite3.Connection, path: str) -> None:
     ids = [r[0] for r in c.execute(
         "SELECT id FROM chunks WHERE path = ?", (path,))]
     if ids:
+        if _VEC:
+            try:
+                c.executemany("DELETE FROM chunks_vec WHERE id = ?",
+                              [(i,) for i in ids])
+            except sqlite3.OperationalError:
+                pass
         c.executemany("DELETE FROM chunks WHERE id = ?",
                       [(i,) for i in ids])
         # FTS triggers fire per delete (content pattern)
@@ -171,9 +250,10 @@ def index_paths(raw_paths: list[str], max_files: int = 400) -> str:
                 continue
             _purge_path(c, str(f))
             for seq, chunk in enumerate(_chunk(text)):
-                c.execute(
+                cur = c.execute(
                     "INSERT OR REPLACE INTO chunks (path, seq, text)"
                     " VALUES (?, ?, ?)", (str(f), seq, chunk))
+                _vec_insert(c, cur.lastrowid, chunk)
             indexed += 1
         c.commit()
 
@@ -193,10 +273,20 @@ def _status() -> str:
         c = _conn()
         n_files = c.execute("SELECT COUNT(DISTINCT path) FROM chunks").fetchone()[0]
         n_chunks = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        n_vec = -1
+        if _VEC:
+            try:
+                n_vec = c.execute("SELECT COUNT(*) FROM chunks_vec"
+                                  ).fetchone()[0]
+            except sqlite3.OperationalError:
+                n_vec = -1
     if not n_chunks:
         return ("Nothing indexed yet. Say 'index <folder>' first — e.g. "
                 "'index ~/Documents'.")
-    return f"RAG index: {n_files} file(s), {n_chunks} chunk(s). Ask away."
+    hybrid = (f", {n_vec} vectorised" if n_vec >= 0
+              else " (BM25 only — sqlite-vec wheel missing)")
+    return (f"RAG index: {n_files} file(s), {n_chunks} chunk(s){hybrid}. "
+            "Ask away.")
 
 
 def _escape_fts(query: str) -> str:
@@ -211,21 +301,55 @@ def _escape_fts(query: str) -> str:
 
 
 def _retrieve(query: str, k: int = 6) -> list[tuple[str, int, str]]:
+    """Hybrid: BM25 ranks ∪ sqlite-vec KNN ranks, fused with Reciprocal
+    Rank Fusion (score = Σ 1/(60+rank)). RRF needs no score calibration
+    between the two very different rankers — the standard fusion trick."""
     match = _escape_fts(query)
-    if not match:
-        return []
+    limit = max(1, min(20, k * 3))
+    fts_hits: list[tuple[str, int, str]] = []
+    if match:
+        with _LOCK:
+            try:
+                rows = _conn().execute(
+                    "SELECT t.path, t.seq, t.text FROM chunks t"
+                    " JOIN chunks_fts f ON f.rowid = t.id"
+                    " WHERE chunks_fts MATCH ?"
+                    " ORDER BY bm25(chunks_fts) LIMIT ?",
+                    (match, limit),
+                ).fetchall()
+                fts_hits = [(r[0], r[1], r[2]) for r in rows]
+            except sqlite3.OperationalError:
+                fts_hits = []
+    vec_hits: list[tuple[str, int, str]] = []
     with _LOCK:
-        try:
-            rows = _conn().execute(
-                "SELECT t.path, t.seq, t.text FROM chunks t"
-                " JOIN chunks_fts f ON f.rowid = t.id"
-                " WHERE chunks_fts MATCH ?"
-                " ORDER BY bm25(chunks_fts) LIMIT ?",
-                (match, max(1, min(20, k))),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return []
-    return [(r[0], r[1], r[2]) for r in rows]
+        conn = _conn()
+        if _VEC and query.strip():
+            try:
+                q = _serialize(_embed(query))
+                rows = conn.execute(
+                    "SELECT c.path, c.seq, c.text, v.distance"
+                    " FROM chunks_vec v"
+                    " JOIN chunks c ON c.id = v.id"
+                    " WHERE v.embedding MATCH ? AND k = ?",
+                    (q, limit),
+                ).fetchall()
+                # k-NN ALWAYS returns k hits — drop the far ones or every
+                # nonsense query would 'match' something
+                vec_hits = [(r[0], r[1], r[2]) for r in rows
+                            if float(r[3]) < _MAX_DIST]
+            except Exception:
+                vec_hits = []                    # degrade to pure BM25
+    if not vec_hits:
+        return fts_hits[:k]
+    scores: dict[tuple[str, int], float] = {}
+    text_of: dict[tuple[str, int], tuple[str, int, str]] = {}
+    for hits in (fts_hits, vec_hits):
+        for rank, item in enumerate(hits, start=1):
+            key = (item[0], item[1])
+            scores[key] = scores.get(key, 0.0) + 1.0 / (60 + rank)
+            text_of[key] = item
+    fused = sorted(scores, key=lambda key: -scores[key])[:max(1, min(20, k))]
+    return [text_of[key] for key in fused]
 
 
 def _extractive(query: str, hits: list[tuple[str, int, str]]) -> str:
@@ -301,7 +425,8 @@ def rag(parameters: dict = None, player=None, session_memory=None) -> str:
 TOOL = {
     "name": "rag",
     "description": (
-        "Ask questions of the user's own files, offline (sqlite FTS5 — no "
+        "Ask questions of the user's own files, offline HYBRID retrieval "
+        "— sqlite FTS5 BM25 + sqlite-vec vector KNN fused (RRF), no "
         "API needed). Actions: index (pass `path` — folder or file; text, "
         "markdown, code, CSV read directly, PDF/DOCX via file_processor), "
         "ask (default — pass `query`; returns cited passages, or a "

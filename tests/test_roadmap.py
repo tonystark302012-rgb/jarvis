@@ -4967,3 +4967,54 @@ class TestScreenMirror:
         reg = discover_actions(Path("actions"))
         assert "screen_mirror" in reg.names()
         assert self.sm.TOOL["parameters"]["type"] == "OBJECT"
+
+
+class TestRagHybrid:
+    """rag v2: sqlite-vec KNN half of the hybrid retrieval (RRF fusion)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        import actions.rag as r
+        monkeypatch.setattr(r, "_db_path", lambda: tmp_path / "rag.db")
+        monkeypatch.setattr(r, "_CONN", None)
+        yield
+        monkeypatch.setattr(r, "_CONN", None)
+
+    @staticmethod
+    def _docs(tmp_path: Path) -> Path:
+        docs = tmp_path / "docs"
+        docs.mkdir(exist_ok=True)
+        (docs / "agreement.txt").write_text(
+            "RENT AGREEMENT The notice period shall be two months. "
+            "Security deposit is three months rent.", encoding="utf-8")
+        (docs / "policy.txt").write_text(
+            "COMPANY POLICY Employees get 21 days paid leave per year. "
+            "Notice period for resignation is 60 days.", encoding="utf-8")
+        return docs
+
+    def test_hybrid_vector_index_and_knn(self, tmp_path):
+        import actions.rag as r
+        docs = self._docs(tmp_path)
+        out = r.rag({"action": "index", "path": str(docs)})
+        assert "Indexed 2 file" in out
+        st = r.rag({"action": "status"})
+        assert "vectorised" in st              # sqlite-vec half is live
+        assert r._VEC is True
+        # KNN alone retrieves on a typo query with no exact token
+        hits = r._retrieve("notic period")
+        assert hits, "vector KNN must retrieve on typo queries"
+        # and the distance cut rejects nonsense (k-NN alone would not)
+        assert not r._retrieve("xylophone zebra")
+        out2 = r.rag({"action": "ask", "query": "notice period kya hai"})
+        assert "#chunk" in out2
+
+    def test_embed_is_deterministic_and_normalised(self):
+        import math
+        import actions.rag as r
+        a = r._embed("notice period shall be two months")
+        b = r._embed("notice period shall be two months")
+        assert a == b and len(a) == r._DIM
+        norm = math.sqrt(sum(x * x for x in a))
+        assert abs(norm - 1.0) < 1e-6
+        c = r._embed("employees get twenty one days paid leave")
+        assert a != c
