@@ -469,8 +469,9 @@ class TestDataQuery:
             {"query": "SELECT 1", "action": "summarize"})
 
     def test_auto_chart_on_chartable_result(self, tmp_path, monkeypatch):
+        import actions.charts as charts_mod
         from actions.data_query import data_query
-        monkeypatch.setattr("actions.charts._base_dir", lambda: tmp_path)
+        monkeypatch.setattr(charts_mod, "_base_dir", lambda: tmp_path)
         out = data_query({"file": str(self.csv),
                           "query": "SELECT city, AVG(price) avg FROM data "
                                    "GROUP BY city"})
