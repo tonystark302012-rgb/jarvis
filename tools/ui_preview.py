@@ -22,6 +22,10 @@ from dashboard.server import DashboardServer  # noqa: E402
 
 
 async def main() -> None:
+    # Materialise TLS first: serve() generates the self-signed pair on first
+    # run, and proto below must reflect the mode the server will actually
+    # bind — otherwise ui_preview.json says http while uvicorn serves https.
+    dsrv._ensure_certs()
     srv = DashboardServer()
     token = srv.ui_session()
     proto = "https" if (srv._ssl_enabled() or (_REPO / "config" / "certs").exists()) else "http"

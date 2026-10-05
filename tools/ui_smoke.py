@@ -87,11 +87,24 @@ def api(method: str, path: str, payload=None):
 
 
 live = False
-try:
-    api("GET", "/api/health")
-    live = True
-except Exception as e:                                 # noqa: BLE001
-    print(f"dashboard unreachable ({e}) — live checks will fail")
+_err = None
+# Protocol fallback: a stale ui_preview.json may say http while the server
+# is TLS-only (or vice-versa) — probe both before declaring the dash dead.
+for _b in [BASE, BASE.replace("http://", "https://", 1)]:
+    BASE = _b
+    if BASE.startswith("https"):
+        import ssl as _ssl
+        _CTX = _ssl._create_unverified_context()
+    else:
+        _CTX = None
+    try:
+        api("GET", "/api/health")
+        live = True
+        break
+    except Exception as e:                             # noqa: BLE001
+        _err = e
+if not live:
+    print(f"dashboard unreachable ({_err}) — live checks will fail")
 check(live, "dashboard preview reachable")
 
 ui.set_dashboard_api(BASE, TOKEN)

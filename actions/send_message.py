@@ -9,7 +9,9 @@ try:
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.06
     _PYAUTOGUI = True
-except ImportError:
+except Exception:
+    # Optional dep: ImportError (absent) or KeyError('DISPLAY')/X errors when
+    # no display — stay discoverable, just disabled.
     _PYAUTOGUI = False
 
 try:

@@ -4810,12 +4810,23 @@ class TestWorldView:
                             "zoom": 99}, None)
         assert any("/19/" in u for u in self.fetched)     # OSM ceiling
 
-    def test_pillow_absent_is_honest(self):
-        # real _compose: sandbox has no Pillow → instruction, not a crash
+    def test_pillow_absent_is_honest(self, monkeypatch):
+        # force Pillow absent (None sentinel → ImportError even if installed):
+        # instruction, not a crash
         self._fetch_map(lambda u: b"tile")
+        monkeypatch.setitem(sys.modules, "PIL", None)
         out = self.wv.world_view({"mode": "map", "lat": 1.0, "lon": 1.0},
                                  None)
         assert "pip install pillow" in out
+
+    def test_pillow_present_composes(self):
+        # real Pillow (in requirements.txt) must actually stitch → PNG saved
+        pytest.importorskip("PIL")
+        self._fetch_map(lambda u: b"tile")       # bad bytes → black cell, still PNG
+        out = self.wv.world_view({"mode": "map", "lat": 1.0, "lon": 1.0},
+                                 None)
+        assert "Saved:" in out
+        assert "pip install pillow" not in out
 
     def test_privacy_blocks_before_fetch(self):
         import core.privacy as cp

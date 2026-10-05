@@ -20,7 +20,10 @@ try:
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.05
     _PYAUTOGUI = True
-except ImportError:
+except Exception:
+    # Optional dep: import can fail with ImportError (not installed) OR with
+    # KeyError('DISPLAY')/DisplayConnectionError when no X server exists —
+    # either way the action must stay discoverable, just disabled.
     _PYAUTOGUI = False
 
 try:
