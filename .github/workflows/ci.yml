@@ -43,4 +43,17 @@ jobs:
         run: python -m compileall -q actions core dashboard memory ui config main.py ui.py setup.py
 
       - name: Tests
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ -q --junitxml=junit.xml | tee pytest.log
+
+      - name: Surface failing tests as annotations
+        if: failure()
+        run: python tools/ci_report.py junit.xml pytest.log
+
+      - name: Upload pytest log (forensics for flaky/unclear failures)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ matrix.python-version }}
+          path: |
+            pytest.log
+            junit.xml
