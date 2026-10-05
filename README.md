@@ -363,6 +363,24 @@ render inline SVG instead of emoji, through a shared `JV.svg()` registry.
 
 ---
 
+## 🛰️ The Integration Update — everything wired in
+
+Twenty batches, every one landed with full-suite gates (ruff · pytest ·
+HUD smoke) green before push. Nothing below is a stub: each feature
+either runs for real or returns the exact free-install line — never a
+fake result.
+
+| Area | What shipped |
+|---|---|
+| **Knowledge** | Graphiti-lite temporal graph (`graph`: validity windows, offline extraction, multi-hop search) · skills **verify-loop** (lint on draft, re-run on publish, sweep endpoint) · deep-**research critic** (authority-ranked pruning, arXiv/Semantic Scholar/Wikipedia/GitHub sources, citation-precision header) |
+| **Creation** | **CadQuery** CAD (snippet → STL/STEP/SVG) · **Manim** animations (scene → mp4) · **Mermaid** render (real mermaid-cli → SVG) — all guarded, honest install lines |
+| **Understanding** | **Video Q&A + SRT captions** (ffmpeg → whisper segments) with optional **WhisperX** engine (word timings, diarization; honest fallback) · **dictation** typing mode (offline segments + live transcript feed) · **emotion-tag acting** (reply tone drives the avatar's face) |
+| **Search & dev** | **SearXNG** self-hosted metasearch as a real rung in the search ladder (config `searxng_url` / env `SEARXNG_URL`) · **dev_loop** background edit→test watcher (pytest/npm auto-detect, PASS/FAIL log) · **eval A/B** reply judging with persisted scorecards |
+| **Remote & streams** | **Telegram** closed loop: receive (`telegram_rx`, allowlist-gated) + send (`telegram_send`, headless Bot API) · **predictions** ground-truth loop (annotate → HUD chip → Telegram verdict) · **go2rtc** RTSP/IP-camera bridge (official-release install, start/stop/status) · **WebRTC mirror** upgrade over the existing screen mirror (aiortc; JPEG fallback always intact) |
+| **Platform** | Dashboard as an installable **PWA** (manifest, service worker, offline shell) + **Web Push** with VAPID keys and RFC 8291 encryption, zero new dependencies · **MCP catalog** (11 official presets) · **Obsidian** Local-REST vault · **AT-SPI** accessibility scanner · **self-healing browser locators** (fallback ladder + learned locator hints) · **proactive 3.0** (pending/expired decisions injected into check-ins) |
+
+Duplicate rule held throughout: barge-in was found already shipped (EchoGuard) and skipped rather than rebuilt.
+
 ## ⚡ Quick Start
 
 ```bash
