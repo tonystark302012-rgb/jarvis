@@ -3545,7 +3545,8 @@ class TestVideoQA:
         monkeypatch.setattr(vq, "_ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
         monkeypatch.setattr(vq, "_extract_audio",
                             lambda path, timeout=600: _zeros(32000))
-        monkeypatch.setattr(vq, "_transcribe_segments", lambda a: _segs())
+        monkeypatch.setattr(vq, "_transcribe_segments",
+                            lambda a, engine="whisper": (_segs(), "whisper"))
         monkeypatch.setattr(vq, "_answer", lambda q, t: None)
 
     def test_no_path_honest(self):
@@ -3600,7 +3601,8 @@ class TestVideoQA:
 
     def test_no_speech_honest(self, monkeypatch):
         import actions.video_qa as vq
-        monkeypatch.setattr(vq, "_transcribe_segments", lambda a: [])
+        monkeypatch.setattr(vq, "_transcribe_segments",
+                            lambda a, engine="whisper": ([], "whisper"))
         vid = self.tmp / "quiet.mp4"
         vid.write_bytes(b"\x00")
         out = vq.video_qa({"path": str(vid)})
@@ -3875,3 +3877,137 @@ class TestManimAnim:
         from core.action_loader import discover_actions
         assert self.ma.TOOL["handler"] is self.ma.manim_anim
         assert "manim_anim" in discover_actions(Path("actions")).names()
+
+
+class TestWhisperXGuarded:
+    """Batch 15: WhisperX optional engine — honest gaps, real paths."""
+
+    def test_missing_library_is_install_line(self):
+        """Sandbox reality: whisperx absent → exact honest message."""
+        from core.stt import WhisperXSTT
+        with pytest.raises(RuntimeError) as ei:
+            WhisperXSTT()
+        msg = str(ei.value)
+        assert "pip install whisperx" in msg
+        assert "HuggingFace token" in msg
+
+    def test_transcribe_diarized_with_stub_module(self, monkeypatch):
+        import sys as _sys
+        import types
+        from core.stt import WhisperXSTT
+
+        calls = {}
+
+        class _Model:
+            def transcribe(self, audio):
+                return {"segments": [
+                    {"start": 0.0, "end": 2.5, "text": " hello world "},
+                    {"start": 2.5, "end": 4.0, "text": "  "},
+                ]}
+
+        def _load(name, device, language=None):
+            calls["loaded"] = (name, device)
+            return _Model()
+        stub = types.ModuleType("whisperx")
+        stub.load_model = _load
+        # NO diarize attr + NO token → honest single speaker
+        monkeypatch.setitem(_sys.modules, "whisperx", stub)
+
+        wx = WhisperXSTT.__new__(WhisperXSTT)
+        wx._language = None
+        wx._model_name = "small"
+        wx._loaded = None
+        segs = wx.transcribe_diarized(None)
+        assert len(segs) == 1                    # blank segment dropped
+        assert segs[0]["diarized"] is False
+        assert segs[0]["speaker"] == "SPEAKER_00"
+        assert "hello world" in segs[0]["text"]
+        # parity: transcribe joins text
+        assert wx.transcribe(None) == "hello world"
+
+    def test_transcribe_words_with_stub(self, monkeypatch):
+        import sys as _sys
+        import types
+        from core.stt import WhisperXSTT
+
+        class _Model:
+            def transcribe(self, audio):
+                return {"segments": [{
+                    "start": 0.0, "end": 1.0, "text": "hi there",
+                    "words": [{"start": 0.0, "end": 0.4, "word": "hi"},
+                              {"start": 0.5, "end": 1.0, "word": "there"},
+                              {"start": 1.0, "end": 1.0, "word": ""}]}]}
+        stub = types.ModuleType("whisperx")
+        stub.load_model = lambda *a, **k: _Model()
+        monkeypatch.setitem(_sys.modules, "whisperx", stub)
+        wx = WhisperXSTT.__new__(WhisperXSTT)
+        wx._language = None
+        wx._model_name = "small"
+        wx._loaded = None
+        words = wx.transcribe_words(None)
+        assert [w["word"] for w in words] == ["hi", "there"]
+        assert words[0]["start"] == 0.0
+
+
+class TestVideoQAWhisperXEngine:
+    """Batch 15: video_qa engine=whisperx with honest fallback."""
+
+    @pytest.fixture(autouse=True)
+    def _seams(self, tmp_path, monkeypatch):
+        import actions.video_qa as vq
+        self.vq = vq
+        self.tmp = tmp_path
+        monkeypatch.setattr(vq, "_extract_audio",
+                            lambda path, timeout=600: _zeros(32000))
+        monkeypatch.setattr(vq, "_answer", lambda q, t: None)
+
+    def test_engine_whisperx_unavailable_falls_back_with_note(
+            self, monkeypatch):
+        import core.stt as stt_mod
+
+        class _Boom:
+            def __init__(self):
+                raise RuntimeError("pip install whisperx (MIT)")
+
+        class _Good:
+            def transcribe_segments(self, a):
+                return [{"start": 0.0, "end": 3.0,
+                         "text": "fallback transcript words"}]
+        monkeypatch.setattr(stt_mod, "WhisperXSTT", _Boom)
+        monkeypatch.setattr(stt_mod, "WhisperSTT", _Good)
+
+        vid = self.tmp / "t.mp4"
+        vid.write_bytes(b"\x00")
+        out = self.vq.video_qa({"path": str(vid), "engine": "whisperx"})
+        assert "Captions written:" in out
+        assert "whisperx unavailable" in out
+        assert "faster-whisper instead" in out
+
+    def test_engine_whisperx_success_marks_engine(self, monkeypatch):
+        import core.stt as stt_mod
+
+        class _Wx:
+            def transcribe_diarized(self, a):
+                return [{"start": 0.0, "end": 3.0, "text": "hello there",
+                         "speaker": "SPEAKER_01", "diarized": True}]
+        monkeypatch.setattr(stt_mod, "WhisperXSTT", _Wx)
+        vid = self.tmp / "t.mp4"
+        vid.write_bytes(b"\x00")
+        out = self.vq.video_qa({"path": str(vid), "engine": "whisperx"})
+        assert "[engine: whisperx]" in out
+        # speaker folded into the caption text
+        srt = vid.with_suffix(".srt").read_text(encoding="utf-8")
+        assert "[SPEAKER_01] hello there" in srt
+
+    def test_default_engine_unchanged(self, monkeypatch):
+        import core.stt as stt_mod
+
+        class _Good:
+            def transcribe_segments(self, a):
+                return [{"start": 0.0, "end": 3.0, "text": "plain text"}]
+        monkeypatch.setattr(stt_mod, "WhisperSTT", _Good)
+        vid = self.tmp / "t.mp4"
+        vid.write_bytes(b"\x00")
+        out = self.vq.video_qa({"path": str(vid)})
+        assert "[engine: whisper]" in out
+        assert "plain text" in vid.with_suffix(".transcript.txt").read_text()

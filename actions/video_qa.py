@@ -24,6 +24,9 @@ from pathlib import Path
 import numpy as np
 
 
+_LAST_NOTE = ""
+
+
 def _base_dir() -> Path:
     from config import get_base_dir
     return get_base_dir()
@@ -88,9 +91,34 @@ def _write_srt(segments: list[dict], path: Path) -> Path:
     return path
 
 
-def _transcribe_segments(audio: np.ndarray) -> list[dict]:
+def _transcribe_segments(audio: np.ndarray,
+                         engine: str = "whisper") -> tuple[list[dict], str]:
+    """→ (segments, note). engine=whisperx uses the optional WhisperX
+    (word/diarization) and FALLS BACK to faster-whisper with an honest
+    note when the library or token is missing — never silent, never
+    fake speakers."""
+    if engine == "whisperx":
+        try:
+            from core.stt import WhisperXSTT
+            wx = WhisperXSTT()
+            segs = wx.transcribe_diarized(audio)
+            out = []
+            for s in segs:
+                txt = s["text"]
+                if s.get("diarized") and s.get("speaker"):
+                    txt = f"[{s['speaker']}] {txt}"
+                out.append({"start": s["start"], "end": s["end"],
+                            "text": txt})
+            return out, ("whisperx" + ("" if any(
+                s.get("diarized") for s in segs) else
+                " (no HF_TOKEN — single speaker, diarization skipped)"))
+        except Exception as e:
+            from core.stt import WhisperSTT
+            return WhisperSTT().transcribe_segments(audio), (
+                f"whisperx unavailable ({str(e)[:80]}…), "
+                "used faster-whisper instead")
     from core.stt import WhisperSTT
-    return WhisperSTT().transcribe_segments(audio)
+    return WhisperSTT().transcribe_segments(audio), "whisper"
 
 
 def _answer(prompt: str, transcript: str) -> str | None:
@@ -156,8 +184,9 @@ def video_qa(parameters: dict = None, player=None,
         return ("No audible track found in that video "
                 "(or it is shorter than 0.1s).")
 
+    engine = str(params.get("engine", "whisper") or "whisper").lower()
     try:
-        segs = _transcribe_segments(audio)
+        segs, stt_note = _transcribe_segments(audio, engine)
     except Exception as e:
         return f"video_qa: transcription failed ({e}) — is faster-whisper installed?"
     transcript = " ".join(s["text"] for s in segs).strip()
@@ -174,7 +203,8 @@ def video_qa(parameters: dict = None, player=None,
             return f"Transcript ({len(segs)} segments) but saving failed: {e}"
         preview = transcript[:300]
         return (f"Captions written: {out} (+ {txt.name}) — "
-                f"{len(segs)} segments, {len(transcript)} chars.\n"
+                f"{len(segs)} segments, {len(transcript)} chars "
+                f"[engine: {stt_note}].\n"
                 f"Preview: {preview}…")
 
     if action in ("ask", "q", "question"):
@@ -183,12 +213,15 @@ def video_qa(parameters: dict = None, player=None,
         if not question:
             return "action=ask needs question=… (what to ask the video)."
         ans = _answer(question, transcript)
+        # engine note surfaces in the no-key context path too
+        global _LAST_NOTE
+        _LAST_NOTE = stt_note
         if ans:
             return f"Answer: {ans}"
         win = _keyword_window(question, transcript, segs)
         if win:
-            return ("NO LLM KEY — keyword-window CONTEXT (not an answer):\n"
-                    + win)
+            return (f"NO LLM KEY (stt: {stt_note}) — keyword-window "
+                    "CONTEXT (not an answer):\n" + win)
         return ("NO LLM KEY and no transcript lines match those words — "
                 "add a Gemini key for real answers, or ask different "
                 "keywords.")
@@ -215,6 +248,10 @@ TOOL = {
                      "description": "Path to the video file."},
             "question": {"type": "STRING",
                          "description": "Question for action=ask."},
+            "engine": {"type": "STRING",
+                       "description": "whisper (default) | whisperx "
+                                      "(word-level + diarization when "
+                                      "installed; honest fallback)."},
         },
         "required": ["path"],
     },
