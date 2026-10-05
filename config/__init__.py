@@ -1,8 +1,24 @@
 # config/__init__.py
-import json, os, platform
+import json
+import platform
+import sys
 from pathlib import Path
 
 _CONFIG_PATH = Path(__file__).parent / "api_keys.json"
+
+
+def get_base_dir() -> Path:
+    """Repository/app root — the folder that contains main.py.
+
+    Frozen (PyInstaller) builds resolve to the executable's folder instead.
+    Every module that needs a stable anchor for config/, macros/, diagrams/
+    imports this one function rather than re-deriving it (four copies of
+    that derivation existed before and one caller imported a name that was
+    never defined — see tests/test_new_features.py::TestWiringGuards).
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent
 
 def _platform_os() -> str:
     """Auto-detect OS when config file is absent."""

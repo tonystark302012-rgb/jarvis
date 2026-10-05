@@ -97,15 +97,37 @@ class ActionRegistry:
 
     # -- called by main.py from _execute_tool --
     def run(self, name: str, parameters: dict, ctx: dict | None = None) -> str:
+        """Single dispatch choke point — every caller (model tool-call,
+        orchestrator step, rule firing, palette run) lands here, so this
+        is also where the tamper-evident audit chain is written."""
         rec = self._actions.get(name)
         if rec is None or not rec.valid:
+            _audit(name, parameters, "unavailable",
+                   rec.error if rec else "unknown action")
             return f"Action '{name}' is not available."
         try:
-            return _call_handler(rec.handler, parameters, ctx or {}) or "Done."
+            out = _call_handler(rec.handler, parameters, ctx or {}) or "Done."
         except Exception as e:
             self._logger(f"Action '{name}' crashed during run(): {e}")
             traceback.print_exc()
+            _audit(name, parameters, "error", str(e))
             return f"Tool '{name}' failed: {e}"
+        text = out if isinstance(out, str) else str(out)
+        failed = (("failed:" in text[:70]) or
+                  text.startswith("Action '") or text.startswith("Tool '") or
+                  "not available" in text[:80])
+        _audit(name, parameters, "failed" if failed else "ok",
+               text[:200] if failed else "")
+        return out
+
+
+def _audit(name: str, parameters: dict, status: str, detail: str = "") -> None:
+    """Never raises — the audit trail cannot break the call it records."""
+    try:
+        from core import audit_chain
+        audit_chain.record(name, parameters, status=status, detail=detail)
+    except Exception:
+        pass
 
 
 def _call_handler(fn: Callable, parameters: dict, ctx: dict) -> str:

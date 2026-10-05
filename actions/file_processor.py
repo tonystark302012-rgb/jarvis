@@ -16,14 +16,12 @@ Supported types:
   pptx    → summarize, extract_text, to_pdf
 """
 
-import os
 import re
 import json
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from datetime import datetime
 
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
@@ -79,6 +77,32 @@ def _file_size_str(path: Path) -> str:
     if size < 1024**2:     return f"{size/1024:.1f} KB"
     if size < 1024**3:     return f"{size/1024**2:.1f} MB"
     return f"{size/1024**3:.1f} GB"
+
+# ── privacy (core/privacy.py): which operations never leave the machine ──────
+# The tool as a whole is in CLOUD_TOOLS because most branches call Gemini,
+# but these actions are pure local I/O — under privacy mode they keep
+# working while everything else refuses. Keys are _detect_type() outputs;
+# the value is the set of action names handled without any model call.
+_LOCAL_ACTIONS: dict[str, set[str]] = {
+    "csv":   {"info", "stats", "convert", "to_csv", "to_excel", "to_json",
+              "filter", "sort"},
+    "excel": {"info", "stats", "convert", "to_csv", "to_excel", "to_json",
+              "filter", "sort"},
+    "text":  {"word_count", "extract_text"},
+    "docx":  {"word_count", "extract_text"},
+    "json":  {"validate", "format", "to_csv"},
+}
+
+
+def _default_action(file_type: str) -> str:
+    """What each type does when action is omitted — mirrors the branch
+    defaults (_process_data → analyze, _process_text_doc → summarize)."""
+    if file_type in ("csv", "excel", "json"):
+        return "analyze"
+    if file_type in ("text", "docx"):
+        return "summarize"
+    return "analyze"
+
 
 def _output_path(src: Path, suffix: str, new_ext: str = None) -> Path:
     ext  = new_ext or src.suffix
@@ -636,7 +660,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
         end   = params.get("end",   "")
         if not _ffmpeg_available():
             return "ffmpeg not found."
-        out = _output_path(path, f"trim", path.suffix)
+        out = _output_path(path, "trim", path.suffix)
         try:
             cmd = ["ffmpeg", "-i", str(path), "-ss", str(start)]
             if end:
@@ -720,7 +744,8 @@ def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
 
     if action == "list":
         try:
-            import zipfile, tarfile
+            import zipfile
+            import tarfile
             ext = path.suffix.lower()
             if ext == ".zip":
                 with zipfile.ZipFile(path) as z:
@@ -782,6 +807,13 @@ def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
     return f"Unknown PPTX action: '{action}'. Try: summarize, extract_text, analyze"
 
 def file_processor(parameters: dict, player=None, speak=None) -> str:
+    # Privacy gate FIRST: this tool is cloud-bound (CLOUD_TOOLS), but its
+    # genuinely LOCAL operations keep working while the gate is closed —
+    # same contract as region_ocr's tesseract branch. Everything not in
+    # _LOCAL_ACTIONS would reach Gemini, so it refuses honestly.
+    from core import privacy as _privacy
+    blocked = _privacy.gate("file_processor")
+
     file_path_str = parameters.get("file_path", "").strip()
     if not file_path_str:
         return "No file path provided."
@@ -796,6 +828,9 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
     action      = (parameters.get("action") or "").lower().strip()
     instruction = parameters.get("instruction", "")
     params      = {**parameters, "instruction": instruction}
+
+    if blocked and (action or _default_action(file_type)) not in _LOCAL_ACTIONS.get(file_type, set()):
+        return blocked
 
     log_msg = f"[FileProcessor] {file_type.upper()} | {path.name} | action={action or 'auto'}"
     print(log_msg)

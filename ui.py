@@ -1,3 +1,36 @@
+"""
+JARVIS desktop HUD — PyQt6, redesigned (6f-2).
+
+Architecture (top → bottom):
+
+  * theming   — class C holds the JARVIS indigo design tokens (aligned with
+                dashboard/static/css/jarvis.css: #07090f bg, #6366f1 accent,
+                #dde3ed text). apply_ui_accent() re-derives the accent-linked
+                keys from any hue; retheme_all_widgets() live-reskins every
+                stylesheet; install_global_qss() gives every widget the same
+                baseline alignment (buttons, inputs, scrollbars, tables).
+  * canvas    — HudCanvas paints the avatar/waveform/visemes; MetricBar +
+                _SysMetrics keep the system monitor; LogWidget keeps the
+                typed activity log.
+  * shell     — MainWindow = header + LEFT RAIL (chat/display/monitor +
+                workspace sections) + central QStackedWidget (chat page |
+                monitor | spaces | agents | computers | calls | agenda) +
+                right column (log, file drop, composer, interrupt, mute) +
+                footer + floating setup/controls drawers.
+  * workspace — the five dashboard surfaces (Spaces incl. approvals, Agents,
+                Computers, Calls, Agenda) are merged in-process as _DashPanel
+                subclasses talking to THIS machine's dashboard API through
+                _DashApi (thread-pool + signal; bearer token wired by
+                main.py via JarvisUI.set_dashboard_api).
+  * API       — JarvisUI is the public, thread-safe façade main.py uses
+                (write_log / set_state / show_content / callbacks …).
+
+Contracts that MUST survive (tests + main.py):
+  - `self._content_hook = None` in JarvisUI.__init__ and the show_content
+    hook funnel (hook = self._content_hook / hook(title, text) / except).
+  - every JarvisUI member referenced from main.py; MainWindow signal names.
+  - py_compile clean (tests compile every .py).
+"""
 from __future__ import annotations
 
 import json
@@ -27,14 +60,13 @@ else:
 os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.*=false")
 
 from PyQt6.QtCore import (
-    QEasingCurve, QLineF, QMimeData, QObject, QParallelAnimationGroup, QPointF,
-    QPoint, QPropertyAnimation, QRect, QRectF, QSize, QSizeF, Qt, QTimer,
+    QLineF, QPointF,
+    QPoint, QObject, QRectF, QSize, QSizeF, Qt, QTimer,
     QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
-    QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap, QRadialGradient, QShortcut,
+    QKeySequence, QPainter, QPen, QPixmap, QRadialGradient, QShortcut,
 )
 # Video playback for the HUD. Part of PyQt6, so it costs no new dependency —
 # but the multimedia plugins are a separate piece of the Qt install and can be
@@ -50,10 +82,11 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
     print(f"[Video] playback unavailable ({_e}) — the HUD will not show video.")
 
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QPushButton,
+    QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
+    QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 try:
@@ -87,34 +120,38 @@ APP_PROTOCOL = APP_VERSION.split()[-1]
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
-_LEFT_W  = 148
-_RIGHT_W = 340
+_RAIL_W  = 168   # left nav rail (sections)
+_RIGHT_W = 330   # right column: log + file + composer
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 
 class C:
-    BG        = "#00060a"
-    PANEL     = "#010d14"
-    PANEL2    = "#010f18"
-    BORDER    = "#0d3347"
-    BORDER_B  = "#1a5c7a"
-    BORDER_A  = "#0f4060"
-    PRI       = "#00d4ff"
-    PRI_DIM   = "#007a99"
-    PRI_GHO   = "#001f2e"
-    ACC       = "#ff6b00"
-    ACC2      = "#ffcc00"
-    GREEN     = "#00ff88"
-    GREEN_D   = "#00aa55"
-    RED       = "#ff3355"
-    MUTED_C   = "#ff3366"
-    TEXT      = "#8ffcff"
-    TEXT_DIM  = "#3a8a9a"
-    TEXT_MED  = "#5ab8cc"
-    WHITE     = "#d8f8ff"
-    DARK      = "#000d14"
-    BAR_BG    = "#011520"
+    # JARVIS design tokens — value-identical to dashboard/static/css/jarvis.css
+    # (--bg / --panel / --border / --accent / --text / --muted / --green …).
+    # Names stay stable: every widget in this file references C.<KEY>, so the
+    # whole HUD follows the dashboard theme (and any accent the user picks).
+    BG        = "#07090f"   # --bg      window background
+    PANEL     = "#0e1220"   # card / panel surface
+    PANEL2    = "#131829"   # raised surface
+    BORDER    = "#1f2433"   # --border  hairlines
+    BORDER_B  = "#333a52"   # emphasised border
+    BORDER_A  = "#2a3047"   # ambient border (chips)
+    PRI       = "#6366f1"   # --accent  indigo
+    PRI_DIM   = "#4f46e5"   # pressed / dimmed accent
+    PRI_GHO   = "#171c38"   # accent wash on dark
+    ACC       = "#f59e0b"   # --amber   status (fixed, never hue-shifted)
+    ACC2      = "#fbbf24"
+    GREEN     = "#22c55e"   # --green   success (fixed)
+    GREEN_D   = "#16a34a"
+    RED       = "#f87171"   # --red     danger (fixed)
+    MUTED_C   = "#fb7185"
+    TEXT      = "#dde3ed"   # --text    primary text
+    TEXT_DIM  = "#5e6a7e"   # --muted   secondary text
+    TEXT_MED  = "#94a3b8"
+    WHITE     = "#eef2ff"
+    DARK      = "#0a0d17"   # --bg-2    chrome (header/rail/footer)
+    BAR_BG    = "#141a2e"   # metric bar track
 
 
 # Keys tied to the accent colour — status colours (ACC, GREEN, RED…) stay fixed
@@ -202,6 +239,346 @@ def retheme_all_widgets(old: dict[str, str], new: dict[str, str]) -> None:
 
 def qcol(h: str, a: int = 255) -> QColor:
     c = QColor(h); c.setAlpha(a); return c
+
+
+# ── VECTOR ICON SYSTEM ────────────────────────────────────────────────────────
+# No emoji anywhere in the chrome: every symbol is an inline Lucide-style SVG
+# (ISC-licensed path shapes, hand-inlined below) rendered through QtSvg into a
+# cached QPixmap. Icons inherit a colour at call time, so re-theming repaints
+# them like any other widget — and a system without an emoji font shows the
+# exact same UI as one with it.
+try:
+    from PyQt6.QtSvg import QSvgRenderer as _QSvgRenderer
+except Exception:                                   # noqa: BLE001
+    _QSvgRenderer = None                            # pragma: no cover
+
+_ICONS: dict[str, str] = {
+    # navigation / sections
+    "chat":      '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    "monitor":   '<rect x="2" y="3" width="20" height="14" rx="2"/>'
+                 '<line x1="8" y1="21" x2="16" y2="21"/>'
+                 '<line x1="12" y1="17" x2="12" y2="21"/>',
+    "layout":    '<rect x="3" y="3" width="18" height="18" rx="2"/>'
+                 '<line x1="3" y1="9" x2="21" y2="9"/>'
+                 '<line x1="9" y1="21" x2="9" y2="9"/>',
+    "folder":    '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+    "bot":       '<rect x="3" y="11" width="18" height="10" rx="2"/>'
+                 '<circle cx="12" cy="5" r="2"/><path d="M12 7v4"/>'
+                 '<line x1="8" y1="16" x2="8.01" y2="16"/>'
+                 '<line x1="16" y1="16" x2="16.01" y2="16"/>',
+    "server":    '<rect x="2" y="2" width="20" height="8" rx="2"/>'
+                 '<rect x="2" y="14" width="20" height="8" rx="2"/>'
+                 '<line x1="6" y1="6" x2="6.01" y2="6"/>'
+                 '<line x1="6" y1="18" x2="6.01" y2="18"/>',
+    "phone":     '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 '
+                 '19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3'
+                 'a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09'
+                 ' 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0'
+                 ' 2.81.7A2 2 0 0 1 22 16.92z"/>',
+    "checks":    '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/>'
+                 '<line x1="8" y1="18" x2="21" y2="18"/>'
+                 '<polyline points="3 6 4 7 6 5"/><polyline points="3 12 4 13 6 11"/>'
+                 '<polyline points="3 18 4 19 6 17"/>',
+    "database":  '<ellipse cx="12" cy="5" rx="9" ry="3"/>'
+                 '<path d="M3 5v14a9 3 0 0 0 18 0V5"/>'
+                 '<path d="M3 12a9 3 0 0 0 18 0"/>',
+    "zap":       '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    "search":    '<circle cx="11" cy="11" r="8"/>'
+                 '<line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+    "globe":     '<circle cx="12" cy="12" r="10"/>'
+                 '<line x1="2" y1="12" x2="22" y2="12"/>'
+                 '<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 '
+                 '15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+    "cube":      '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8'
+                 'a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>'
+                 '<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>'
+                 '<line x1="12" y1="22.08" x2="12" y2="12"/>',
+    "activity":  '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+    # chrome / actions
+    "settings":  '<circle cx="12" cy="12" r="3"/>'
+                 '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83'
+                 'l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0'
+                 'v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83'
+                 '-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0'
+                 '-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83'
+                 '-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0'
+                 'v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83'
+                 ' 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0'
+                 ' 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+    "sliders":   '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>'
+                 '<line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>'
+                 '<line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>'
+                 '<line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/>'
+                 '<line x1="17" y1="16" x2="23" y2="16"/>',
+    "mic":       '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>'
+                 '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>'
+                 '<line x1="12" y1="19" x2="12" y2="23"/>'
+                 '<line x1="8" y1="23" x2="16" y2="23"/>',
+    "mic-off":   '<line x1="1" y1="1" x2="23" y2="23"/>'
+                 '<path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>'
+                 '<path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/>'
+                 '<line x1="12" y1="19" x2="12" y2="23"/>'
+                 '<line x1="8" y1="23" x2="16" y2="23"/>',
+    "volume-x":  '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>'
+                 '<line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>',
+    "volume":    '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>'
+                 '<path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>',
+    "send":      '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>',
+    "plus":      '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    "x":         '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+    "check":     '<polyline points="20 6 9 17 4 12"/>',
+    "refresh":   '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
+    "play":      '<polygon points="5 3 19 12 5 21 5 3"/>',
+    "stop":      '<rect x="6" y="6" width="12" height="12" rx="1"/>',
+    "upload":    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+                 '<polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
+    "trash":     '<polyline points="3 6 5 6 21 6"/>'
+                 '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4'
+                 'a2 2 0 0 1 2 2v2"/>',
+    "edit":      '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>'
+                 '<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',
+    "terminal":  '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
+    "power":     '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>',
+    "alert":     '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71'
+                 ' 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/>'
+                 '<line x1="12" y1="17" x2="12.01" y2="17"/>',
+    "info":      '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/>'
+                 '<line x1="12" y1="8" x2="12.01" y2="8"/>',
+    "clock":     '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    "calendar":  '<rect x="3" y="4" width="18" height="18" rx="2"/>'
+                 '<line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/>'
+                 '<line x1="3" y1="10" x2="21" y2="10"/>',
+    "key":       '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777'
+                 '-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3"/>',
+    "eye":       '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+    "copy":      '<rect x="9" y="9" width="13" height="13" rx="2"/>'
+                 '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+    "bell":      '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>'
+                 '<path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
+    "grid":      '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>'
+                 '<rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>',
+    "cpu":       '<rect x="4" y="4" width="16" height="16" rx="2"/>'
+                 '<rect x="9" y="9" width="6" height="6"/>'
+                 '<line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/>'
+                 '<line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/>'
+                 '<line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/>'
+                 '<line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>',
+    "file":      '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>'
+                 '<polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/>'
+                 '<line x1="16" y1="17" x2="8" y2="17"/>',
+    "save":      '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>'
+                 '<polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>',
+    "layers":    '<polygon points="12 2 2 7 12 12 22 7 12 2"/>'
+                 '<polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+    "external":  '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>'
+                 '<polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
+    "chevron":   '<polyline points="9 18 15 12 9 6"/>',
+    "power2":    '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>',
+    "clipboard": '<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>'
+                 '<rect x="8" y="2" width="8" height="4" rx="1"/>',
+    "sparkles":  '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/>'
+                 '<path d="M19 15l.9 2.4L22 18l-2.1.6L19 21l-.9-2.4L16 18l2.1-.6L19 15z"/>',
+    "inbox":     '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>'
+                 '<path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24'
+                 'a2 2 0 0 0-1.79 1.11z"/>',
+    "wrench":    '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91'
+                 ' 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+}
+_ICON_CACHE: dict[tuple, QPixmap] = {}
+
+
+def icon_pm(name: str, color: str | None = None, size: int = 16) -> QPixmap:
+    """Render a named icon to a cached pixmap, tinted `color`."""
+    key = (name, color or C.PRI, int(size))
+    hit = _ICON_CACHE.get(key)
+    if hit is not None:
+        return hit
+    inner = _ICONS.get(name) or _ICONS.get("grid")
+    color = color or C.PRI
+    px = QPixmap(int(size), int(size))
+    px.fill(Qt.GlobalColor.transparent)
+    if _QSvgRenderer is not None:
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+               f'width="{size}" height="{size}" fill="none" stroke="{color}" '
+               f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+               f"{inner}</svg>")
+        try:
+            r = _QSvgRenderer(svg.encode("utf-8"))
+            if r.isValid():
+                from PyQt6.QtGui import QPainter as _QPainter
+                p = _QPainter(px)
+                r.render(p)
+                p.end()
+        except Exception:                             # noqa: BLE001
+            pass
+    _ICON_CACHE[key] = px
+    return px
+
+
+def icon_name_for(name: str) -> str:
+    return name if name in _ICONS else "grid"
+
+
+def set_icon(btn, name: str, color: str | None = None, size: int = 15) -> None:
+    """Attach a vector icon to a QPushButton (left of the label)."""
+    try:
+        from PyQt6.QtGui import QIcon
+        btn.setIcon(QIcon(icon_pm(name, color, size)))
+        btn.setIconSize(QSize(size, size))
+    except Exception:                                 # noqa: BLE001
+        pass
+
+
+def _icon_label(name: str, color: str | None = None, size: int = 15) -> QLabel:
+    l = QLabel()
+    l.setPixmap(icon_pm(name, color, size))
+    l.setFixedWidth(size + 2)
+    l.setStyleSheet("background: transparent; border: none;")
+    return l
+
+
+def install_global_qss(app: QApplication) -> None:
+    """
+    Design system v2 — one stylesheet, the whole language:
+    cards with hairline tops, gradient primaries, ghost/danger/icon buttons,
+    chips, rail rows, toasts, slim inputs with focus glow. Per-widget styles
+    that carry C.* colours sit on top; everything else inherits here, so no
+    panel drifts out of alignment.
+    """
+    # Sans first (Segoe UI on Windows/mac, DejaVu elsewhere) — QFont does
+    # proper per-glyph fallback, so symbols never turn into boxes.
+    app.setFont(QFont("Segoe UI", 10))
+    app.setStyleSheet(f"""                     
+    * {{ outline: none; }}
+    QWidget {{ background: transparent; color: {C.TEXT}; font-size: 12px; }}
+    QLabel {{ background: transparent; }}
+
+    /* ── buttons ─────────────────────────────────────────── */
+    QPushButton {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 {C.PANEL2}, stop:1 {C.PANEL});
+        color: {C.TEXT};
+        border: 1px solid {C.BORDER}; border-radius: 8px;
+        padding: 6px 14px; min-height: 18px;
+    }}
+    QPushButton:hover {{ border-color: {C.BORDER_B}; color: {C.WHITE}; }}
+    QPushButton:pressed {{ background: {C.PRI_GHO}; border-color: {C.PRI_DIM}; }}
+    QPushButton:disabled {{ color: {C.TEXT_DIM}; border-color: {C.BORDER};
+                            background: {C.PANEL}; }}
+    QPushButton#primary {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 {C.PRI}, stop:1 {C.PRI_DIM});
+        color: #ffffff; border: 1px solid {C.PRI}; font-weight: 600;
+    }}
+    QPushButton#primary:hover {{ border-color: {C.WHITE}; }}
+    QPushButton#primary:pressed {{ background: {C.PRI_DIM}; }}
+    QPushButton#danger {{
+        background: transparent; color: {C.RED};
+        border: 1px solid {C.RED};
+    }}
+    QPushButton#danger:hover {{ background: #f8717118; border-color: {C.RED}; }}
+    QPushButton#ghost {{
+        background: transparent; color: {C.TEXT_MED};
+        border: 1px solid {C.BORDER};
+    }}
+    QPushButton#ghost:hover {{ color: {C.WHITE}; border-color: {C.PRI_DIM}; }}
+    QPushButton#iconBtn {{
+        background: transparent; color: {C.TEXT_DIM};
+        border: 1px solid {C.BORDER}; border-radius: 8px; padding: 4px;
+    }}
+    QPushButton#iconBtn:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM};
+                                 background: {C.PRI_GHO}; }}
+    QPushButton#iconBtn:checked {{ color: {C.PRI}; border-color: {C.PRI};
+                                   background: {C.PRI_GHO}; }}
+    QPushButton#rail {{
+        background: transparent; color: {C.TEXT_DIM};
+        border: 1px solid transparent; border-radius: 9px;
+        text-align: left; padding: 0 10px; font-size: 11px; font-weight: 600;
+    }}
+    QPushButton#rail:hover {{ background: {C.PANEL}; color: {C.TEXT}; }}
+    QPushButton#rail:checked {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+            stop:0 {C.PRI_GHO}, stop:1 transparent);
+        color: {C.WHITE}; border: 1px solid {C.PRI_DIM};
+    }}
+    QPushButton#chip {{
+        background: {C.PANEL}; color: {C.TEXT_MED};
+        border: 1px solid {C.BORDER}; border-radius: 12px;
+        padding: 4px 12px; font-size: 11px;
+    }}
+    QPushButton#chip:hover {{ color: {C.WHITE}; border-color: {C.BORDER_B}; }}
+    QPushButton#chip:checked {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 {C.PRI}, stop:1 {C.PRI_DIM});
+        color: #ffffff; border-color: {C.PRI}; font-weight: 600;
+    }}
+
+    /* ── inputs ──────────────────────────────────────────── */
+    QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {{
+        background: {C.BG}; color: {C.TEXT};
+        border: 1px solid {C.BORDER}; border-radius: 8px;
+        padding: 6px 10px; selection-background-color: {C.PRI_GHO};
+    }}
+    QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
+        border-color: {C.PRI};
+    }}
+    QComboBox::drop-down {{ border: none; width: 20px; }}
+    QComboBox QAbstractItemView {{
+        background: {C.PANEL}; color: {C.TEXT};
+        border: 1px solid {C.BORDER_A}; selection-background-color: {C.PRI_GHO};
+    }}
+
+    /* ── surfaces ────────────────────────────────────────── */
+    QScrollArea {{ border: none; }}
+    QScrollBar:vertical {{ background: transparent; width: 10px; border: none; }}
+    QScrollBar::handle:vertical {{
+        background: {C.BORDER_B}; border-radius: 5px; min-height: 22px;
+    }}
+    QScrollBar::handle:vertical:hover {{ background: {C.PRI_DIM}; }}
+    QScrollBar:horizontal {{ background: transparent; height: 10px; border: none; }}
+    QScrollBar::handle:horizontal {{
+        background: {C.BORDER_B}; border-radius: 5px; min-width: 22px;
+    }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+    QToolTip {{
+        background: {C.PANEL2}; color: {C.TEXT};
+        border: 1px solid {C.PRI}; border-radius: 6px; padding: 5px 8px;
+    }}
+    QHeaderView::section {{
+        background: {C.DARK}; color: {C.TEXT_MED};
+        border: none; border-bottom: 1px solid {C.BORDER_B};
+        padding: 6px 9px; font-size: 10px; font-weight: bold;
+    }}
+    QTableWidget, QTableView {{
+        background: {C.PANEL}; color: {C.TEXT};
+        border: 1px solid {C.BORDER}; border-radius: 8px; gridline-color: {C.BORDER};
+    }}
+    QSplitter::handle:horizontal {{ background: {C.BORDER}; width: 7px;
+                                    border-radius: 3px; }}
+    QSplitter::handle:vertical {{ background: {C.BORDER}; height: 7px;
+                                  border-radius: 3px; }}
+    QSplitter::handle:horizontal:hover {{ background: {C.PRI_DIM}; }}
+    QSplitter::handle:vertical:hover {{ background: {C.PRI_DIM}; }}
+    """)
+
+
+def _load_display_panel(parent=None):
+    """
+    Load DisplayPanel from ui/display_panel.py BY PATH.
+
+    `from ui.display_panel import …` can never work here: `ui` resolves to
+    THIS module (ui.py), which is not a package, so the submodule import
+    always raised `'ui' is not a package` and the display screen silently
+    never opened. Load the file directly instead — same widget, works.
+    """
+    import importlib.util
+    path = BASE_DIR / "ui" / "display_panel.py"
+    spec = importlib.util.spec_from_file_location("_jarvis_display_panel", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"display panel not found at {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.DisplayPanel(parent)
 
 
 # ── Windows GPU via NVML DLL (no subprocess, no console window) ──────────────
@@ -1099,12 +1476,12 @@ class LogWidget(QTextEdit):
             QTimer.singleShot(20, self._next)
 
 _FILE_ICONS = {
-    "image":   ("🖼", "#00d4ff"), "video":   ("🎬", "#ff6b00"),
-    "audio":   ("🎵", "#cc44ff"), "pdf":     ("📄", "#ff4444"),
-    "word":    ("📝", "#4488ff"), "excel":   ("📊", "#44bb44"),
-    "code":    ("💻", "#ffcc00"), "archive": ("📦", "#ff8844"),
-    "pptx":    ("📊", "#ff6622"), "text":    ("📃", "#aaaaaa"),
-    "data":    ("🔧", "#88ddff"), "unknown": ("📎", "#888888"),
+    "image":   ("IMG", "#00d4ff"), "video":   ("VID", "#ff6b00"),
+    "audio":   ("AUD", "#cc44ff"), "pdf":     ("PDF", "#ff4444"),
+    "word":    ("DOC", "#4488ff"), "excel":   ("XLS", "#44bb44"),
+    "code":    ("COD", "#ffcc00"), "archive": ("ZIP", "#ff8844"),
+    "pptx":    ("PPT", "#ff6622"), "text":    ("TXT", "#aaaaaa"),
+    "data":    ("DAT", "#88ddff"), "unknown": ("BIN", "#888888"),
 }
 _EXT_TO_CAT = {
     **dict.fromkeys(["jpg","jpeg","png","gif","webp","bmp","tiff","svg","ico"], "image"),
@@ -1269,7 +1646,7 @@ class _DropCanvas(QWidget):
                    "Images · Video · Audio · PDF · Docs · Code · Data")
 
     def _paint_drag_over(self, p, W, H):
-        cx, cy = W / 2, H / 2
+        cy = H / 2
         p.setFont(QFont("Courier New", 20))
         p.setPen(QPen(qcol(C.PRI), 1))
         p.drawText(QRectF(0, cy - 24, W, 32), Qt.AlignmentFlag.AlignCenter, "⬇")
@@ -1459,7 +1836,7 @@ class SetupOverlay(QWidget):
 
         os_row = QHBoxLayout(); os_row.setSpacing(6)
         self._os_btns: dict[str, QPushButton] = {}
-        for key, label in [("windows","⊞  Windows"),("mac","  macOS"),("linux","🐧  Linux")]:
+        for key, label in [("windows","⊞  Windows"),("mac","macOS"),("linux","Linux")]:
             btn = QPushButton(label)
             btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
             btn.setFixedHeight(32)
@@ -1645,7 +2022,7 @@ class CustomizeOverlay(QWidget):
                f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
                f"QLineEdit:focus {{ border: 1px solid {C.PRI}; }}")
 
-        lay.addWidget(_lbl("⚙  CUSTOMISE ASSISTANT", 12, True))
+        lay.addWidget(_lbl("CUSTOMISE ASSISTANT", 12, True))
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         lay.addWidget(sep)
@@ -1852,7 +2229,7 @@ class PluginManagerOverlay(QWidget):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(6)
 
-        hdr = QLabel("🧩  PLUGIN MANAGER")
+        hdr = QLabel("PLUGIN MANAGER")
         hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         lay.addWidget(hdr)
@@ -1993,7 +2370,7 @@ class ConfirmBanner(_HudOverlay):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(8)
 
-        hdr = QLabel("⚠  CONFIRM")
+        hdr = QLabel("CONFIRM")
         hdr.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.ACC}; background: transparent;")
         lay.addWidget(hdr)
@@ -2044,6 +2421,75 @@ class ConfirmBanner(_HudOverlay):
         no.setFocus()
 
 
+class _LensOverlay(_HudOverlay):
+    """Floating translate-lens panel: up to 8 original → translated pairs
+    from actions.translate_lens, auto-dismissing."""
+
+    _OW = 460
+
+    def __init__(self, pairs, src: str, dst: str, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            _LensOverlay {{
+                background: rgba(0, 6, 10, 244);
+                border: 1px solid {C.PRI};
+                border-radius: 6px;
+            }}
+        """)
+        self.setFixedWidth(self._OW)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 12)
+        lay.setSpacing(6)
+
+        hdr = QHBoxLayout()
+        pair = f"{(src or 'auto').upper()} → {(dst or 'default').upper()}"
+        title = QLabel(f"◈  LENS  {pair}")
+        title.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(16, 16)
+        close_btn.setFont(QFont("Courier New", 8))
+        close_btn.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.hide)
+        hdr.addWidget(close_btn)
+        lay.addLayout(hdr)
+
+        for orig, trans in list(pairs)[:8]:
+            o = QLabel(str(orig))
+            o.setWordWrap(True)
+            o.setFont(QFont("Courier New", 8))
+            o.setStyleSheet(
+                f"color: {C.TEXT_DIM}; background: transparent;")
+            lay.addWidget(o)
+            t = QLabel(str(trans) if trans else "(untranslated)")
+            t.setWordWrap(True)
+            t.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+            t.setStyleSheet(
+                f"color: {C.WHITE}; background: transparent;")
+            lay.addWidget(t)
+            sep = QLabel("·")
+            sep.setStyleSheet(f"color: {C.BORDER}; background: transparent;")
+            lay.addWidget(sep)
+        if lay.count():
+            # drop the trailing separator
+            sep_item = lay.takeAt(lay.count() - 1)
+            w = sep_item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+        self._timer.start(14_000)
+        self.hide()
+
+
 class AudioDeviceOverlay(_HudOverlay):
     """Choose which microphone JARVIS listens to and which speakers it uses.
 
@@ -2074,7 +2520,7 @@ class AudioDeviceOverlay(_HudOverlay):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(6)
 
-        hdr = QLabel("🎧  AUDIO DEVICES")
+        hdr = QLabel("AUDIO DEVICES")
         hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         lay.addWidget(hdr)
@@ -2268,7 +2714,7 @@ class MemoryOverlay(_HudOverlay):
 
         from memory.memory_manager import all_entries_for_ui
 
-        hdr = QLabel("🧠  WHAT JARVIS REMEMBERS")
+        hdr = QLabel("WHAT JARVIS REMEMBERS")
         hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         self._lay.addWidget(hdr)
@@ -2493,7 +2939,7 @@ class PluginSettingsOverlay(QWidget):
         root.setContentsMargins(22, 16, 22, 16)
         root.setSpacing(8)
 
-        root.addWidget(self._lbl("⚙  PLUGIN SETTINGS", 12, True))
+        root.addWidget(self._lbl("PLUGIN SETTINGS", 12, True))
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         root.addWidget(sep)
@@ -2939,9 +3385,2179 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# DASHBOARD WORKSPACE — Spaces / Agents / Computers / Calls / Agenda merged
+# into the HUD. One server, one origin: these panels talk to THIS machine's
+# JARVIS dashboard (dashboard/server.py) over loopback HTTP with a bearer
+# token that main.py wires in (JarvisUI.set_dashboard_api). All requests run
+# on a thread pool; results come back through Qt signals — the GUI thread is
+# never blocked, and a dead dashboard shows an honest offline message.
+# ═══════════════════════════════════════════════════════════════════════════
+
+import urllib.error                                                            # noqa: E402
+import urllib.request                                                          # noqa: E402
+from concurrent.futures import ThreadPoolExecutor                              # noqa: E402
+
+
+class _DashApi(QObject):
+    """Loopback JSON client for the JARVIS dashboard API (thread-safe)."""
+    done = pyqtSignal(str, object)    # (request key, payload)  — payload may be dict/list
+    fail = pyqtSignal(str, str)       # (request key, message)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.base: str = ""
+        self.token: str = ""
+        self._ex = ThreadPoolExecutor(max_workers=6, thread_name_prefix="hud-dash")
+
+    def configure(self, url: str, token: str) -> None:
+        self.base = (url or "").rstrip("/")
+        self.token = token or ""
+
+    def configured(self) -> bool:
+        return bool(self.base and self.token)
+
+    # ── request helpers ──────────────────────────────────────────────────────
+    def get(self, key: str, path: str) -> None:
+        self._submit(key, "GET", path, None)
+
+    def get_raw(self, key: str, path: str) -> None:
+        """Fetch a binary payload (screenshot PNG) — payload arrives as bytes."""
+        self._submit(key, "GETRAW", path, None)
+
+    def post(self, key: str, path: str, payload: dict) -> None:
+        self._submit(key, "POST", path, payload)
+
+    def patch(self, key: str, path: str, payload: dict) -> None:
+        self._submit(key, "PATCH", path, payload)
+
+    def put(self, key: str, path: str, payload: dict) -> None:
+        self._submit(key, "PUT", path, payload)
+
+    def delete(self, key: str, path: str) -> None:
+        self._submit(key, "DELETE", path, None)
+
+    def _submit(self, key: str, method: str, path: str, payload) -> None:
+        if not self.configured():
+            self.fail.emit(key, "dashboard not wired — start JARVIS normally "
+                                "(token is attached at boot)")
+            return
+        self._ex.submit(self._run, key, method, path, payload)
+
+    def _ssl_ctx(self):
+        """Loopback HTTPS uses the dashboard's self-signed certificate —
+        verification is meaningless for 127.0.0.1 and would break every
+        panel on a fresh machine. The bearer token still authenticates."""
+        if self.base.startswith("https://"):
+            import ssl
+            return ssl._create_unverified_context()
+        return None
+
+    def _run(self, key: str, method: str, path: str, payload) -> None:
+        try:
+            data = None if payload is None else json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                self.base + path, data=data, method=method,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                })
+            with urllib.request.urlopen(
+                    req, timeout=25, context=self._ssl_ctx()) as resp:
+                blob = resp.read()
+            if method == "GETRAW":
+                self.done.emit(key, blob)
+                return
+            body = blob.decode("utf-8", errors="replace")
+            self.done.emit(key, json.loads(body) if body else None)
+        except urllib.error.HTTPError as e:
+            msg = f"HTTP {e.code}"
+            try:
+                detail = json.loads(e.read().decode("utf-8", errors="replace"))
+                msg = str(detail.get("error") or detail.get("detail") or msg)
+            except Exception:
+                pass
+            self.fail.emit(key, msg)
+        except Exception as e:                            # noqa: BLE001
+            self.fail.emit(key, f"{type(e).__name__}: {e}")
+
+
+def _fmt_when(ts) -> str:
+    try:
+        return time.strftime("%d %b %H:%M", time.localtime(float(ts)))
+    except Exception:
+        return "--"
+
+
+_ICON_TITLES = {
+    "spaces": "folder", "agents": "bot", "computers": "server",
+    "calls": "phone", "agenda": "checks", "memory": "database",
+    "skills": "zap", "studio": "layout", "display": "layout",
+    "scan": "search", "3d": "cube", "web": "globe",
+    "system monitor": "activity",
+}
+
+
+class _DashPanel(QWidget):
+    """Shared chrome for the workspace sections."""
+    SEC = "x"                      # rail key; request keys are f"{SEC}:…"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self.mw = mw                # MainWindow: dash api, log, name
+        self.api: _DashApi = mw._dash_api
+        self.api.done.connect(self._on_done)
+        self.api.fail.connect(self._on_fail)
+        self._root = QVBoxLayout(self)
+        self._root.setContentsMargins(14, 12, 14, 12)
+        self._root.setSpacing(8)
+
+    # ── chrome helpers ───────────────────────────────────────────────────────
+    def _header(self, title: str, sub: str = "", refresh=None) -> None:
+        """Panel header — accent icon + wordmark + subtitle chip + actions."""
+        row = QHBoxLayout(); row.setSpacing(8)
+        row.addWidget(_icon_label(_ICON_TITLES.get(title.lower(), "grid"),
+                                  C.PRI, 15))
+        t = QLabel(title)
+        t.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        t.setStyleSheet(f"color: {C.WHITE}; background: transparent;")
+        row.addWidget(t)
+        if sub:
+            s = QLabel(sub)
+            s.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            row.addWidget(s)
+        row.addStretch()
+        if refresh is not None:
+            rb = QPushButton()
+            rb.setObjectName("ghost")
+            rb.setFixedHeight(26)
+            rb.setCursor(Qt.CursorShape.PointingHandCursor)
+            rb.setToolTip("Refresh")
+            set_icon(rb, "refresh", C.TEXT_MED, 13)
+            rb.clicked.connect(refresh)
+            row.addWidget(rb)
+        self._root.addLayout(row)
+
+    def _btn(self, text: str, handler, primary: bool = False,
+             height: int = 26) -> QPushButton:
+        b = QPushButton(text)
+        b.setFixedHeight(height)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        b.setObjectName("primary" if primary else "ghost")
+        if handler is not None:
+            b.clicked.connect(handler)
+        return b
+
+    def _note(self, text: str, error: bool = False) -> None:
+        try:
+            self.mw._log.append_log(
+                f"{'ERR' if error else 'SYS'}: [{self.SEC}] {text}")
+        except Exception:
+            pass
+
+    def _empty(self, text: str) -> QLabel:
+        l = QLabel(text)
+        l.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        l.setWordWrap(True)
+        return l
+
+    # ── override points ──────────────────────────────────────────────────────
+    def refresh(self) -> None:                    # pragma: no cover - abstract
+        pass
+
+    def _on_done(self, key: str, data) -> None:    # pragma: no cover - abstract
+        pass
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if key.startswith(self.SEC + ":"):
+            self._note(msg, error=True)
+
+
+class SpacesPanel(_DashPanel):
+    """Spaces tree + page reader + approval cards (HITL, T3)."""
+    SEC = "spaces"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self._spaces, self._pages, self._space_id = [], [], None
+        self._page_data: dict | None = None
+        self._editing = False
+        self._header("SPACES", "pages · revisions · approvals",
+                     refresh=self.refresh)
+
+        # owner toolbar — create content and edit pages right here, the same
+        # API the web block editor uses (PATCH carries base_rev for safety).
+        tb = QHBoxLayout(); tb.setSpacing(6)
+        ns = self._btn("  NEW SPACE", self._new_space)
+        set_icon(ns, "plus", C.TEXT_MED, 13)
+        tb.addWidget(ns)
+        np_ = self._btn("  NEW PAGE", self._new_page)
+        set_icon(np_, "file", C.TEXT_MED, 13)
+        tb.addWidget(np_)
+        tb.addStretch()
+        self._edit_btn = self._btn("  EDIT", self._toggle_edit, primary=True)
+        set_icon(self._edit_btn, "edit", "#ffffff", 13)
+        self._edit_btn.setEnabled(False)
+        tb.addWidget(self._edit_btn)
+        self._root.addLayout(tb)
+
+        body = QSplitter(Qt.Orientation.Horizontal)
+        # ── left: spaces + pages ─────────────────────────────────────────────
+        left = QWidget(); ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 6, 0); ll.setSpacing(6)
+        self._space_box = QComboBox()
+        self._space_box.currentIndexChanged.connect(self._on_space)
+        ll.addWidget(self._space_box)
+        self._page_list = QScrollArea()
+        self._page_list.setWidgetResizable(True)
+        self._page_box = QWidget()
+        self._page_lay = QVBoxLayout(self._page_box)
+        self._page_lay.setContentsMargins(0, 0, 0, 0); self._page_lay.setSpacing(4)
+        self._page_lay.addStretch()
+        self._page_list.setWidget(self._page_box)
+        ll.addWidget(self._page_list, stretch=1)
+        body.addWidget(left)
+
+        # ── right: viewer + approvals ────────────────────────────────────────
+        right = QWidget(); rl = QVBoxLayout(right)
+        rl.setContentsMargins(6, 0, 0, 0); rl.setSpacing(6)
+        self._page_title = QLabel("Select a page")
+        self._page_title.setStyleSheet(f"color: {C.WHITE}; background: transparent;"
+                                       f"font-weight: bold;")
+        rl.addWidget(self._page_title)
+        self._viewer = QTextEdit()
+        self._viewer.setReadOnly(True)
+        self._viewer.setFont(QFont("Courier New", 9))
+        self._viewer.setPlaceholderText("Page content loads here (markdown source).")
+        rl.addWidget(self._viewer, stretch=3)
+        ap_hdr = QLabel("◈ APPROVALS  (proposals from your Dots)")
+        ap_hdr.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        ap_hdr.setStyleSheet(f"color: {C.ACC}; background: transparent;")
+        rl.addWidget(ap_hdr)
+        self._appr_list = QScrollArea()
+        self._appr_list.setWidgetResizable(True)
+        self._appr_box = QWidget()
+        self._appr_lay = QVBoxLayout(self._appr_box)
+        self._appr_lay.setContentsMargins(0, 0, 0, 0); self._appr_lay.setSpacing(6)
+        self._appr_lay.addWidget(self._empty("No proposals waiting."))
+        self._appr_list.setWidget(self._appr_box)
+        rl.addWidget(self._appr_list, stretch=2)
+        body.addWidget(right)
+        body.setStretchFactor(0, 1); body.setStretchFactor(1, 2)
+        body.setSizes([250, 640])
+        body.setCollapsible(0, False); body.setCollapsible(1, False)
+        self._root.addWidget(body, stretch=1)
+
+    def refresh(self):
+        if not self.api.configured():
+            self._note("dashboard not wired"); return
+        self.api.get(f"{self.SEC}:spaces", "/api/spaces")
+        self.api.get(f"{self.SEC}:pending", "/api/pending?status=pending")
+
+    def _on_space(self, idx: int):
+        if 0 <= idx < len(self._spaces):
+            self._space_id = self._spaces[idx]["id"]
+            self.api.get(f"{self.SEC}:pages",
+                         f"/api/spaces/{self._space_id}/pages")
+
+    def _clear_layout(self, lay) -> None:
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _on_done(self, key: str, data) -> None:
+        if key == f"{self.SEC}:spaces" and isinstance(data, list):
+            self._spaces = data
+            self._space_box.blockSignals(True)
+            self._space_box.clear()
+            for sp in data:
+                self._space_box.addItem(str(sp.get("name") or f"space {sp.get('id')}"))
+            self._space_box.blockSignals(False)
+            if data:
+                self._space_id = data[0]["id"]
+                self.api.get(f"{self.SEC}:pages",
+                             f"/api/spaces/{data[0]['id']}/pages")
+        elif key == f"{self.SEC}:pages" and isinstance(data, list):
+            self._pages = data
+            self._clear_layout(self._page_lay)
+            if not data:
+                self._page_lay.addWidget(self._empty("No pages in this space."))
+            for pg in data:
+                n_src = len(pg.get("sources") or [])
+                title = str(pg.get("title") or "Untitled")
+                if n_src:
+                    title += f"   [research · {n_src} src]"
+                b = self._btn(f"  {title}",
+                              lambda _=False, p=pg: self._open_page(p["id"]))
+                set_icon(b, "file", C.TEXT_MED, 13)
+                b.setToolTip(f"page #{pg['id']} · rev {pg.get('rev')}"
+                             + (f" · {n_src} sources" if n_src else ""))
+                self._page_lay.addWidget(b)
+            self._page_lay.addStretch()
+        elif key == f"{self.SEC}:page":
+            if isinstance(data, dict):
+                self._page_data = data
+                self._editing = False
+                self._viewer.setReadOnly(True)
+                self._edit_btn.setEnabled(True)
+                self._edit_btn.setText("  EDIT")
+                self._page_title.setText(
+                    f"{data.get('title') or 'Untitled'}   (rev {data.get('rev')})")
+                body_md = data.get("content_md") or ""
+                srcs = data.get("sources") or []
+                if srcs:
+                    # Research receipt: every page that came back with sources
+                    # shows them inline so the run is auditable later.
+                    lines = []
+                    for s in srcs:
+                        if isinstance(s, dict):
+                            t = str(s.get("title") or s.get("url") or "").strip()
+                            u = str(s.get("url") or "").strip()
+                            lines.append(f"- [{t}]({u})" if u else f"- {t}")
+                        else:
+                            lines.append(f"- {s}")
+                    body_md += "\n\n---\n**SOURCES**\n\n" + "\n".join(lines)
+                self._viewer.setPlainText(body_md)
+        elif key == f"{self.SEC}:new_space":
+            self.mw.toast("Space created", "ok")
+            self.refresh()
+        elif key == f"{self.SEC}:new_page":
+            self.mw.toast("Page created", "ok")
+            if self._space_id:
+                self.api.get(f"{self.SEC}:pages",
+                             f"/api/spaces/{self._space_id}/pages")
+            if isinstance(data, dict) and data.get("id"):
+                self._open_page(data["id"])
+        elif key == f"{self.SEC}:save":
+            if isinstance(data, dict):
+                self._page_data = data
+                self._editing = False
+                self._viewer.setReadOnly(True)
+                self._edit_btn.setText("  EDIT")
+                self._page_title.setText(
+                    f"{data.get('title') or 'Untitled'}   (rev {data.get('rev')})")
+                self.mw.toast(f"Saved — rev {data.get('rev')}", "ok")
+        elif key == f"{self.SEC}:pending" and isinstance(data, list):
+            self._render_pending(data)
+        elif key.startswith(f"{self.SEC}:approve") or key.startswith(f"{self.SEC}:decline"):
+            self._note("proposal decided ✓")
+            self.mw.toast(
+                "Proposal approved" if ":approve" in key
+                else "Proposal declined", "ok")
+            self.api.get(f"{self.SEC}:pending", "/api/pending?status=pending")
+            self.mw.refresh_pending_badge()
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if key.startswith(self.SEC + ":"):
+            self._note(msg, error=True)
+            if key.endswith(":pending"):
+                self._render_pending_error(msg)
+            if key.endswith(":save"):
+                self.mw.toast(f"Save failed: {msg}", "err")
+                if "conflict" in msg.lower() or "rev" in msg.lower():
+                    if self._page_data and self._page_data.get("id"):
+                        self._open_page(self._page_data["id"])
+            elif key.endswith(":new_space") or key.endswith(":new_page"):
+                self.mw.toast(msg, "err")
+            elif key.endswith(":approve") or key.endswith(":decline"):
+                self.mw.toast(f"Decision failed: {msg}", "err")
+
+    def _new_space(self):
+        name = prompt_jarvis_text(self, "New space", "Space name:")
+        if not name:
+            return
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        self.api.post(f"{self.SEC}:new_space", "/api/spaces", {"name": name})
+
+    def _new_page(self):
+        if not self._space_id:
+            self.mw.toast("Pick a space first", "warn"); return
+        title = prompt_jarvis_text(self, "New page", "Page title:")
+        if not title:
+            return
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        self.api.post(f"{self.SEC}:new_page",
+                      f"/api/spaces/{self._space_id}/pages",
+                      {"title": title, "content_md": f"# {title}\n"})
+
+    def _toggle_edit(self):
+        """First press unlocks the markdown source; second press saves it
+        back with base_rev, so a concurrent Dot edit can never be clobbered."""
+        if self._page_data is None:
+            return
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        if not self._editing:
+            self._editing = True
+            self._viewer.setReadOnly(False)
+            self._viewer.setFocus()
+            self._edit_btn.setText("  SAVE")
+            self.mw.toast("Editing markdown source — press SAVE", "info", 2400)
+            return
+        pid = self._page_data.get("id")
+        self.api.patch(f"{self.SEC}:save:{pid}", f"/api/pages/{int(pid)}",
+                       {"base_rev": self._page_data.get("rev"),
+                        "content_md": self._viewer.toPlainText()})
+        self._viewer.setReadOnly(True)
+        self._editing = False
+        self._edit_btn.setText("  EDIT")
+
+    def _open_page(self, pid: int):
+        self._page_title.setText(f"page #{pid} …")
+        self.api.get(f"{self.SEC}:page", f"/api/pages/{pid}")
+
+    def _render_pending_error(self, msg: str):
+        self._clear_layout(self._appr_lay)
+        self._appr_lay.addWidget(self._empty(f"Approvals unavailable: {msg}"))
+
+    def _render_pending(self, rows: list):
+        self._clear_layout(self._appr_lay)
+        if not rows:
+            self._appr_lay.addWidget(
+                self._empty("No proposals waiting — your Dots' page edits land here."))
+            return
+        for p in rows:
+            card = QWidget()
+            card.setStyleSheet(f"background: {C.PANEL};"
+                               f"border: 1px solid {C.ACC}; border-radius: 8px;")
+            cl = QVBoxLayout(card); cl.setContentsMargins(9, 7, 9, 7); cl.setSpacing(4)
+            kind = p.get("kind") or "?"
+            title = p.get("title") or "(untitled)"
+            t = QLabel(f"{'✎ edit' if kind == 'edit' else '＋ new'}  {title}")
+            t.setStyleSheet(f"color: {C.WHITE}; background: transparent;"
+                            f"font-weight: bold;")
+            t.setWordWrap(True)
+            cl.addWidget(t)
+            meta = QLabel(
+                f"dot #{p.get('dot_id')} · base rev {p.get('base_rev')}"
+                + (f" · page #{p.get('page_id')}" if p.get("page_id") else ""))
+            meta.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            cl.addWidget(meta)
+            preview = (p.get("content_md") or "")[:300]
+            if preview:
+                pv = QLabel(preview)
+                pv.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+                pv.setWordWrap(True)
+                cl.addWidget(pv)
+            row = QHBoxLayout()
+            pid = p.get("id")
+            okb = self._btn("✓ Approve", lambda: self._decide(pid, "approve"), True)
+            nob = self._btn("✗ Decline", lambda: self._decide(pid, "decline"))
+            row.addWidget(okb); row.addWidget(nob); row.addStretch()
+            cl.addLayout(row)
+            self._appr_lay.addWidget(card)
+        self._appr_lay.addStretch()
+
+    def _decide(self, pid, action: str):
+        if pid is None:
+            return
+        self.api.post(f"{self.SEC}:{action}:{pid}",
+                      f"/api/pending/{pid}/{action}", {})
+
+
+class AgentsPanel(_DashPanel):
+    """Dot chat (conversations/dot:<id>) + owner memory, live from the brain."""
+    SEC = "agents"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self._dots, self._dot = [], None
+        self._chat_busy = False
+        self._header("AGENTS", "Dots · live chat · memory", refresh=self.refresh)
+
+        body = QSplitter(Qt.Orientation.Horizontal)
+        left = QWidget(); ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 6, 0); ll.setSpacing(6)
+        # owner CRUD — create, re-role and delete Dots right here (the same
+        # /api/dots endpoints the dashboard uses; permissions stay untouched).
+        ctb = QHBoxLayout(); ctb.setSpacing(4)
+        nd = self._btn("  NEW", self._new_dot, primary=True)
+        nd.setToolTip("Create a Dot")
+        set_icon(nd, "plus", "#ffffff", 12)
+        ctb.addWidget(nd)
+        ed = self._btn("EDIT", self._edit_dot)
+        ed.setToolTip("Change the selected Dot's role")
+        set_icon(ed, "edit", C.TEXT_MED, 12)
+        ctb.addWidget(ed)
+        dd = self._btn("DEL", self._del_dot)
+        dd.setToolTip("Delete the selected Dot")
+        set_icon(dd, "trash", C.RED, 12)
+        ctb.addWidget(dd)
+        ll.addLayout(ctb)
+        self._dot_list = QScrollArea(); self._dot_list.setWidgetResizable(True)
+        self._dot_box = QWidget()
+        self._dot_lay = QVBoxLayout(self._dot_box)
+        self._dot_lay.setContentsMargins(0, 0, 0, 0); self._dot_lay.setSpacing(4)
+        self._dot_lay.addStretch()
+        self._dot_list.setWidget(self._dot_box)
+        ll.addWidget(self._dot_list, stretch=1)
+        body.addWidget(left)
+
+        right = QWidget(); rl = QVBoxLayout(right)
+        rl.setContentsMargins(6, 0, 0, 0); rl.setSpacing(6)
+        self._chat = QTextEdit(); self._chat.setReadOnly(True)
+        self._chat.setFont(QFont("Courier New", 9))
+        self._chat.setPlaceholderText("Pick a Dot on the left, then talk to it.\n"
+                                      "Its replies run through the same brain "
+                                      "as the voice line.")
+        rl.addWidget(self._chat, stretch=3)
+        row = QHBoxLayout(); row.setSpacing(6)
+        self._chat_in = QLineEdit()
+        self._chat_in.setPlaceholderText("Message the Dot…")
+        self._chat_in.returnPressed.connect(self._send)
+        row.addWidget(self._chat_in)
+        send = self._btn("SEND", self._send, True)
+        row.addWidget(send)
+        self._send_btn = send
+        rl.addLayout(row)
+        mem_hdr = QLabel("◈ OWNER MEMORY (injected into every prompt)")
+        mem_hdr.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        mem_hdr.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+        rl.addWidget(mem_hdr)
+        self._mem = QTextEdit(); self._mem.setReadOnly(True)
+        self._mem.setFont(QFont("Courier New", 8))
+        self._mem.setMaximumHeight(110)
+        rl.addWidget(self._mem)
+        body.addWidget(right)
+        body.setStretchFactor(0, 1); body.setStretchFactor(1, 3)
+        body.setSizes([210, 700])
+        body.setCollapsible(0, False); body.setCollapsible(1, False)
+        self._root.addWidget(body, stretch=1)
+
+    def refresh(self):
+        if not self.api.configured():
+            self._note("dashboard not wired"); return
+        self.api.get(f"{self.SEC}:list", "/api/dots")
+        self.api.get(f"{self.SEC}:mem", "/api/memory")
+
+    def _clear_layout(self, lay) -> None:
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _on_done(self, key: str, data) -> None:
+        if key == f"{self.SEC}:list" and isinstance(data, list):
+            self._dots = data
+            self._clear_layout(self._dot_lay)
+            if not data:
+                self._dot_lay.addWidget(
+                    self._empty("No Dots yet — create one in the web dashboard."))
+            for d in data:
+                b = self._btn(f"  {d.get('name')}",
+                              lambda _=False, dd=d: self._pick(dd))
+                set_icon(b, "bot", C.TEXT_MED, 13)
+                b.setToolTip(d.get("role_instructions") or "")
+                self._dot_lay.addWidget(b)
+            self._dot_lay.addStretch()
+            if data and self._dot is None:
+                self._pick(data[0])
+        elif key == f"{self.SEC}:msgs" and isinstance(data, list):
+            self._chat.clear()
+            for m in data[-40:]:
+                who = "You" if m.get("role") == "user" else (
+                    (self._dot or {}).get("name") or "Dot")
+                self._chat.append(
+                    f"<span style='color:{C.TEXT_DIM}'>— {who}</span><br>"
+                    + _html_esc(str(m.get("content") or "")))
+        elif key.startswith(f"{self.SEC}:send"):
+            self._chat_busy = False
+            self._send_btn.setEnabled(True)
+            if isinstance(data, dict):
+                reply = ((data.get("reply") or {}).get("content")
+                         or "(empty reply)")
+                name = (self._dot or {}).get("name") or "Dot"
+                self._chat.append(
+                    f"<span style='color:{C.PRI}'>— {name}</span><br>"
+                    + _html_esc(str(reply)))
+                self._note(f"{name} replied")
+        elif key == f"{self.SEC}:new_dot":
+            self.mw.toast("Dot created", "ok")
+            self.refresh()
+            if isinstance(data, dict) and data.get("id"):
+                self._pick(data)
+        elif key == f"{self.SEC}:edit_dot":
+            self.mw.toast("Dot role updated", "ok")
+            self.refresh()
+        elif key == f"{self.SEC}:del_dot":
+            self.mw.toast("Dot deleted", "ok")
+            self._dot = None
+            self._chat.clear()
+            self.refresh()
+        elif key == f"{self.SEC}:mem" and isinstance(data, list):
+            self._mem.clear()
+            if not data:
+                self._mem.setPlainText("(no memories yet)")
+            for m in data:
+                self._mem.append(f"{m.get('key')} = {m.get('value')}")
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if key.endswith(":new_dot") or key.endswith(":edit_dot") \
+                or key.endswith(":del_dot"):
+            self.mw.toast(msg, "err")
+        if key.startswith(f"{self.SEC}:send"):
+            self._chat_busy = False
+            self._send_btn.setEnabled(True)
+        super()._on_fail(key, msg)
+
+    def _new_dot(self):
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        name = prompt_jarvis_text(self, "New Dot", "Name:")
+        if not name:
+            return
+        role = prompt_jarvis_text(
+            self, "New Dot",
+            f"Role instructions for {name} (how it should behave):", "")
+        if role is None:
+            return
+        self.api.post(f"{self.SEC}:new_dot", "/api/dots",
+                      {"name": name, "role": role})
+
+    def _edit_dot(self):
+        if self._dot is None:
+            self.mw.toast("Pick a Dot first", "warn"); return
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        cur = str(self._dot.get("role_instructions")
+                  or self._dot.get("role") or "")
+        role = prompt_jarvis_text(
+            self, f"Edit {self._dot.get('name')}",
+            "Role instructions:", cur)
+        if role is None:
+            return
+        self.api.patch(f"{self.SEC}:edit_dot:{self._dot['id']}",
+                       f"/api/dots/{int(self._dot['id'])}", {"role": role})
+
+    def _del_dot(self):
+        if self._dot is None:
+            self.mw.toast("Pick a Dot first", "warn"); return
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            ans = QMessageBox.question(
+                self, "Delete Dot",
+                f"Delete  {self._dot.get('name')}  and its chat history?")
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        except Exception:                               # noqa: BLE001
+            return
+        if not self.api.configured():
+            return
+        self.api.delete(f"{self.SEC}:del_dot:{self._dot['id']}",
+                        f"/api/dots/{int(self._dot['id'])}")
+
+    def _pick(self, d: dict):
+        self._dot = d
+        self._chat.clear()
+        self._chat.append(f"<i style='color:{C.TEXT_DIM}'>"
+                          f"chat with { _html_esc(str(d.get('name'))) }…</i>")
+        self.api.get(f"{self.SEC}:msgs",
+                     f"/api/conversations/dot:{d['id']}/messages")
+
+    def _send(self):
+        if self._dot is None or self._chat_busy:
+            return
+        txt = self._chat_in.text().strip()
+        if not txt:
+            return
+        self._chat_in.clear()
+        self._chat.append(f"<span style='color:{C.WHITE}'>— You</span><br>"
+                          + _html_esc(txt))
+        self._chat.append(f"<i style='color:{C.TEXT_DIM}'>"
+                          f"{ _html_esc(str(self._dot.get('name'))) } is "
+                          f"thinking…</i>")
+        self._chat_busy = True
+        self._send_btn.setEnabled(False)
+        self.api.post(f"{self.SEC}:send:{int(time.time() * 1000)}",
+                      f"/api/conversations/dot:{self._dot['id']}/messages",
+                      {"content": txt, "dot_id": self._dot["id"]})
+
+
+class ComputersPanel(_DashPanel):
+    """Trusted PCs: status, argv shell, audit tail (safe agentic control)."""
+    SEC = "computers"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self._comps, self._comp = [], None
+        self._header("COMPUTERS", "jail-scoped files · argv shell · audit",
+                     refresh=self.refresh)
+        top = QHBoxLayout(); top.setSpacing(6)
+        self._pc_box = QComboBox()
+        self._pc_box.currentIndexChanged.connect(self._on_pick)
+        top.addWidget(self._pc_box, stretch=1)
+        self._start_btn = self._btn("▶ START", self._start_pc, True)
+        self._stop_btn = self._btn("⏹ STOP", self._stop_pc)
+        top.addWidget(self._start_btn); top.addWidget(self._stop_btn)
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet(f"color: {C.TEXT_MED};"
+                                       f"background: transparent;")
+        top.addWidget(self._status_lbl)
+        top.addStretch()
+        self._root.addLayout(top)
+
+        body = QSplitter(Qt.Orientation.Horizontal)
+        # left column — four sub-surfaces: shell / files / browser / screen
+        leftw = QWidget(); lwv = QVBoxLayout(leftw)
+        lwv.setContentsMargins(0, 0, 6, 0); lwv.setSpacing(6)
+        modes = QHBoxLayout(); modes.setSpacing(5)
+        self._mode_btns: dict[str, QPushButton] = {}
+        for key, text, ico in (("shell", "SHELL", "terminal"),
+                               ("files", "FILES", "folder"),
+                               ("browser", "BROWSER", "globe"),
+                               ("screen", "SCREEN", "eye")):
+            b = QPushButton(f" {text}")
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setFixedHeight(24)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            set_icon(b, ico, C.TEXT_MED, 12)
+            b.clicked.connect(lambda _=False, k=key: self._set_mode(k))
+            self._mode_btns[key] = b
+            modes.addWidget(b)
+        modes.addStretch()
+        lwv.addLayout(modes)
+        stack = QStackedWidget()
+        self._mode_stack = stack
+        lwv.addWidget(stack, stretch=1)
+
+        # SHELL page
+        shw = QWidget(); shl = QVBoxLayout(shw)
+        shl.setContentsMargins(0, 0, 0, 0); shl.setSpacing(6)
+        shl.addWidget(self._sec_label("SHELL  (argv-only, allowlisted, audited)"))
+        row = QHBoxLayout(); row.setSpacing(6)
+        self._sh_in = QLineEdit()
+        self._sh_in.setPlaceholderText("echo hello   ·   git status   ·   df -h")
+        self._sh_in.returnPressed.connect(self._run_cmd)
+        row.addWidget(self._sh_in)
+        row.addWidget(self._btn("RUN", self._run_cmd, True))
+        shl.addLayout(row)
+        self._sh_out = QTextEdit(); self._sh_out.setReadOnly(True)
+        self._sh_out.setFont(QFont("Courier New", 9))
+        self._sh_out.setPlaceholderText("Command output appears here.")
+        shl.addWidget(self._sh_out, stretch=1)
+        stack.addWidget(shw)
+
+        # FILES page — jail-scoped list / read / write
+        fsw = QWidget(); fsl = QVBoxLayout(fsw)
+        fsl.setContentsMargins(0, 0, 0, 0); fsl.setSpacing(6)
+        fsl.addWidget(self._sec_label(
+            "FILES  (jail-scoped — paths are inside the PC's work dir)"))
+        frow = QHBoxLayout(); frow.setSpacing(5)
+        self._fs_in = QLineEdit()
+        self._fs_in.setPlaceholderText("path:  .   ·   work/   ·   notes.md")
+        self._fs_in.returnPressed.connect(self._files_list)
+        frow.addWidget(self._fs_in, stretch=1)
+        frow.addWidget(self._btn("LIST", self._files_list, True))
+        frow.addWidget(self._btn("READ", self._files_read))
+        frow.addWidget(self._btn("WRITE", self._files_write))
+        fsl.addLayout(frow)
+        self._fs_out = QTextEdit(); self._fs_out.setReadOnly(True)
+        self._fs_out.setFont(QFont("Courier New", 9))
+        self._fs_out.setPlaceholderText(
+            "LIST shows entries — type a path (dirs end with /) and press "
+            "READ to open it, WRITE to save new content into it.")
+        fsl.addWidget(self._fs_out, stretch=1)
+        stack.addWidget(fsw)
+
+        # BROWSER page — safe agentic browsing, one op per press
+        brw = QWidget(); brl = QVBoxLayout(brw)
+        brl.setContentsMargins(0, 0, 0, 0); brl.setSpacing(6)
+        brl.addWidget(self._sec_label(
+            "BROWSER  (http(s) only · every op is audited)"))
+        brow = QHBoxLayout(); brow.setSpacing(5)
+        self._br_in = QLineEdit()
+        self._br_in.setPlaceholderText("https://example.com  —  or text for TYPE")
+        self._br_in.returnPressed.connect(lambda: self._br_op("navigate"))
+        brow.addWidget(self._br_in, stretch=1)
+        for lbl, op in (("GO", "navigate"), ("READ", "read"),
+                        ("SNAP", "snapshot"), ("SHOT", "screenshot")):
+            brow.addWidget(self._btn(
+                lbl, lambda _=False, o=op: self._br_op(o),
+                primary=(op == "navigate")))
+        brl.addLayout(brow)
+        brow2 = QHBoxLayout(); brow2.setSpacing(5)
+        for lbl, op in (("CLICK", "click"), ("TYPE", "type"),
+                        ("KEY", "key"), ("SCROLL", "scroll")):
+            brow2.addWidget(self._btn(
+                lbl, lambda _=False, o=op: self._br_op(o)))
+        brow2.addStretch()
+        brl.addLayout(brow2)
+        self._br_out = QTextEdit(); self._br_out.setReadOnly(True)
+        self._br_out.setFont(QFont("Courier New", 9))
+        self._br_out.setPlaceholderText(
+            "GO opens the URL above · READ returns page text · SNAP a11y "
+            "snapshot · SHOT captures a screenshot (lands on SCREEN) · "
+            "CLICK/TYPE/KEY/SCROLL use the input above as the target.")
+        brl.addWidget(self._br_out, stretch=1)
+        stack.addWidget(brw)
+
+        # SCREEN page — latest screenshot from the PC
+        scr = QWidget(); scrl = QVBoxLayout(scr)
+        scrl.setContentsMargins(0, 0, 0, 0); scrl.setSpacing(6)
+        srow = QHBoxLayout()
+        srow.addWidget(self._sec_label("SCREEN  (live capture from the PC)"))
+        srow.addStretch()
+        srow.addWidget(self._btn("  REFRESH", self._refresh_screen))
+        scrl.addLayout(srow)
+        self._screen_lbl = QLabel("No screenshot yet — take one in BROWSER > SHOT.")
+        self._screen_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._screen_lbl.setWordWrap(True)
+        self._screen_lbl.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: {C.BG};"
+            f" border: 1px dashed {C.BORDER_B}; border-radius: 8px;"
+            f" padding: 12px;")
+        scrl.addWidget(self._screen_lbl, stretch=1)
+        stack.addWidget(scr)
+
+        self._set_mode("shell")
+        body.addWidget(leftw)
+        # audit column
+        au = QWidget(); aul = QVBoxLayout(au)
+        aul.setContentsMargins(6, 0, 0, 0); aul.setSpacing(6)
+        aul.addWidget(self._sec_label("AUDIT TRAIL (last 40)"))
+        self._audit = QTextEdit(); self._audit.setReadOnly(True)
+        self._audit.setFont(QFont("Courier New", 8))
+        aul.addWidget(self._audit, stretch=1)
+        body.addWidget(au)
+        body.setStretchFactor(0, 3); body.setStretchFactor(1, 2)
+        body.setSizes([560, 340])
+        body.setCollapsible(0, False); body.setCollapsible(1, False)
+        self._root.addWidget(body, stretch=1)
+
+    def _sec_label(self, text: str) -> QLabel:
+        l = QLabel(f"◈ {text}")
+        l.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        l.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        return l
+
+    def refresh(self):
+        if not self.api.configured():
+            self._note("dashboard not wired"); return
+        self.api.get(f"{self.SEC}:list", "/api/computers")
+
+    def _on_done(self, key: str, data) -> None:
+        if key == f"{self.SEC}:list" and isinstance(data, list):
+            self._comps = data
+            self._pc_box.blockSignals(True)
+            self._pc_box.clear()
+            for c in data:
+                self._pc_box.addItem(
+                    f"PC #{c.get('id')}  [{c.get('status', '?')}]")
+            self._pc_box.blockSignals(False)
+            if data:
+                self._pc_box.setCurrentIndex(0)
+                self._load(data[0])
+            else:
+                self._comp = None
+                self._status_lbl.setText("no computers attached")
+        elif key.startswith(f"{self.SEC}:detail"):
+            if isinstance(data, dict):
+                self._load(data)
+        elif key.startswith(f"{self.SEC}:exec"):
+            if isinstance(data, dict):
+                out = data.get("stdout") or ""
+                rc = data.get("returncode", 0)
+                self._sh_out.append(out.rstrip() + (f"\n[exit {rc}]" if rc else ""))
+            self.api.get(f"{self.SEC}:audit", self._audit_path())
+        elif key == f"{self.SEC}:audit" and isinstance(data, list):
+            self._audit.clear()
+            for r in data[:40]:
+                mark = "✓" if r.get("ok") else "✗"
+                self._audit.append(
+                    f"{mark} {_fmt_when(r.get('created_at'))} "
+                    f"[{r.get('actor')}] {r.get('action')}: {r.get('detail')}")
+        elif key.startswith(f"{self.SEC}:start") or key.startswith(f"{self.SEC}:stop"):
+            self._note("computer state changed")
+            self.mw.toast("Computer " + ("started" if ":start" in key
+                                         else "stopped"), "ok")
+            self.api.get(f"{self.SEC}:list", "/api/computers")
+        elif key.startswith(f"{self.SEC}:fl:"):
+            self._fs_out.clear()
+            if isinstance(data, dict) and data.get("ok"):
+                self._fs_out.append(f"[{data.get('path', '.')}]" + "\n")
+                for e in data.get("entries") or []:
+                    self._fs_out.append(f"  {e}")
+                if not data.get("entries"):
+                    self._fs_out.append("  (empty directory)")
+                if self._mode_stack.currentIndex() != 1:
+                    self._set_mode("files")
+        elif key.startswith(f"{self.SEC}:fr:"):
+            if isinstance(data, dict) and "content" in data:
+                self._fs_out.setPlainText(
+                    f"── {data.get('path')} "
+                    f"{'(truncated)' if data.get('truncated') else ''} ──\n"
+                    + str(data.get("content") or ""))
+                self._set_mode("files")
+        elif key.startswith(f"{self.SEC}:fw:"):
+            self.mw.toast("File saved", "ok")
+            self.api.post(f"{self.SEC}:fl:{int(time.time()*1000)}",
+                          f"/api/computers/{self._comp['id']}/files/list",
+                          {"path": self._fs_in.text().strip() or "."})
+        elif key.startswith(f"{self.SEC}:br:"):
+            op = key.split(":")[2]
+            if isinstance(data, dict):
+                self._br_out.setPlainText(json.dumps(data, indent=2)[:8000])
+            if op == "screenshot" and isinstance(data, dict) and data.get("path"):
+                self._br_shot = data["path"]
+                self._set_mode("screen")
+                self._fetch_screen(data["path"])
+            elif op in ("read", "snapshot") and isinstance(data, dict):
+                body = data.get("text") or data.get("body") or ""
+                if body:
+                    self._br_out.setPlainText(str(body)[:8000])
+        elif (key.startswith(f"{self.SEC}:img:")
+              or key.startswith(f"{self.SEC}:screenimg:")):
+            if isinstance(data, (bytes, bytearray)) and data:
+                from PyQt6.QtGui import QPixmap as _QPM
+                pm = _QPM()
+                if pm.loadFromData(bytes(data)):
+                    self._show_screen(pm)
+
+    def _audit_path(self) -> str:
+        cid = (self._comp or {}).get("id")
+        return f"/api/computers/{cid}/audit?limit=40" if cid else ""
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        # Shell errors must land IN the terminal box, not only the activity log.
+        if key.startswith(f"{self.SEC}:exec"):
+            self._sh_out.append(f"✗ {msg}")
+        if key.startswith(f"{self.SEC}:fl:") or key.startswith(f"{self.SEC}:fr:"):
+            self._fs_out.append(f"✗ {msg}")
+            self.mw.toast(msg, "err")
+        elif key.startswith(f"{self.SEC}:br:"):
+            self._br_out.append(f"✗ {msg}")
+            self.mw.toast(msg, "err")
+        elif key.startswith(f"{self.SEC}:img:") or key.startswith(f"{self.SEC}:screenimg"):
+            self._screen_lbl.setText(f"Screenshot unavailable: {msg}")
+        super()._on_fail(key, msg)
+
+    # ── sub-surface controllers ─────────────────────────────────────────────
+    def _set_mode(self, mode: str) -> None:
+        idx = {"shell": 0, "files": 1, "browser": 2, "screen": 3}.get(mode, 0)
+        self._mode_stack.setCurrentIndex(idx)
+        for k, b in self._mode_btns.items():
+            b.setChecked(k == mode)
+        if mode == "screen" and getattr(self, "_screen_pixmap", None) is None:
+            self._refresh_screen()
+
+    def _cid(self):
+        return int((self._comp or {}).get("id") or 0)
+
+    def _files_list(self):
+        cid = self._cid()
+        if not cid or not self.api.configured():
+            return
+        self.api.post(f"{self.SEC}:fl:{int(time.time()*1000)}",
+                      f"/api/computers/{cid}/files/list",
+                      {"path": self._fs_in.text().strip() or "."})
+
+    def _files_read(self):
+        cid = self._cid()
+        path = self._fs_in.text().strip()
+        if not cid or not path or not self.api.configured():
+            self.mw.toast("Type a file path first", "warn"); return
+        self.api.post(f"{self.SEC}:fr:{int(time.time()*1000)}",
+                      f"/api/computers/{cid}/files/read", {"path": path})
+
+    def _files_write(self):
+        cid = self._cid()
+        path = self._fs_in.text().strip()
+        if not cid or not path or not self.api.configured():
+            self.mw.toast("Type a file path first", "warn"); return
+        content = prompt_jarvis_text(self, f"Write  {path}",
+                                     "New content (whole file):", "")
+        if content is None:
+            return
+        self.api.post(f"{self.SEC}:fw:{int(time.time()*1000)}",
+                      f"/api/computers/{cid}/files/write",
+                      {"path": path, "content": content})
+
+    def _br_op(self, op: str):
+        cid = self._cid()
+        if not cid or not self.api.configured():
+            return
+        text = self._br_in.text().strip()
+        payload: dict = {"op": op}
+        if op == "navigate":
+            if not text:
+                self.mw.toast("Type a URL first", "warn"); return
+            payload["url"] = text
+        elif op in ("click", "type", "key", "scroll"):
+            if not text:
+                self.mw.toast(
+                    f"TYPE a target/parameter for {op.upper()} first", "warn")
+                return
+            payload["target" if op in ("click", "type") else
+                    ("key" if op == "key" else "direction")] = text
+        self._br_out.append(f"→ {op} …")
+        self.api.post(f"{self.SEC}:br:{op}:{int(time.time()*1000)}",
+                      f"/api/computers/{cid}/browser", payload)
+
+    def _refresh_screen(self):
+        cid = self._cid()
+        if not cid or not self.api.configured():
+            return
+        from urllib.parse import quote
+        path = getattr(self, "_br_shot", "") or ""
+        self.api.get_raw(f"{self.SEC}:screenimg:{int(time.time()*1000)}",
+                         f"/api/computers/{cid}/image?path={quote(path)}")
+
+    def _fetch_screen(self, rel_path: str):
+        cid = self._cid()
+        if not cid or not self.api.configured():
+            return
+        from urllib.parse import quote
+        self.api.get_raw(f"{self.SEC}:img:{int(time.time()*1000)}",
+                         f"/api/computers/{cid}/image?path={quote(rel_path)}")
+
+    def _show_screen(self, pm) -> None:
+        self._screen_pixmap = pm
+        avail = self._screen_lbl.parentWidget()
+        w = max((avail.width() if avail else 600) - 40, 200)
+        h = max(w * pm.height() // max(pm.width(), 1), 120)
+        self._screen_lbl.setPixmap(pm.scaled(
+            w, h, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+        self._screen_lbl.setStyleSheet(
+            f"background: {C.BG}; border: 1px solid {C.BORDER_B};"
+            f" border-radius: 8px; padding: 6px;")
+        self._screen_lbl.setText("")
+
+    def _load(self, c: dict):
+        self._comp = c
+        p = c.get("perms") or {}
+        self._status_lbl.setText(
+            f"{c.get('status', '?')}  ·  shell {'✓' if p.get('shell') else '✗'}"
+            f"  ·  files {'✓' if p.get('files') else '✗'}"
+            f"  ·  browser {'✓' if p.get('browser') else '✗'}"
+            f"  ·  {c.get('root_path', '')}")
+        if self._audit_path():
+            self.api.get(f"{self.SEC}:audit", self._audit_path())
+
+    def _on_pick(self, idx: int):
+        if 0 <= idx < len(self._comps):
+            self._load(self._comps[idx])
+
+    def _run_cmd(self):
+        if self._comp is None:
+            return
+        line = self._sh_in.text().strip()
+        if not line:
+            return
+        self._sh_in.clear()
+        self._sh_out.append(f"$ {line}")
+        import shlex
+        try:
+            argv = shlex.split(line)
+        except ValueError as e:
+            self._sh_out.append(f"✗ cannot parse: {e}")
+            return
+        self.api.post(f"{self.SEC}:exec:{int(time.time() * 1000)}",
+                      f"/api/computers/{self._comp['id']}/exec",
+                      {"argv": argv})
+
+    def _start_pc(self):
+        if self._comp:
+            self.api.post(f"{self.SEC}:start",
+                          f"/api/computers/{self._comp['id']}/start", {})
+
+    def _stop_pc(self):
+        if self._comp:
+            self.api.post(f"{self.SEC}:stop",
+                          f"/api/computers/{self._comp['id']}/stop", {})
+
+
+class CallsPanel(_DashPanel):
+    """Live voice call panel: timer, captions → Dot reply, transcript, end."""
+    SEC = "calls"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self._call = None
+        self._dots = []
+        self._header("CALLS", "live captions · transcript receipt",
+                     refresh=self.refresh)
+        top = QHBoxLayout(); top.setSpacing(6)
+        self._dot_box = QComboBox()
+        top.addWidget(self._dot_box, stretch=1)
+        self._start_btn = self._btn("  START CALL", self._start, True)
+        set_icon(self._start_btn, "phone", "#ffffff", 13)
+        top.addWidget(self._start_btn)
+        self._end_btn = self._btn("⏹ END", self._end)
+        self._end_btn.setEnabled(False)
+        top.addWidget(self._end_btn)
+        self._timer_lbl = QLabel("—")
+        self._timer_lbl.setFont(QFont("Courier New", 16, QFont.Weight.Bold))
+        self._timer_lbl.setStyleSheet(f"color: {C.TEXT_MED};"
+                                      f"background: transparent;")
+        top.addWidget(self._timer_lbl)
+        top.addStretch()
+        self._root.addLayout(top)
+
+        self._caps = QTextEdit(); self._caps.setReadOnly(True)
+        self._caps.setFont(QFont("Courier New", 9))
+        self._caps.setPlaceholderText("Captions stream here once a call is live.")
+        self._root.addWidget(self._caps, stretch=1)
+        row = QHBoxLayout(); row.setSpacing(6)
+        self._cap_in = QLineEdit()
+        self._cap_in.setPlaceholderText("Type a caption (or speak it on the web dashboard)…")
+        self._cap_in.returnPressed.connect(self._send_caption)
+        row.addWidget(self._cap_in)
+        row.addWidget(self._btn("SEND CAPTION", self._send_caption, True))
+        self._root.addLayout(row)
+
+        # Ambient background loop — a standing instruction the call hears
+        # between turns (POST /api/calls/{id}/background).
+        bg = QHBoxLayout(); bg.setSpacing(5)
+        self._bg_in = QLineEdit()
+        self._bg_in.setPlaceholderText(
+            "background instruction, e.g.  play calm music between answers …")
+        bg.addWidget(self._bg_in, stretch=1)
+        bg.addWidget(self._btn("  BACKGROUND", self._set_bg))
+        self._root.addLayout(bg)
+
+        hist_hdr = QLabel("◈ RECENT CALLS")
+        hist_hdr.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        hist_hdr.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        self._root.addWidget(hist_hdr)
+        self._hist = QTextEdit(); self._hist.setReadOnly(True)
+        self._hist.setFont(QFont("Courier New", 8))
+        self._hist.setMaximumHeight(96)
+        self._hist.setPlaceholderText("Call history loads here.")
+        self._root.addWidget(self._hist)
+
+        self._tick = QTimer(self); self._tick.setInterval(1000)
+        self._tick.timeout.connect(self._update_timer)
+        self._started_at: float | None = None
+
+    def refresh(self):
+        if not self.api.configured():
+            self._note("dashboard not wired"); return
+        self.api.get(f"{self.SEC}:dots", "/api/dots")
+        self.api.get(f"{self.SEC}:list", "/api/calls?status=any")
+
+    def _on_done(self, key: str, data) -> None:
+        if key == f"{self.SEC}:dots" and isinstance(data, list):
+            self._dots = data
+            self._dot_box.clear()
+            for d in data:
+                self._dot_box.addItem(str(d.get("name") or d.get("id")))
+        elif key == f"{self.SEC}:list" and isinstance(data, list):
+            live = next((c for c in data if c.get("status") == "active"), None)
+            self._set_call(live)
+            past = [c for c in data if c.get("status") != "active"]
+            self._hist.clear()
+            for c in past[:8]:
+                dur = (c.get("ended_at") or c.get("started_at")) - c.get("started_at")
+                self._hist.append(
+                    f"call #{c.get('id')} · dot #{c.get('dot_id')} · "
+                    f"{int(dur)}s · {_fmt_when(c.get('started_at'))}")
+        elif key.startswith(f"{self.SEC}:bg"):
+            self.mw.toast("Background instruction set", "ok")
+        elif key.startswith(f"{self.SEC}:start"):
+            self._note("call connected")
+            self.mw.toast("Call connected", "ok")
+            self.api.get(f"{self.SEC}:list", "/api/calls?status=any")
+        elif key.startswith(f"{self.SEC}:end"):
+            self._note("call ended")
+            self.mw.toast("Call ended", "info")
+            self._set_call(None)
+            self.api.get(f"{self.SEC}:list", "/api/calls?status=any")
+        elif key.startswith(f"{self.SEC}:caption") and isinstance(data, dict):
+            reply = data.get("dot_caption")
+            if reply:
+                name = ((self._dots or [{}])[0].get("name") if False else "Dot")
+                name = self._dot_name()
+                self._caps.append(
+                    f"<span style='color:{C.PRI}'>— {name}</span><br>"
+                    + _html_esc(str(reply)))
+        elif key.startswith(f"{self.SEC}:transcript") and isinstance(data, list):
+            self._caps.clear()
+            for m in data[-60:]:
+                who = "You" if m.get("speaker") == "user" else "Dot"
+                col = C.WHITE if who == "You" else C.PRI
+                self._caps.append(
+                    f"<span style='color:{col}'>— {who}</span><br>"
+                    + _html_esc(str(m.get("content") or "")))
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if (key.startswith(f"{self.SEC}:start")
+                or key.startswith(f"{self.SEC}:end")
+                or key.startswith(f"{self.SEC}:bg")):
+            self.mw.toast(msg, "err")
+        super()._on_fail(key, msg)
+
+    def _set_bg(self):
+        if self._call is None:
+            self.mw.toast("Start a call first", "warn"); return
+        text = self._bg_in.text().strip()
+        if not text:
+            self.mw.toast("Type a background instruction", "warn"); return
+        if not self.api.configured():
+            return
+        self.api.post(f"{self.SEC}:bg:{int(time.time()*1000)}",
+                      f"/api/calls/{int(self._call['id'])}/background",
+                      {"instruction": text, "every_seconds": 120})
+
+    def _dot_name(self) -> str:
+        idx = self._dot_box.currentIndex()
+        if 0 <= idx < len(self._dots):
+            return str(self._dots[idx].get("name") or "Dot")
+        return "Dot"
+
+    def _set_call(self, c):
+        self._call = c
+        live = c is not None
+        self._end_btn.setEnabled(live)
+        self._start_btn.setEnabled(not live)
+        self._dot_box.setEnabled(not live)
+        if live:
+            self._started_at = float(c.get("started_at") or time.time())
+            self._tick.start()
+            self._update_timer()
+            self.api.get(f"{self.SEC}:transcript",
+                         f"/api/calls/{c['id']}/transcript")
+            self._caps.append("<i style='color:%s'>— call connected —</i>"
+                              % C.GREEN)
+        else:
+            self._tick.stop()
+            self._started_at = None
+            self._timer_lbl.setText("—")
+
+    def _update_timer(self):
+        if self._started_at:
+            s = int(time.time() - self._started_at)
+            self._timer_lbl.setText(
+                f"{s // 60:02d}:{s % 60:02d}" if s < 3600 else
+                f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}")
+            self._timer_lbl.setStyleSheet(
+                f"color: {C.GREEN}; background: transparent;"
+                f"font-weight: bold;")
+
+    def _start(self):
+        idx = self._dot_box.currentIndex()
+        if not (0 <= idx < len(self._dots)):
+            self._note("create a Dot first (Agents)", error=True); return
+        self.api.post(f"{self.SEC}:start", "/api/calls",
+                      {"dot_id": self._dots[idx]["id"]})
+
+    def _end(self):
+        if self._call:
+            self.api.post(f"{self.SEC}:end",
+                          f"/api/calls/{self._call['id']}/end", {})
+
+    def _send_caption(self):
+        if not self._call:
+            return
+        txt = self._cap_in.text().strip()
+        if not txt:
+            return
+        self._cap_in.clear()
+        self._caps.append(f"<span style='color:{C.WHITE}'>— You</span><br>"
+                          + _html_esc(txt))
+        self.api.post(f"{self.SEC}:caption:{int(time.time() * 1000)}",
+                      f"/api/calls/{self._call['id']}/captions",
+                      {"speaker": "user", "text": txt, "generate_reply": True})
+
+
+class AgendaPanel(_DashPanel):
+    """Recurring tasks (scheduler) + learned skills (mine → publish)."""
+    SEC = "agenda"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self._tasks, self._skills, self._dots = [], [], []
+        self._header("AGENDA", "recurring tasks · skill registry",
+                     refresh=self.refresh)
+        body = QSplitter(Qt.Orientation.Horizontal)
+
+        # tasks column
+        tk = QWidget(); tkl = QVBoxLayout(tk)
+        tkl.setContentsMargins(0, 0, 6, 0); tkl.setSpacing(6)
+        tkl.addWidget(self._sec_label("TASKS"))
+        self._task_list = QScrollArea(); self._task_list.setWidgetResizable(True)
+        self._task_box = QWidget()
+        self._task_lay = QVBoxLayout(self._task_box)
+        self._task_lay.setContentsMargins(0, 0, 0, 0); self._task_lay.setSpacing(6)
+        self._task_lay.addWidget(self._empty("Loading…"))
+        self._task_list.setWidget(self._task_box)
+        tkl.addWidget(self._task_list, stretch=1)
+        row = QHBoxLayout(); row.setSpacing(6)
+        row.addWidget(self._btn("＋ NEW TASK", self._new_task, True))
+        _msk = self._btn("  MINE SKILLS", self._mine)
+        set_icon(_msk, "zap", C.TEXT_MED, 13)
+        row.addWidget(_msk)
+        row.addStretch()
+        tkl.addLayout(row)
+        self._runs = QTextEdit(); self._runs.setReadOnly(True)
+        self._runs.setFont(QFont("Courier New", 8))
+        self._runs.setMaximumHeight(120)
+        self._runs.setPlaceholderText("Task runs appear here (expand a task's Runs).")
+        tkl.addWidget(self._runs)
+        body.addWidget(tk)
+
+        # skills column
+        sk = QWidget(); skl = QVBoxLayout(sk)
+        skl.setContentsMargins(6, 0, 0, 0); skl.setSpacing(6)
+        skl.addWidget(self._sec_label("SKILLS (draft → you publish)"))
+        self._skill_list = QScrollArea(); self._skill_list.setWidgetResizable(True)
+        self._skill_box = QWidget()
+        self._skill_lay = QVBoxLayout(self._skill_box)
+        self._skill_lay.setContentsMargins(0, 0, 0, 0); self._skill_lay.setSpacing(6)
+        self._skill_lay.addWidget(self._empty("Loading…"))
+        self._skill_list.setWidget(self._skill_box)
+        skl.addWidget(self._skill_list, stretch=1)
+        self._skill_body = QTextEdit(); self._skill_body.setReadOnly(True)
+        self._skill_body.setFont(QFont("Courier New", 8))
+        self._skill_body.setMaximumHeight(130)
+        self._skill_body.setPlaceholderText("Skill body shows here.")
+        skl.addWidget(self._skill_body)
+        body.addWidget(sk)
+        body.setStretchFactor(0, 3); body.setStretchFactor(1, 2)
+        body.setSizes([540, 380])
+        body.setCollapsible(0, False); body.setCollapsible(1, False)
+        self._root.addWidget(body, stretch=1)
+
+    def _sec_label(self, text: str) -> QLabel:
+        l = QLabel(f"◈ {text}")
+        l.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        l.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        return l
+
+    def _clear_layout(self, lay) -> None:
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def refresh(self):
+        if not self.api.configured():
+            self._note("dashboard not wired"); return
+        self.api.get(f"{self.SEC}:tasks", "/api/tasks")
+        self.api.get(f"{self.SEC}:skills", "/api/skills?status=any")
+        self.api.get(f"{self.SEC}:dots", "/api/dots")
+
+    def _on_done(self, key: str, data) -> None:
+        if key == f"{self.SEC}:tasks" and isinstance(data, list):
+            self._tasks = data
+            self._clear_layout(self._task_lay)
+            if not data:
+                self._task_lay.addWidget(
+                    self._empty("No recurring tasks — create one below."))
+            for t in data:
+                self._task_lay.addWidget(self._task_card(t))
+            self._task_lay.addStretch()
+        elif key == f"{self.SEC}:skills" and isinstance(data, list):
+            self._skills = data
+            self._clear_layout(self._skill_lay)
+            if not data:
+                self._skill_lay.addWidget(
+                    self._empty("No skills yet — hit MINE SKILLS to propose "
+                                "some from chat history."))
+            for s in data:
+                self._skill_lay.addWidget(self._skill_card(s))
+            self._skill_lay.addStretch()
+        elif key == f"{self.SEC}:dots" and isinstance(data, list):
+            self._dots = data
+        elif key.startswith(f"{self.SEC}:runs") and isinstance(data, list):
+            self._runs.clear()
+            for r in data[:12]:
+                self._runs.append(
+                    f"{r.get('status')} · {_fmt_when(r.get('started_at'))} · "
+                    f"{str(r.get('output') or '')[:180]}")
+        elif key.startswith(f"{self.SEC}:action") or key.startswith(f"{self.SEC}:skill"):
+            parts = key.split(":")
+            kind = parts[2] if len(parts) > 2 else ""
+            self.mw.toast({
+                "new": "Task created", "pause": "Task paused",
+                "resume": "Task resumed", "cancel": "Task cancelled",
+                "retry": "Task retried", "run": "Task triggered",
+                "pub": "Skill published", "arc": "Skill archived",
+            }.get(kind, "Done"), "ok")
+            self.refresh()
+        elif key.startswith(f"{self.SEC}:mine") and isinstance(data, dict):
+            n = data.get("created", 0)
+            self._note(f"{n} new draft skill(s) mined" if n else
+                       "nothing new to mine yet")
+            self.api.get(f"{self.SEC}:skills", "/api/skills?status=any")
+
+    def _task_card(self, t: dict) -> QWidget:
+        card = QWidget()
+        card.setStyleSheet(f"background: {C.PANEL};"
+                           f"border: 1px solid {C.BORDER}; border-radius: 8px;")
+        cl = QVBoxLayout(card); cl.setContentsMargins(9, 6, 9, 6); cl.setSpacing(4)
+        row = QHBoxLayout(); row.setSpacing(6)
+        name = QLabel(str(t.get("name") or "task"))
+        name.setStyleSheet(f"color: {C.WHITE}; background: transparent;"
+                           f"font-weight: bold;")
+        row.addWidget(name, stretch=1)
+        st = str(t.get("status") or "?")
+        st_col = {"active": C.GREEN, "paused": C.ACC}.get(st, C.RED)
+        chip = QLabel(st)
+        chip.setStyleSheet(f"color: {st_col}; background: transparent;"
+                           f"font-size: 10px; font-weight: bold;")
+        row.addWidget(chip)
+        every = int(t.get("every_seconds") or 0)
+        every_s = (f"every {every // 3600}h" if every >= 3600 and every % 3600 == 0
+                   else f"every {every // 60}m" if every >= 60 and every % 60 == 0
+                   else f"every {every}s")
+        every_l = QLabel(every_s)
+        every_l.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        row.addWidget(every_l)
+        cl.addLayout(row)
+        ins = QLabel(str(t.get("instruction") or "")[:140])
+        ins.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        ins.setWordWrap(True)
+        cl.addWidget(ins)
+        acts = QHBoxLayout(); acts.setSpacing(5)
+        tid = t.get("id")
+        if st == "active":
+            acts.addWidget(self._btn("Pause",
+                lambda: self._task_action(tid, "pause")))
+        if st == "paused":
+            acts.addWidget(self._btn("Resume",
+                lambda: self._task_action(tid, "resume")))
+        if st in ("failed", "timeout"):
+            acts.addWidget(self._btn("Retry",
+                lambda: self._task_action(tid, "retry")))
+        if st not in ("cancelled", "done"):
+            acts.addWidget(self._btn("Cancel",
+                lambda: self._task_action(tid, "cancel")))
+        acts.addWidget(self._btn("Runs",
+            lambda: self.api.get(f"{self.SEC}:runs:{tid}",
+                                 f"/api/tasks/{tid}/runs")))
+        acts.addStretch()
+        cl.addLayout(acts)
+        return card
+
+    def _task_action(self, tid, action: str):
+        if tid is not None:
+            self.api.post(f"{self.SEC}:action:{action}:{tid}",
+                          f"/api/tasks/{tid}/{action}", {})
+
+    def _skill_card(self, s: dict) -> QWidget:
+        card = QWidget()
+        draft = str(s.get("status")) == "draft"
+        card.setStyleSheet(
+            f"background: {C.PANEL}; border: 1px solid "
+            f"{C.ACC if draft else C.BORDER}; border-radius: 8px;")
+        cl = QVBoxLayout(card); cl.setContentsMargins(9, 6, 9, 6); cl.setSpacing(4)
+        row = QHBoxLayout(); row.setSpacing(6)
+        title = QLabel(str(s.get("title") or "skill"))
+        title.setStyleSheet(f"color: {C.WHITE}; background: transparent;"
+                            f"font-weight: bold;")
+        title.setWordWrap(True)
+        row.addWidget(title, stretch=1)
+        st = str(s.get("status") or "?")
+        st_col = {"published": C.GREEN, "draft": C.ACC}.get(st, C.TEXT_DIM)
+        chip = QLabel(st)
+        chip.setStyleSheet(f"color: {st_col}; background: transparent;"
+                           f"font-size: 10px; font-weight: bold;")
+        row.addWidget(chip)
+        cl.addLayout(row)
+        acts = QHBoxLayout(); acts.setSpacing(5)
+        sid = s.get("id")
+        acts.addWidget(self._btn("View", lambda: self._show_skill(s)))
+        if draft:
+            acts.addWidget(self._btn("Publish",
+                lambda: self.api.post(f"{self.SEC}:skill:pub:{sid}",
+                                      f"/api/skills/{sid}/publish", {}), True))
+        if st == "published":
+            acts.addWidget(self._btn("Archive",
+                lambda: self.api.post(f"{self.SEC}:skill:arc:{sid}",
+                                      f"/api/skills/{sid}/archive", {})))
+        acts.addStretch()
+        cl.addLayout(acts)
+        return card
+
+    def _show_skill(self, s: dict):
+        self._skill_body.setPlainText(str(s.get("body_md") or "(empty)"))
+
+    def _mine(self):
+        self.api.post(f"{self.SEC}:mine", "/api/skills/mine", {})
+
+    def _new_task(self):
+        name = prompt_jarvis_text(self, "New task", "Task name:", "Morning brief")
+        if not name:
+            return
+        ins = prompt_jarvis_text(
+            self, "New task",
+            "Instruction (what should the Dot do each run):",
+            "Summarize what happened since last run in 5 bullet points.")
+        if not ins:
+            return
+        every = prompt_jarvis_text(self, "New task",
+                                   "Repeat every (seconds):", "3600")
+        if not every:
+            return
+        if not self._dots:
+            self._note("create a Dot first (Agents)", error=True); return
+        dot_names = ", ".join(f"{i}:{d.get('name')}"
+                              for i, d in enumerate(self._dots))
+        pick = prompt_jarvis_text(self, "New task",
+                                  f"Which Dot? ({dot_names}):", "0")
+        if pick is None:
+            return
+        try:
+            dot_id = self._dots[int(pick)]["id"]
+        except Exception:
+            self._note("bad Dot choice", error=True); return
+        try:
+            every_n = int(every)
+        except ValueError:
+            self._note("every_seconds must be an integer", error=True); return
+        self.api.post(f"{self.SEC}:action:new", "/api/tasks",
+                      {"name": name, "instruction": ins,
+                       "every_seconds": every_n, "dot_id": dot_id})
+
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if key.startswith(f"{self.SEC}:action"):
+            self.mw.toast(f"Task action failed: {msg}", "err")
+        if key.startswith(f"{self.SEC}:skill"):
+            self.mw.toast(f"Skill action failed: {msg}", "err")
+        super()._on_fail(key, msg)
+
+
+def prompt_jarvis_text(parent, title: str, label: str,
+                       default: str = "") -> str | None:
+    """Tiny modal text prompt (kept local — no new dependencies)."""
+    from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setStyleSheet(f"background: {C.PANEL}; color: {C.TEXT};")
+    form = QFormLayout(dlg)
+    edit = QLineEdit(default)
+    edit.selectAll()
+    form.addRow(QLabel(label), edit)
+    buttons = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Ok
+        | QDialogButtonBox.StandardButton.Cancel)
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    form.addRow(buttons)
+    if dlg.exec() == QDialog.DialogCode.Accepted:
+        return edit.text().strip() or None
+    return None
+
+
+def _html_esc(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+# ── toast layer ──────────────────────────────────────────────────────────────
+class _ToastLayer(QWidget):
+    """Floating top-right status chips — every action outcome lands here, so
+    nobody has to hunt the activity log for whether something worked."""
+
+    _inst: "_ToastLayer | None" = None
+
+    @classmethod
+    def get(cls, mw) -> "_ToastLayer":
+        if cls._inst is None or cls._inst.parent() is not mw:
+            cls._inst = cls(mw)
+        inst = cls._inst
+        inst.setGeometry(0, 64, max(mw.width() - 8, 200),
+                         max(mw.height() - 64, 80))
+        inst.show()
+        inst.raise_()
+        return inst
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self.mw = mw
+        self.setObjectName("ToastLayer")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("background: transparent; border: none;")
+        self._v = QVBoxLayout(self)
+        self._v.setContentsMargins(0, 0, 16, 0)
+        self._v.setSpacing(6)
+        self._v.addStretch()
+
+    def resizeEvent(self, e):
+        try:
+            self.setGeometry(0, 64, max(self.mw.width() - 8, 200),
+                             max(self.mw.height() - 64, 80))
+        except Exception:                               # noqa: BLE001
+            pass
+        super().resizeEvent(e)
+
+    def push(self, msg: str, kind: str = "info", ms: int = 3200) -> None:
+        col = {"ok": C.GREEN, "err": C.RED,
+               "warn": C.ACC}.get(kind, C.PRI)
+        ico = {"ok": "check", "err": "alert",
+               "warn": "alert"}.get(kind, "info")
+        chip = QWidget()
+        chip.setStyleSheet(
+            f"background: {C.PANEL2}; border: 1px solid {col};"
+            f" border-radius: 9px;")
+        hl = QHBoxLayout(chip)
+        hl.setContentsMargins(11, 6, 13, 6)
+        hl.setSpacing(7)
+        hl.addWidget(_icon_label(ico, col, 13))
+        tx = QLabel(msg)
+        tx.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        tx.setStyleSheet(f"color: {col}; background: transparent;")
+        hl.addWidget(tx)
+        chip.adjustSize()
+        chip.setFixedHeight(30)
+        self._v.insertWidget(0, chip)
+        chip.show()
+        QTimer.singleShot(ms, lambda c=chip: self._drop(c))
+        # keep at most 4 visible
+        while self._v.count() > 5:
+            w = self._v.itemAt(0).widget()
+            if w is None:
+                break
+            self._v.removeWidget(w)
+            w.deleteLater()
+
+    def _drop(self, chip) -> None:
+        try:
+            self._v.removeWidget(chip)
+            chip.deleteLater()
+        except Exception:                               # noqa: BLE001
+            pass
+
+
+# ── studio (display | scan | 3d | web — one section, four surfaces) ─────────
+class StudioPanel(QWidget):
+    """The dashboard's STUDIO surface, desktop edition.
+
+    Every show_content() funnel lands here, classified by title prefix —
+    DISPLAY charts, SCAN OCR, 3D models, WEB scrapes each keep their own
+    last-rendered content. Rail keys display/scan/3d/web all switch into
+    this one section on the right surface; content that arrives while the
+    user is elsewhere lights the rail dot, exactly like the web UI.
+    """
+
+    SURFACES = ("display", "scan", "3d", "web")
+    _TITLES = {"display": ("DISPLAY", "charts · diagrams · reports",
+                           "layout"),
+               "scan":    ("SCAN", "OCR · regions · screenshots",
+                           "search"),
+               "3d":      ("3D", "models · geometric specs",
+                           "cube"),
+               "web":     ("WEB", "scrapes · search · structured pages",
+                           "globe")}
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self.mw = mw
+        self._content: dict[str, tuple[str, str, str]] = {}
+        self._surface = "display"
+        try:
+            from dashboard.surface import classify_surface
+            self._classify = classify_surface
+        except Exception:                               # noqa: BLE001
+            def _classify(title: str) -> str:
+                return "display"
+            self._classify = _classify
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(8)
+
+        # header: title + subtitle + float-window action
+        hr = QHBoxLayout()
+        hr.setSpacing(8)
+        self._h_ico = _icon_label("layout", C.PRI, 15)
+        hr.addWidget(self._h_ico)
+        self._h_title = QLabel("DISPLAY")
+        self._h_title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self._h_title.setStyleSheet(
+            f"color: {C.WHITE}; background: transparent;")
+        hr.addWidget(self._h_title)
+        self._h_sub = QLabel("charts · diagrams · reports")
+        self._h_sub.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        hr.addWidget(self._h_sub)
+        hr.addStretch()
+        float_btn = QPushButton()
+        float_btn.setObjectName("ghost")
+        float_btn.setFixedHeight(26)
+        float_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        float_btn.setToolTip("Open the floating display window too")
+        set_icon(float_btn, "external", C.TEXT_MED, 13)
+        float_btn.clicked.connect(lambda: self.mw.toggle_display())
+        hr.addWidget(float_btn)
+        root.addLayout(hr)
+
+        # surface tab chips
+        tabs = QHBoxLayout()
+        tabs.setSpacing(6)
+        self._tab_btns: dict[str, QPushButton] = {}
+        for s in self.SURFACES:
+            b = QPushButton(f"  {self._TITLES[s][0]}")
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setFixedHeight(26)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            set_icon(b, self._TITLES[s][2], C.TEXT_MED, 13)
+            b.clicked.connect(lambda _=False, k=s: self.show_surface(k))
+            self._tab_btns[s] = b
+            tabs.addWidget(b)
+        tabs.addStretch()
+        root.addLayout(tabs)
+
+        # content card
+        card = QWidget()
+        card.setStyleSheet(
+            f"background: {C.PANEL}; border: 1px solid {C.BORDER};"
+            f" border-radius: 10px;")
+        cv = QVBoxLayout(card)
+        cv.setContentsMargins(14, 12, 14, 12)
+        cv.setSpacing(6)
+        self._c_title = QLabel("")
+        self._c_title.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._c_title.setStyleSheet(
+            f"color: {C.PRI}; background: transparent;")
+        self._c_title.setWordWrap(True)
+        cv.addWidget(self._c_title)
+        self._c_ts = QLabel("")
+        self._c_ts.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        cv.addWidget(self._c_ts)
+        self._c_view = QTextEdit()
+        self._c_view.setReadOnly(True)
+        self._c_view.setStyleSheet(
+            f"background: {C.BG}; border: 1px solid {C.BORDER};"
+            f" border-radius: 8px; padding: 8px;"
+            f" font-family: 'Courier New', monospace; font-size: 12px;")
+        cv.addWidget(self._c_view, stretch=1)
+        self._c_empty = QLabel()
+        self._c_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._c_empty.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; font-size: 13px;")
+        cv.addWidget(self._c_empty, stretch=1)
+        root.addWidget(card, stretch=1)
+        self._card = card
+        self.show_surface("display")
+
+    # ── surface routing ──────────────────────────────────────────────────────
+    def show_surface(self, surface: str) -> None:
+        if surface not in self.SURFACES:
+            surface = "display"
+        self._surface = surface
+        t, sub, ico = self._TITLES[surface]
+        self._h_title.setText(t)
+        self._h_sub.setText(sub)
+        self._h_ico.setPixmap(icon_pm(ico, C.PRI, 15))
+        for k, b in self._tab_btns.items():
+            b.setChecked(k == surface)
+        self._render()
+
+    def receive(self, title: str, text: str) -> None:
+        """A show_content() funnel arrived — store it on its surface."""
+        surface = str(self._classify(title) or "display")
+        self._content[surface] = (str(title or ""), str(text or ""),
+                                  time.strftime("%H:%M:%S"))
+        if surface == self._surface and self.isVisible():
+            self._render()
+        else:
+            # has-new dot on that rail key (dashboard parity)
+            try:
+                bd = self.mw._rail_badges.get(surface)
+                if bd is not None and not self.mw._rail_btns[surface].isChecked():
+                    bd.setText("\u25cf")
+                    self.mw._style_badge(bd, "dot")
+                    bd.show()
+            except Exception:                           # noqa: BLE001
+                pass
+
+    def _render(self) -> None:
+        item = self._content.get(self._surface)
+        has = item is not None
+        self._c_view.setVisible(has)
+        self._c_title.setVisible(has)
+        self._c_ts.setVisible(has)
+        self._c_empty.setVisible(not has)
+        if has:
+            t, text, ts = item
+            self._c_title.setText(t)
+            self._c_ts.setText(f"updated {ts}")
+            self._c_view.setPlainText(text)
+            self._c_view.moveCursor(
+                self._c_view.textCursor().MoveOperation.Start)
+        else:
+            t, sub, ico = self._TITLES[self._surface]
+            self._c_empty.setText(
+                f"Nothing on {t} yet\u2014 tools render here: "
+                f"{sub}.")
+        try:
+            self._card.adjustSize()
+        except Exception:                               # noqa: BLE001
+            pass
+
+    def refresh(self) -> None:
+        self._render()
+
+
+# ── memory (owner preferences) ──────────────────────────────────────────────
+class MemoryPanel(_DashPanel):
+    """JARVIS's owner memory — list / set / delete the preferences the brain
+    injects into every prompt. Same loopback API the web dashboard uses."""
+
+    SEC = "memory"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self._header("MEMORY", "injected into every prompt",
+                     refresh=self.refresh)
+        self._all: list[dict] = []
+
+        tools = QHBoxLayout()
+        tools.setSpacing(6)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("filter keys / values\u2026")
+        self._search.textChanged.connect(self._render)
+        tools.addWidget(self._search, stretch=1)
+        new_btn = self._btn("  NEW", self._new_pref, primary=True)
+        tools.addWidget(new_btn)
+        self._root.addLayout(tools)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent;")
+        self._list = QWidget()
+        self._list.setStyleSheet("background: transparent;")
+        self._list_lay = QVBoxLayout(self._list)
+        self._list_lay.setContentsMargins(0, 0, 4, 0)
+        self._list_lay.setSpacing(6)
+        self._list_lay.addStretch()
+        scroll.setWidget(self._list)
+        self._root.addWidget(scroll, stretch=1)
+
+    # ── data ─────────────────────────────────────────────────────────────────
+    def refresh(self) -> None:
+        if not self.api.configured():
+            self._note("dashboard not wired"); return
+        self.api.get(f"{self.SEC}:list", "/api/memory")
+
+    def _on_done(self, key: str, data) -> None:
+        if key == f"{self.SEC}:list" and isinstance(data, list):
+            self._all = data
+            self._render()
+        elif key.startswith(f"{self.SEC}:put"):
+            self.toast("Memory saved", "ok")
+            self.refresh()
+        elif key.startswith(f"{self.SEC}:del"):
+            self.toast("Memory entry removed", "ok")
+            self.refresh()
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if key.startswith(self.SEC + ":"):
+            self._note(msg, error=True)
+            if "put" in key or "del" in key:
+                self.mw.toast(msg, "err")
+
+    def _render(self) -> None:
+        needle = (self._search.text() or "").strip().lower()
+        while self._list_lay.count() > 1:
+            it = self._list_lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        shown = 0
+        for pref in self._all:
+            key = str(pref.get("key") or "")
+            val = str(pref.get("value") or "")
+            if needle and needle not in key.lower() and needle not in val.lower():
+                continue
+            shown += 1
+            pid = pref.get("id")
+            card = QWidget()
+            card.setStyleSheet(
+                f"background: {C.PANEL}; border: 1px solid {C.BORDER};"
+                f" border-radius: 8px;")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(11, 7, 11, 7)
+            cl.setSpacing(3)
+            top = QHBoxLayout(); top.setSpacing(6)
+            k_lbl = QLabel(key)
+            k_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            k_lbl.setStyleSheet(
+                f"color: {C.PRI}; background: transparent;")
+            top.addWidget(k_lbl, stretch=1)
+            top.addWidget(self._btn("EDIT",
+                                    lambda _=False, pr=pref: self._edit(pr),
+                                    height=22))
+            top.addWidget(self._btn("DEL",
+                                    lambda _=False, i=pid: self._delete(i),
+                                    height=22))
+            cl.addLayout(top)
+            v_lbl = QLabel(val)
+            v_lbl.setWordWrap(True)
+            v_lbl.setStyleSheet(
+                f"color: {C.TEXT_MED}; background: transparent;")
+            cl.addWidget(v_lbl)
+            self._list_lay.insertWidget(self._list_lay.count() - 1, card)
+        if not shown:
+            note = self._empty(
+                "No memories yet \u2014 the owner's preferences land here "
+                "and are injected into every Dot prompt.")
+            self._list_lay.insertWidget(0, note)
+
+    # ── actions ──────────────────────────────────────────────────────────────
+    def _new_pref(self) -> None:
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        k = prompt_jarvis_text(self, "New memory", "Key  (what to remember):")
+        if not k:
+            return
+        v = prompt_jarvis_text(self, "New memory",
+                               f"Value for  {k} :", "")
+        if v is None:
+            return
+        self.api.put(f"{self.SEC}:put:{int(time.time()*1000)}",
+                     "/api/memory", {"key": k, "value": v, "allowed": "*"})
+
+    def _edit(self, pref: dict) -> None:
+        key = str(pref.get("key") or "")
+        v = prompt_jarvis_text(self, f"Edit  {key}",
+                               "Value:", str(pref.get("value") or ""))
+        if v is None:
+            return
+        self.api.put(f"{self.SEC}:put:{int(time.time()*1000)}",
+                     "/api/memory", {"key": key, "value": v,
+                                     "allowed": pref.get("allowed", "*")})
+
+    def _delete(self, pid) -> None:
+        if pid is None:
+            return
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            ans = QMessageBox.question(
+                self, "Delete memory",
+                "Remove this entry from the owner memory?")
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        except Exception:                               # noqa: BLE001
+            pass
+        self.api.delete(f"{self.SEC}:del:{pid}",
+                        f"/api/memory/{int(pid)}")
+
+    def toast(self, msg: str, kind: str = "info") -> None:
+        self.mw.toast(msg, kind)
+
+
+# ── skills (mined automations) ──────────────────────────────────────────────
+class SkillsPanel(_DashPanel):
+    """Skill registry — mine new drafts from what JARVIS has learned, publish
+    the good ones, archive the stale. Live dashboard data."""
+
+    SEC = "skills"
+
+    def __init__(self, mw):
+        super().__init__(mw)
+        self._header("SKILLS", "mine \u00b7 publish \u00b7 archive",
+                     refresh=self.refresh)
+        self._all: list[dict] = []
+        self._filter = "any"
+
+        tools = QHBoxLayout()
+        tools.setSpacing(6)
+        for f, lbl in (("any", "ALL"), ("draft", "DRAFT"),
+                       ("published", "LIVE"), ("archived", "ARCH")):
+            b = QPushButton(lbl)
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setFixedHeight(24)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, key=f: self._set_filter(key))
+            b.setChecked(f == self._filter)
+            self._filter_btns = getattr(self, "_filter_btns", {})
+            self._filter_btns[f] = b
+            tools.addWidget(b)
+        tools.addStretch()
+        mine_btn = self._btn("  MINE NEW", self._mine, primary=True)
+        tools.addWidget(mine_btn)
+        self._root.addLayout(tools)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent;")
+        self._list = QWidget()
+        self._list.setStyleSheet("background: transparent;")
+        self._list_lay = QVBoxLayout(self._list)
+        self._list_lay.setContentsMargins(0, 0, 4, 0)
+        self._list_lay.setSpacing(6)
+        self._list_lay.addStretch()
+        scroll.setWidget(self._list)
+        self._root.addWidget(scroll, stretch=1)
+
+    def _set_filter(self, key: str) -> None:
+        self._filter = key
+        for k, b in self._filter_btns.items():
+            b.setChecked(k == key)
+        self.refresh()
+
+    def refresh(self) -> None:
+        if not self.api.configured():
+            self._note("dashboard not wired"); return
+        q = "" if self._filter == "any" else f"?status={self._filter}"
+        self.api.get(f"{self.SEC}:list", f"/api/skills{q}")
+
+    def _on_done(self, key: str, data) -> None:
+        if key == f"{self.SEC}:list" and isinstance(data, list):
+            self._all = data
+            self._render()
+        elif key.startswith(f"{self.SEC}:mine"):
+            n = int((data or {}).get("created", 0)) if isinstance(data, dict) else 0
+            self.mw.toast(f"Mined {n} new draft skill" + ("s" if n != 1 else ""),
+                          "ok")
+            self.refresh()
+        elif key.startswith(f"{self.SEC}:act"):
+            self.mw.toast("Skill updated", "ok")
+            self.refresh()
+
+    def _on_fail(self, key: str, msg: str) -> None:
+        if key.startswith(self.SEC + ":"):
+            self._note(msg, error=True)
+            if "mine" in key or "act" in key:
+                self.mw.toast(msg, "err")
+
+    def _render(self) -> None:
+        while self._list_lay.count() > 1:
+            it = self._list_lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        if not self._all:
+            self._list_lay.insertWidget(0, self._empty(
+                "No skills yet \u2014 MINE NEW learns from completed runs, "
+                "drafts land here for review."))
+            return
+        for i, sk in enumerate(self._all):
+            sid = sk.get("id")
+            title = str(sk.get("title") or f"skill #{sid}")
+            status = str(sk.get("status") or "draft")
+            card = QWidget()
+            card.setStyleSheet(
+                f"background: {C.PANEL}; border: 1px solid {C.BORDER};"
+                f" border-radius: 8px;")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(11, 7, 11, 7)
+            cl.setSpacing(3)
+            top = QHBoxLayout(); top.setSpacing(6)
+            t_lbl = QLabel(title)
+            t_lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            t_lbl.setStyleSheet(f"color: {C.WHITE}; background: transparent;")
+            t_lbl.setWordWrap(True)
+            top.addWidget(t_lbl, stretch=1)
+            chip = QLabel(f" {status.upper()} ")
+            chip.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            scol = {"published": C.GREEN, "archived": C.TEXT_DIM}.get(
+                status, C.ACC)
+            chip.setStyleSheet(
+                f"color: {scol}; background: transparent;"
+                f" border: 1px solid {scol}; border-radius: 8px;"
+                f" padding: 1px 7px;")
+            top.addWidget(chip)
+            top.addWidget(self._btn("DETAIL",
+                                    lambda _=False, i=sid: self._detail(i),
+                                    height=22))
+            if status == "draft":
+                top.addWidget(self._btn("PUBLISH",
+                                        lambda _=False, i=sid: self._act(i, "publish"),
+                                        primary=True, height=22))
+            if status != "archived":
+                top.addWidget(self._btn("ARCHIVE",
+                                        lambda _=False, i=sid: self._act(i, "archive"),
+                                        height=22))
+            elif status == "archived":
+                top.addWidget(self._btn("RESTORE",
+                                        lambda _=False, i=sid: self._act(i, "publish"),
+                                        height=22))
+            cl.addLayout(top)
+            note = str(sk.get("source_note") or "")
+            if note:
+                n_lbl = QLabel(note)
+                n_lbl.setWordWrap(True)
+                n_lbl.setStyleSheet(
+                    f"color: {C.TEXT_DIM}; background: transparent;")
+                cl.addWidget(n_lbl)
+            self._list_lay.insertWidget(self._list_lay.count() - 1, card)
+
+    def _detail(self, sid) -> None:
+        """Full skill receipt: body, provenance, dates — nothing hidden."""
+        sk = next((s for s in self._all if s.get("id") == sid), None)
+        if not sk:
+            return
+        dlg = QDialog(self.mw)
+        dlg.setWindowTitle(f"Skill #{sid}")
+        dlg.resize(560, 480)
+        v = QVBoxLayout(dlg); v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(8)
+        head = QHBoxLayout()
+        t = QLabel(str(sk.get("title") or f"skill #{sid}"))
+        t.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        t.setStyleSheet(f"color: {C.WHITE};")
+        t.setWordWrap(True)
+        head.addWidget(t, stretch=1)
+        status = str(sk.get("status") or "draft")
+        chip = QLabel(f" {status.upper()} ")
+        chip.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        scol = {"published": C.GREEN, "archived": C.TEXT_DIM}.get(status, C.ACC)
+        chip.setStyleSheet(f"color: {scol}; border: 1px solid {scol};"
+                           f" border-radius: 8px; padding: 1px 7px;")
+        head.addWidget(chip)
+        v.addLayout(head)
+        meta_parts = []
+        if sk.get("created_at"):
+            meta_parts.append(
+                "mined " + time.strftime("%Y-%m-%d %H:%M",
+                                         time.localtime(float(sk["created_at"]))))
+        if sk.get("published_at"):
+            meta_parts.append(
+                "published " + time.strftime(
+                    "%Y-%m-%d %H:%M", time.localtime(float(sk["published_at"]))))
+        note = str(sk.get("source_note") or "")
+        if note:
+            meta_parts.append("source: " + note)
+        if meta_parts:
+            m = QLabel("  ·  ".join(meta_parts))
+            m.setWordWrap(True)
+            m.setStyleSheet(f"color: {C.TEXT_DIM};")
+            v.addWidget(m)
+        body = QTextEdit()
+        body.setReadOnly(True)
+        body.setFont(QFont("Courier New", 9))
+        body.setPlainText(str(sk.get("body_md") or
+                              "(no body — this skill is metadata only.)"))
+        v.addWidget(body, stretch=1)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(self._btn("CLOSE", dlg.accept, primary=True))
+        v.addLayout(row)
+        dlg.exec()
+
+    def _mine(self) -> None:
+        if not self.api.configured():
+            self.mw.toast("Dashboard not wired", "warn"); return
+        self.api.post(f"{self.SEC}:mine:{int(time.time()*1000)}",
+                      "/api/skills/mine", {})
+
+    def _act(self, sid, action: str) -> None:
+        if sid is None or not self.api.configured():
+            return
+        self.api.post(f"{self.SEC}:act:{action}:{sid}",
+                      f"/api/skills/{int(sid)}/{action}", {})
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
+    _emo_sig        = pyqtSignal(str)   # content-driven emotion acting
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
@@ -2954,6 +5570,7 @@ class MainWindow(QMainWindow):
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
+    _lens_sig       = pyqtSignal(list, str, str)  # translate-lens pairs (thread-safe)
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
@@ -2968,8 +5585,7 @@ class MainWindow(QMainWindow):
         """Show or hide the JARVIS display screen."""
         try:
             if self._display_panel is None:
-                from ui.display_panel import DisplayPanel
-                self._display_panel = DisplayPanel(self)
+                self._display_panel = _load_display_panel(self)
             if self._display_panel.isVisible():
                 self._display_panel.hide()
             else:
@@ -3038,6 +5654,11 @@ class MainWindow(QMainWindow):
         self._remote_overlay: RemoteKeyOverlay | None = None
         self._customize_overlay: CustomizeOverlay | None = None
 
+        # Workspace merge: loopback client for THIS machine's dashboard.
+        # main.py wires (url, token) once the dashboard is up.
+        self._dash_api = _DashApi(self)
+        self._pending_n = 0
+
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
         self.setCentralWidget(central)
@@ -3051,8 +5672,13 @@ class MainWindow(QMainWindow):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
-        self._left_panel = self._build_left_panel()
-        body.addWidget(self._left_panel, stretch=0)
+        # Left nav rail (chat/display/monitor + workspace sections) — the
+        # dashboard's rail language, ported to the desktop HUD.
+        self._rail = self._build_rail()
+        body.addWidget(self._rail, stretch=0)
+
+        # Centre: one stack of sections; chat keeps the HUD splitter.
+        self._section_stack = QStackedWidget()
 
         # Center column: HUD + resizable content panel via QSplitter
         self.hud = HudCanvas(face_path, _display)
@@ -3135,7 +5761,8 @@ class MainWindow(QMainWindow):
         # Muted is the default and the button says so, because a soundtrack
         # talking over JARVIS is the one way this feature could make the
         # assistant worse rather than better.
-        self._video_mute_btn = _vid_btn("🔇  SOUND OFF")
+        self._video_mute_btn = _vid_btn("SOUND OFF")
+        set_icon(self._video_mute_btn, "volume-x", C.TEXT_MED, 13)
         self._video_mute_btn.clicked.connect(self._toggle_video_mute)
         _vid_hdr.addWidget(self._video_mute_btn)
 
@@ -3233,7 +5860,39 @@ class MainWindow(QMainWindow):
         self._center_split.setStretchFactor(0, 3)
         self._center_split.setStretchFactor(1, 1)
         self._center_split.setCollapsible(0, False)
-        body.addWidget(self._center_split, stretch=5)
+        # Chat page = the HUD splitter (sections 0..6 of the stack).
+        self._chat_page = QWidget()
+        _cpl = QVBoxLayout(self._chat_page)
+        _cpl.setContentsMargins(0, 0, 0, 0)
+        _cpl.setSpacing(0)
+        _cpl.addWidget(self._center_split)
+        self._section_stack.addWidget(self._chat_page)            # index 0
+
+        # System monitor page (the old left panel, promoted to a section).
+        self._section_stack.addWidget(self._build_monitor_page())  # index 1
+
+        # Dashboard workspace merged in-process (Spaces/Agents/…/Agenda)
+        # + the new MEMORY / SKILLS registries + the STUDIO surface.
+        self._spaces_panel = SpacesPanel(self)
+        self._agents_panel = AgentsPanel(self)
+        self._computers_panel = ComputersPanel(self)
+        self._calls_panel = CallsPanel(self)
+        self._agenda_panel = AgendaPanel(self)
+        self._memory_panel = MemoryPanel(self)
+        self._skills_panel = SkillsPanel(self)
+        self._studio_panel = StudioPanel(self)
+        for _p in (self._spaces_panel, self._agents_panel,
+                   self._computers_panel, self._calls_panel,
+                   self._agenda_panel, self._memory_panel,
+                   self._skills_panel, self._studio_panel):
+            self._section_stack.addWidget(_p)
+        self._section_names = ["chat", "monitor", "spaces", "agents",
+                               "computers", "calls", "agenda",
+                               "memory", "skills", "studio"]
+        self._section_index = {n: i for i, n in enumerate(self._section_names)}
+        self._section_stack.setCurrentIndex(0)
+
+        body.addWidget(self._section_stack, stretch=1)
 
         self._right_panel = self._build_right_panel()
         body.addWidget(self._right_panel, stretch=0)
@@ -3261,12 +5920,15 @@ class MainWindow(QMainWindow):
         self._update_metrics()
 
         self._log_sig.connect(self._log.append_log)
+        self._dash_api.done.connect(self._on_dash_heartbeat)
         self._state_sig.connect(self._apply_state)
+        self._emo_sig.connect(self._apply_emotion)
         self._content_sig.connect(self._show_content)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
         self._confirm_sig.connect(self._show_confirm_banner)
         self._confirm_hide_sig.connect(self._hide_confirm_banner)
+        self._lens_sig.connect(self._show_lens)
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._wake_btns_sig.connect(self._refresh_wake_btns)
@@ -3300,6 +5962,20 @@ class MainWindow(QMainWindow):
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
+
+        # Ctrl+K — command palette (jump to any section, fuzzy filter).
+        sc_pal = QShortcut(QKeySequence("Ctrl+K"), self)
+        sc_pal.activated.connect(self._open_palette)
+        # Ctrl+1..9 / Ctrl+0 — direct section jumps (rail order).
+        self._section_shortcuts: list[QShortcut] = []
+        for _digit in range(1, 10):
+            _sc = QShortcut(QKeySequence(f"Ctrl+{_digit}"), self)
+            _sc.activated.connect(
+                lambda i=_digit - 1: self._jump_section(i))
+            self._section_shortcuts.append(_sc)
+        _sc0 = QShortcut(QKeySequence("Ctrl+0"), self)
+        _sc0.activated.connect(lambda: self._jump_section(9))
+        self._section_shortcuts.append(_sc0)
 
     def _show_camera_frame(self, img_bytes: bytes):
         """Slot — display camera preview overlay (main thread)."""
@@ -3502,7 +6178,7 @@ class MainWindow(QMainWindow):
     def _sync_video_mute_btn(self) -> None:
         out = self._video_sound_out if self._video_split else self._video_audio
         muted = bool(out and out.isMuted())
-        self._video_mute_btn.setText("🔇  SOUND OFF" if muted else "🔊  SOUND ON")
+        self._video_mute_btn.setText("SOUND OFF" if muted else "SOUND ON")
 
     def _toggle_video_mute(self) -> None:
         out = self._video_sound_out if self._video_split else self._video_audio
@@ -3624,7 +6300,7 @@ class MainWindow(QMainWindow):
             )
             return True
         except Exception as e:
-            print(f"[Shortcut] ⚠️  Icon generation failed: {e}")
+            print(f"[Shortcut] icon generation failed: {e}")
             return False
 
     @staticmethod
@@ -3877,6 +6553,13 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        try:
+            tl = _ToastLayer._inst
+            if tl is not None and tl.parent() is self:
+                tl.setGeometry(0, 64, max(self.width() - 8, 200),
+                               max(self.height() - 64, 80))
+        except Exception:                               # noqa: BLE001
+            pass
         cw = self.centralWidget()
         if self._overlay and self._overlay.isVisible():
             ow, oh = 460, 390
@@ -3969,83 +6652,100 @@ class MainWindow(QMainWindow):
 
 
     def _build_header(self) -> QWidget:
+        """Top chrome — version chip, icon drawers, state pill, centred brand,
+        clock. Every symbol is a vector icon (no emoji glyphs)."""
         w = QWidget()
-        w.setFixedHeight(54)
-        w.setStyleSheet(f"background: {C.DARK}; border-bottom: 1px solid {C.BORDER_B};")
+        w.setFixedHeight(56)
+        w.setStyleSheet(
+            f"background: {C.DARK};"
+            f" border-bottom: 1px solid {C.BORDER_B};")
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setContentsMargins(14, 0, 14, 0)
 
-        def _badge(txt, color=C.TEXT_MED):
-            l = QLabel(txt)
-            l.setFont(QFont("Courier New", 8))
-            l.setStyleSheet(f"color: {color}; background: transparent;")
-            return l
-
-        lay.addWidget(_badge(APP_VERSION, C.PRI_DIM))
+        ver = QLabel(APP_VERSION)
+        ver.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        ver.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PRI_GHO};"
+            f" border: 1px solid {C.PRI_DIM}; border-radius: 9px;"
+            f" padding: 3px 9px;")
+        lay.addWidget(ver)
         lay.addSpacing(8)
-        self._drawer_btn = QPushButton("⚙")
-        self._drawer_btn.setFixedSize(26, 26)
-        self._drawer_btn.setFont(QFont("Courier New", 11))
-        self._drawer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._drawer_btn.setToolTip("Settings & Controls")
-        self._drawer_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {C.TEXT_DIM};
-                border: 1px solid {C.BORDER}; border-radius: 4px;
-            }}
-            QPushButton:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM}; }}
-            QPushButton:checked {{ color: {C.PRI}; border-color: {C.PRI}; background: {C.PRI_GHO}; }}
-        """)
-        self._drawer_btn.setCheckable(True)
-        self._drawer_btn.setToolTip("Setup — things you set once")
+
+        def _icon_btn(icon: str, tip: str) -> QPushButton:
+            b = QPushButton()
+            b.setObjectName("iconBtn")
+            b.setFixedSize(28, 28)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            set_icon(b, icon, C.TEXT_DIM, 15)
+            return b
+
+        # Setup drawer (rarely touched) vs controls drawer (everyday) —
+        # split by how often a thing is touched; icon-led now.
+        self._drawer_btn = _icon_btn("settings", "Setup — things you set once")
         self._drawer_btn.clicked.connect(self._toggle_drawer)
         lay.addWidget(self._drawer_btn)
 
-        # A SECOND drawer, and the split is by how often a thing is touched.
-        #
-        # One panel held twelve buttons: the ones you press once when you set
-        # the assistant up sitting next to the ones you flick on and off every
-        # day. Separating them by that — setup behind ⚙, everyday behind 🎛 —
-        # is what makes each list short enough to read at a glance.
-        self._ctrl_btn = QPushButton("🎛")
-        self._ctrl_btn.setFixedSize(26, 26)
-        self._ctrl_btn.setFont(QFont("Courier New", 11))
-        self._ctrl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._ctrl_btn.setToolTip("Controls — the everyday switches")
-        self._ctrl_btn.setStyleSheet(self._drawer_btn.styleSheet())
-        self._ctrl_btn.setCheckable(True)
+        self._ctrl_btn = _icon_btn("sliders", "Controls — the everyday switches")
         self._ctrl_btn.clicked.connect(self._toggle_controls)
         lay.addSpacing(4)
         lay.addWidget(self._ctrl_btn)
+
+        # Live state pill — one container: icon + text, tinted per state.
+        lay.addSpacing(10)
+        pill_wrap = QWidget()
+        pill_wrap.setObjectName("statePillWrap")
+        self._state_wrap = pill_wrap
+        pill_wrap.setStyleSheet(
+            f"background: {C.PANEL}; border: 1px solid {C.BORDER};"
+            f" border-radius: 11px;")
+        ph = QHBoxLayout(pill_wrap)
+        ph.setContentsMargins(9, 3, 12, 3)
+        ph.setSpacing(5)
+        self._state_icon = _icon_label("power", C.TEXT_DIM, 12)
+        ph.addWidget(self._state_icon)
+        self._state_pill = QLabel("SLEEPING")
+        self._state_pill.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self._state_pill.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        ph.addWidget(self._state_pill)
+        lay.addWidget(pill_wrap)
         lay.addStretch()
 
-        mid = QVBoxLayout(); mid.setSpacing(1)
+        # Centred brand — light wordmark, accent subtitle.
+        mid = QVBoxLayout()
+        mid.setSpacing(1)
         _disp = self._assistant_name.upper()
         self._title_lbl = QLabel(_disp)
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._title_lbl.setFont(QFont("Courier New", 17, QFont.Weight.Bold))
-        self._title_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self._title_lbl.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        self._title_lbl.setStyleSheet(
+            f"color: {C.WHITE}; background: transparent; letter-spacing: 6px;")
         mid.addWidget(self._title_lbl)
-        _sub_text = ("A Friendly Assistant"
+        _sub_text = ("A  FRIENDLY  ASSISTANT"
                      if _disp in ("JARVIS", "J.A.R.V.I.S")
-                     else "Personal AI Assistant")
+                     else "PERSONAL  AI  ASSISTANT")
         self._sub_lbl = QLabel(_sub_text)
         self._sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sub_lbl.setFont(QFont("Courier New", 7))
-        self._sub_lbl.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
+        self._sub_lbl.setFont(QFont("Segoe UI", 7))
+        self._sub_lbl.setStyleSheet(
+            f"color: {C.PRI_DIM}; background: transparent;")
         mid.addWidget(self._sub_lbl)
         lay.addLayout(mid)
         lay.addStretch()
 
-        right_col = QVBoxLayout(); right_col.setSpacing(2)
+        right_col = QVBoxLayout()
+        right_col.setSpacing(2)
         self._clock_lbl = QLabel("00:00:00")
         self._clock_lbl.setFont(QFont("Courier New", 14, QFont.Weight.Bold))
         self._clock_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         self._clock_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._clock_lbl)
         self._date_lbl = QLabel("")
-        self._date_lbl.setFont(QFont("Courier New", 7))
-        self._date_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        self._date_lbl.setFont(QFont("Segoe UI", 7))
+        self._date_lbl.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
         self._date_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._date_lbl)
         lay.addLayout(right_col)
@@ -4055,77 +6755,387 @@ class MainWindow(QMainWindow):
         self._clock_lbl.setText(time.strftime("%H:%M:%S"))
         self._date_lbl.setText(time.strftime("%a %d %b %Y"))
 
-    def _build_left_panel(self) -> QWidget:
-        w = QWidget()
-        w.setFixedWidth(_LEFT_W)
-        w.setStyleSheet(f"background: {C.DARK}; border-right: 1px solid {C.BORDER};")
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 10, 8, 10)
-        lay.setSpacing(6)
+    def _build_rail(self) -> QWidget:
+        """Left navigation rail v2 — icon rows, three groups, live badges.
 
-        hdr = QLabel("◈ SYS MONITOR")
-        hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent; "
-                          f"border-bottom: 1px solid {C.BORDER}; padding-bottom: 4px;")
-        lay.addWidget(hdr)
-        lay.addSpacing(2)
+        CORE      chat · monitor
+        WORKSPACE spaces · agents · computers · calls · agenda · memory · skills
+        STUDIO    display · scan · 3d · web   (one studio section, 4 surfaces)
+        """
+        w = QWidget()
+        w.setFixedWidth(_RAIL_W)
+        w.setStyleSheet(
+            f"background: {C.DARK}; border-right: 1px solid {C.BORDER};")
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(10, 12, 10, 12)
+        lay.setSpacing(3)
+
+        def _sec(txt: str):
+            l = QLabel(f"   {txt}")
+            l.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            l.setStyleSheet(
+                f"color: {C.TEXT_DIM}; background: transparent;"
+                f" padding-top: 9px; padding-bottom: 2px;")
+            lay.addWidget(l)
+
+        def _btn(key: str, text: str, icon: str):
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(3)
+            b = QPushButton(f"  {text}")
+            b.setObjectName("rail")
+            b.setCheckable(True)
+            b.setFixedHeight(32)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setProperty("rail_icon", icon)
+            set_icon(b, icon, C.TEXT_MED, 15)
+            b.clicked.connect(lambda _=False, k=key: self._switch_section(k))
+            rl.addWidget(b, stretch=1)
+            badge = QLabel("")
+            badge.setFixedHeight(18)
+            badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setStyleSheet(
+                f"color: {C.WHITE}; background: {C.PRI};"
+                f" border-radius: 9px; padding: 0 6px; min-width: 14px;")
+            badge.hide()
+            rl.addWidget(badge)
+            self._rail_btns[key] = b
+            self._rail_badges[key] = badge
+            lay.addWidget(row)
+
+        self._rail_btns: dict[str, QPushButton] = {}
+        self._rail_badges: dict[str, QLabel] = {}
+
+        _sec("CORE")
+        _btn("chat",     "CHAT",     "chat")
+        _btn("monitor",  "MONITOR",  "monitor")
+        _sec("WORKSPACE")
+        _btn("spaces",    "SPACES",    "folder")
+        _btn("agents",    "AGENTS",    "bot")
+        _btn("computers", "COMPUTERS", "server")
+        _btn("calls",     "CALLS",     "phone")
+        _btn("agenda",    "AGENDA",    "checks")
+        _btn("memory",    "MEMORY",    "database")
+        _btn("skills",    "SKILLS",    "zap")
+        _sec("STUDIO")
+        _btn("display", "DISPLAY", "layout")
+        _btn("scan",    "SCAN",    "search")
+        _btn("3d",      "3D",      "cube")
+        _btn("web",     "WEB",     "globe")
+
+        lay.addStretch()
+
+        # status tiles bottom
+        self._rail_core_lbl = QLabel("AI CORE\nACTIVE")
+        self._rail_core_lbl.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        self._rail_core_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._rail_core_lbl.setStyleSheet(
+            f"color: {C.GREEN}; background: {C.PANEL2};"
+            f" border: 1px solid {C.BORDER_A}; border-radius: 8px;"
+            f" padding: 6px;")
+        lay.addWidget(self._rail_core_lbl)
+        proto = QLabel(f"PROTOCOL\n{APP_PROTOCOL}")
+        proto.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        proto.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        proto.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: {C.PANEL2};"
+            f" border: 1px solid {C.BORDER_A}; border-radius: 8px;"
+            f" padding: 6px;")
+        lay.addWidget(proto)
+
+        self._rail_btns["chat"].setChecked(True)
+
+        # badge heartbeat — one poller keeps the rail honest (pending count)
+        self._badge_tmr = QTimer(self)
+        self._badge_tmr.setInterval(45000)
+        self._badge_tmr.timeout.connect(self.refresh_pending_badge)
+        self._badge_tmr.start()
+        QTimer.singleShot(2500, self.refresh_pending_badge)
+        return w
+
+    def _sync_rail_icons(self, checked: str) -> None:
+        """Recolour row icons: white on the active row, muted elsewhere."""
+        for key, b in self._rail_btns.items():
+            try:
+                set_icon(b, b.property("rail_icon") or "grid",
+                         C.WHITE if key == checked else C.TEXT_MED, 15)
+            except Exception:                          # noqa: BLE001
+                pass
+
+    # rail keys that all open the ONE studio section on a given surface
+    _STUDIO_KEYS = frozenset({"display", "scan", "3d", "web"})
+
+    def _switch_section(self, name: str) -> None:
+        """Rail navigation. Studio keys (display/scan/3d/web) all land on the
+        studio section with that surface active — dashboard parity."""
+        try:
+            surface = None
+            if name in self._STUDIO_KEYS:
+                surface = name
+                name = "studio"
+            idx = self._section_index.get(name, 0)
+            self._section_stack.setCurrentIndex(idx)
+            for k, b in self._rail_btns.items():
+                b.setChecked(k == (surface or name))
+            self._sync_rail_icons(surface or name)
+            # the log/composer column belongs to the assistant conversation —
+            # workspace/studio sections take the full width (web UI parity).
+            try:
+                self._right_panel.setVisible(
+                    (surface or name) in ("chat", "monitor"))
+            except Exception:
+                pass
+            # studio: show the requested surface, drop its has-new dot
+            if name == "studio":
+                st = getattr(self, "_studio_panel", None)
+                if st is not None and surface:
+                    st.show_surface(surface)
+                try:
+                    bd = self._rail_badges.get(surface or "")
+                    if bd is not None:
+                        bd.hide()
+                except Exception:
+                    pass
+            # refresh the section you landed on (cheap GETs, thread-pool)
+            page = self._section_stack.currentWidget()
+            if hasattr(page, "refresh"):
+                page.refresh()
+        except Exception as e:                           # noqa: BLE001
+            print(f"[UI] section switch {name}: {e}")
+
+    def _jump_section(self, idx: int) -> None:
+        """Ctrl+N shortcut target — jump to the section at stack index."""
+        names = getattr(self, "_section_names", [])
+        if 0 <= idx < len(names):
+            self._switch_section(names[idx])
+
+    def _open_palette(self) -> None:
+        """Ctrl+K command palette: fuzzy over sections AND every
+        registered tool (Report M — 'palette: send telegram…'). Enter on
+        a section jumps; Enter on a tool RUNS it with the typed remainder
+        as its query/prompt, through main's palette_run (autonomy gate +
+        activity timeline + audit chain all intact)."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Command palette  —  Ctrl+K")
+        dlg.setFixedWidth(440)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(6)
+        edit = QLineEdit()
+        edit.setPlaceholderText("Type a section or tool…  (Enter runs/jumps)")
+        edit.setFont(QFont("Courier New", 10))
+        edit.setStyleSheet(
+            f"QLineEdit {{ background: {C.BG}; color: {C.WHITE};"
+            f" border: 1px solid {C.ACC}; border-radius: 6px;"
+            f" padding: 7px 9px; }}")
+        v.addWidget(edit)
+        lst = QListWidget()
+        lst.setStyleSheet(
+            f"QListWidget {{ background: {C.PANEL}; color: {C.TEXT};"
+            f" border: 1px solid {C.BORDER}; border-radius: 6px;"
+            f" outline: none; }}"
+            f" QListWidget::item {{ padding: 6px 8px; }}"
+            f" QListWidget::item:selected {{ background: {C.PANEL_H};"
+            f" color: {C.WHITE}; }}")
+        names = list(getattr(self, "_section_names", []))
+        try:
+            tool_names = sorted(str(n) for n in
+                                (getattr(self, "get_action_names",
+                                         None) or (lambda: []))())
+        except Exception:
+            tool_names = []
+
+        def _fill(q: str = "") -> None:
+            lst.clear()
+            q = q.strip().lower()
+            for i, n in enumerate(names):
+                if not q or q in n.lower():
+                    it = QListWidgetItem(f"  {n.upper()}")
+                    it.setData(Qt.ItemDataRole.UserRole,
+                               ("section", i))
+                    lst.addItem(it)
+            for n in tool_names:
+                if not q or q in n.lower():
+                    it = QListWidgetItem(f"  ▸ {n}")
+                    it.setData(Qt.ItemDataRole.UserRole, ("tool", n))
+                    lst.addItem(it)
+            if lst.count():
+                lst.setCurrentRow(0)
+
+        def _run() -> None:
+            it = lst.currentItem()
+            if it is None:
+                return
+            kind, payload = it.data(Qt.ItemDataRole.UserRole)
+            if kind == "section":
+                self._switch_section(names[int(payload)])
+                dlg.accept()
+                return
+            name = str(payload)
+            raw = edit.text().strip()
+            args: dict = {}
+            if raw:
+                if raw.lower().startswith(name.lower()):
+                    rest = raw[len(name):].strip()
+                    if rest:
+                        args = {"query": rest, "prompt": rest}
+                else:
+                    args = {"query": raw, "prompt": raw}
+            runner = getattr(self, "palette_run", None)
+            if runner is None:
+                self.toast("Palette runner not wired (UI standalone)",
+                           "warn")
+                dlg.accept()
+                return
+            dlg.accept()
+            self.toast(f"Running {name}…")
+            try:
+                out = runner(name, args)
+            except Exception as e:
+                self.toast(f"{name} failed: {e}", "error")
+                return
+            try:
+                self.show_content(f"PALETTE — {name.upper()}",
+                                  str(out)[:4000])
+            except Exception:
+                pass
+            self.toast(f"{name}: " + str(out)[:120])
+
+        edit.textChanged.connect(_fill)
+        edit.returnPressed.connect(_run)
+        lst.itemActivated.connect(lambda _it: _run())
+        v.addWidget(lst, stretch=1)
+        _fill()
+        dlg.exec()
+        edit.setFocus()
+
+
+    def refresh_pending_badge(self) -> None:
+        """Pull /api/pending and light the SPACES rail badge (has-new)."""
+        try:
+            if self._dash_api.configured():
+                self._dash_api.get("hud:pending", "/api/pending?status=pending")
+        except Exception:
+            pass
+
+    def _on_dash_heartbeat(self, key: str, data) -> None:
+        """Shared api receiver: only the badge request lands here."""
+        if key != "hud:pending" or not isinstance(data, list):
+            return
+        self._pending_n = len(data)
+        badge = self._rail_badges.get("spaces")
+        if badge is not None:
+            if self._pending_n:
+                badge.setText(str(min(self._pending_n, 99)))
+                self._style_badge(badge, "count")
+                badge.show()
+            else:
+                badge.hide()
+
+    def _style_badge(self, badge, mode: str) -> None:
+        """Badges have two shapes: a count pill (pending approvals) and a
+        compact has-new dot (studio surfaces) — restyle on every mode switch
+        so a dot never reads like a toggle."""
+        try:
+            if mode == "dot":
+                badge.setFixedWidth(18)
+                badge.setStyleSheet(
+                    f"color: {C.WHITE}; background: {C.PRI};"
+                    f" border-radius: 9px; padding: 0;"
+                    f" font-size: 9px;")
+            else:                                   # count pill
+                badge.setMinimumWidth(14)
+                badge.setMaximumWidth(200)
+                badge.setStyleSheet(
+                    f"color: {C.WHITE}; background: {C.PRI};"
+                    f" border-radius: 9px; padding: 0 6px;"
+                    f" font-size: 10px;")
+        except Exception:                               # noqa: BLE001
+            pass
+
+    def toast(self, msg: str, kind: str = "info", ms: int = 3200) -> None:
+        """Floating status chip, top-right — action results land here so the
+        user never has to hunt the activity log for an outcome."""
+        try:
+            _ToastLayer.get(self).push(str(msg or ""), kind, ms)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _build_monitor_page(self) -> QWidget:
+        """System monitor — the old left panel, promoted to a full section."""
+        wrap = QWidget()
+        outer = QVBoxLayout(wrap)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(8)
+
+        hdr = QLabel("◈ SYSTEM MONITOR")
+        hdr.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;"
+                          f"letter-spacing: 2px;")
+        outer.addWidget(hdr)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(0, 0, 6, 0)
+        lay.setSpacing(6)
 
         self._bar_cpu = MetricBar("CPU", C.PRI)
         self._bar_mem = MetricBar("MEM", C.ACC2)
         self._bar_net = MetricBar("NET", C.GREEN)
         self._bar_gpu = MetricBar("GPU", C.ACC)
         self._bar_tmp = MetricBar("TMP", "#ff6688")
-
         for bar in [self._bar_cpu, self._bar_mem, self._bar_net,
                     self._bar_gpu, self._bar_tmp]:
             lay.addWidget(bar)
-
         lay.addSpacing(4)
 
         info_panel = QWidget()
         info_panel.setStyleSheet(
-            f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 4px;"
+            f"background: {C.PANEL2}; border: 1px solid {C.BORDER};"
+            f" border-radius: 8px;"
         )
         ip_lay = QVBoxLayout(info_panel)
-        ip_lay.setContentsMargins(6, 5, 6, 5)
-        ip_lay.setSpacing(3)
+        ip_lay.setContentsMargins(10, 8, 10, 8)
+        ip_lay.setSpacing(4)
 
         self._uptime_lbl = QLabel("UP  --:--")
-        self._uptime_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        self._uptime_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent; border: none;")
+        self._uptime_lbl.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self._uptime_lbl.setStyleSheet(
+            f"color: {C.GREEN}; background: transparent; border: none;")
         ip_lay.addWidget(self._uptime_lbl)
 
         self._proc_lbl = QLabel("PROC  --")
-        self._proc_lbl.setFont(QFont("Courier New", 8))
-        self._proc_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+        self._proc_lbl.setFont(QFont("Courier New", 9))
+        self._proc_lbl.setStyleSheet(
+            f"color: {C.TEXT_MED}; background: transparent; border: none;")
         ip_lay.addWidget(self._proc_lbl)
 
-        os_name = {"Windows": "WIN", "Darwin": "macOS", "Linux": "LINUX"}.get(_OS, _OS.upper())
+        os_name = {"Windows": "WIN", "Darwin": "macOS",
+                   "Linux": "LINUX"}.get(_OS, _OS.upper())
         os_lbl = QLabel(f"OS  {os_name}")
-        os_lbl.setFont(QFont("Courier New", 8))
-        os_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent; border: none;")
+        os_lbl.setFont(QFont("Courier New", 9))
+        os_lbl.setStyleSheet(
+            f"color: {C.ACC2}; background: transparent; border: none;")
         ip_lay.addWidget(os_lbl)
-
         lay.addWidget(info_panel)
         lay.addSpacing(4)
 
+        sec_lbl = QLabel("SEC  CLEARED")
+        sec_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        sec_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sec_lbl.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2};"
+            f"border: 1px solid {C.BORDER_A}; border-radius: 6px; padding: 6px;")
+        lay.addWidget(sec_lbl)
         lay.addStretch()
 
-        for txt, col in [
-            ("AI CORE\nACTIVE",  C.GREEN),
-            ("SEC\nCLEARED",     C.PRI),
-            ("PROTOCOL\n" + APP_PROTOCOL,   C.TEXT_DIM),
-        ]:
-            lbl = QLabel(txt)
-            lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(
-                f"color: {col}; background: {C.PANEL2};"
-                f"border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 4px;"
-            )
-            lay.addWidget(lbl)
-
-        return w
+        scroll.setWidget(inner)
+        outer.addWidget(scroll, stretch=1)
+        return wrap
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
         w.setFixedWidth(_RIGHT_W)
@@ -4163,10 +7173,31 @@ class MainWindow(QMainWindow):
         sep2.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         lay.addWidget(sep2)
 
+        lay.addWidget(_sec("QUICK ACTIONS"))
+        qrow = QHBoxLayout(); qrow.setSpacing(5)
+        for _lbl, _prompt in (
+            ("STATUS", "give me a system status report"),
+            ("AGENDA", "what's on my agenda right now?"),
+            ("RESEARCH", "research the latest AI agent frameworks "
+                         "and save the report"),
+            ("REMEMBER", "remember this for later: "),
+            ("SCAN", "run a safe system scan and summarize the results"),
+        ):
+            _b = QPushButton(_lbl)
+            _b.setObjectName("chip")
+            _b.setFixedHeight(24)
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setToolTip(f"sends:  {_prompt}")
+            _b.clicked.connect(lambda _=False, t=_prompt: self._quick_say(t))
+            qrow.addWidget(_b)
+        qrow.addStretch()
+        lay.addLayout(qrow)
+
         lay.addWidget(_sec("COMMAND INPUT"))
         lay.addLayout(self._build_input_row())
 
-        self._interrupt_btn = QPushButton("✋  INTERRUPT  [ESC]")
+        self._interrupt_btn = QPushButton("  INTERRUPT  [ESC]")
+        set_icon(self._interrupt_btn, "x", C.RED, 13)
         self._interrupt_btn.setFixedHeight(34)
         self._interrupt_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self._interrupt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4185,7 +7216,8 @@ class MainWindow(QMainWindow):
         self._interrupt_btn.clicked.connect(self._do_interrupt)
         lay.addWidget(self._interrupt_btn)
 
-        self._mute_btn = QPushButton("🎙  MICROPHONE ACTIVE")
+        self._mute_btn = QPushButton("  MICROPHONE ACTIVE")
+        set_icon(self._mute_btn, "mic", C.GREEN, 13)
         self._mute_btn.setFixedHeight(30)
         self._mute_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4196,7 +7228,7 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_quick_drawer(self) -> QWidget:
-        """Floating overlay panel shown when the ⚙ header button is toggled."""
+        """Floating overlay panel shown when the header settings button is toggled."""
         _BTN_STYLE_PRI = f"""
             QPushButton {{
                 background: #00091a; color: {C.PRI};
@@ -4260,7 +7292,8 @@ class MainWindow(QMainWindow):
         self._autostart_btn.clicked.connect(self._toggle_autostart)
         lay.addWidget(self._autostart_btn)
 
-        cust_btn = QPushButton("⚙  CUSTOMISE ASSISTANT")
+        cust_btn = QPushButton("  CUSTOMISE ASSISTANT")
+        set_icon(cust_btn, "sliders", C.PRI, 14)
         cust_btn.setFixedHeight(26)
         cust_btn.setFont(QFont("Courier New", 7))
         cust_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4268,7 +7301,8 @@ class MainWindow(QMainWindow):
         cust_btn.clicked.connect(self._open_customize)
         lay.addWidget(cust_btn)
 
-        audio_btn = QPushButton("🎧  AUDIO DEVICES")
+        audio_btn = QPushButton("  AUDIO DEVICES")
+        set_icon(audio_btn, "volume", C.PRI, 14)
         audio_btn.setFixedHeight(26)
         audio_btn.setFont(QFont("Courier New", 7))
         audio_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4276,7 +7310,8 @@ class MainWindow(QMainWindow):
         audio_btn.clicked.connect(self._open_audio_devices)
         lay.addWidget(audio_btn)
 
-        mem_btn = QPushButton("🧠  MEMORY")
+        mem_btn = QPushButton("  MEMORY")
+        set_icon(mem_btn, "database", C.PRI, 14)
         mem_btn.setFixedHeight(26)
         mem_btn.setFont(QFont("Courier New", 7))
         mem_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4284,7 +7319,8 @@ class MainWindow(QMainWindow):
         mem_btn.clicked.connect(self._open_memory_panel)
         lay.addWidget(mem_btn)
 
-        plugin_btn = QPushButton("🧩  PLUGINS")
+        plugin_btn = QPushButton("  PLUGINS")
+        set_icon(plugin_btn, "grid", C.PRI, 14)
         plugin_btn.setFixedHeight(26)
         plugin_btn.setFont(QFont("Courier New", 7))
         plugin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4292,7 +7328,8 @@ class MainWindow(QMainWindow):
         plugin_btn.clicked.connect(self._open_plugin_manager)
         lay.addWidget(plugin_btn)
 
-        settings_btn = QPushButton("⚙  PLUGIN SETTINGS")
+        settings_btn = QPushButton("  PLUGIN SETTINGS")
+        set_icon(settings_btn, "wrench", C.PRI, 14)
         settings_btn.setFixedHeight(26)
         settings_btn.setFont(QFont("Courier New", 7))
         settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4329,7 +7366,8 @@ class MainWindow(QMainWindow):
             lay.addWidget(button)
             return button
 
-        fs_btn = _row(QPushButton("⛶  FULLSCREEN  [F11]"), self._BTN_DIM)
+        fs_btn = _row(QPushButton("  FULLSCREEN  [F11]"), self._BTN_DIM)
+        set_icon(fs_btn, "grid", C.TEXT_MED, 13)
         fs_btn.clicked.connect(self._toggle_fullscreen)
 
         self._brief_btn = _row(QPushButton())
@@ -4340,7 +7378,8 @@ class MainWindow(QMainWindow):
         self._wake_sleep_btn = _row(QPushButton())
         self._wake_sleep_btn.clicked.connect(self._tap_wake_manual)
         # Neutral until the real state lands from the background warm-up.
-        self._wake_btn.setText("🎙  WAKE WORD")
+        self._wake_btn.setText("  WAKE WORD")
+        set_icon(self._wake_btn, "mic", C.TEXT_MED, 13)
         self._wake_btn.setStyleSheet(self._BTN_DIM)
         self._wake_sleep_btn.hide()
 
@@ -4441,10 +7480,11 @@ class MainWindow(QMainWindow):
         self._input.returnPressed.connect(self._send)
         row.addWidget(self._input)
 
-        send = QPushButton("▸")
+        send = QPushButton()
         send.setFixedSize(30, 30)
-        send.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
         send.setCursor(Qt.CursorShape.PointingHandCursor)
+        send.setToolTip("Send")
+        set_icon(send, "send", C.PRI, 14)
         send.setStyleSheet(f"""
             QPushButton {{
                 background: {C.PANEL}; color: {C.PRI};
@@ -4563,6 +7603,12 @@ class MainWindow(QMainWindow):
         if first_show:
             total = self._center_split.height()
             self._center_split.setSizes([max(total - 220, 120), 220])
+        # Mirror into the studio section (display/scan/3d/web) — the same
+        # funnel the dashboard uses, so every surface has a desktop home.
+        try:
+            self._studio_panel.receive(title, text)
+        except Exception:                               # noqa: BLE001
+            pass
 
     # ── document review ──────────────────────────────────────────────────────
     # Rendered as rich text into the content panel that already exists, rather
@@ -4599,7 +7645,7 @@ class MainWindow(QMainWindow):
         for f in (findings or []):
             key, mark = self._REVIEW_MARKS.get(f.get("severity"), ("PRI_DIM", "·"))
             colour = getattr(C, key)
-            parts.append(f'<div style="margin-bottom:11px;">')
+            parts.append('<div style="margin-bottom:11px;">')
             parts.append(
                 f'<span style="color:{colour}; font-weight:bold;">{mark}</span> '
                 f'<span style="color:{C.WHITE}; font-weight:bold;">'
@@ -4932,7 +7978,7 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
         lay.addStretch()
-        lay.addWidget(_fl("By FatihMakes", C.PRI_DIM))
+        lay.addWidget(_fl("By Ankit Meena", C.PRI_DIM))
         return w
 
     def _on_file_selected(self, path: str):
@@ -5134,17 +8180,23 @@ class MainWindow(QMainWindow):
             QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}"""
         self._wake_btn.setEnabled(True)
         if not st["ready"]:
-            self._wake_btn.setText("⬇  WAKE WORD: DOWNLOAD")
+            self._wake_btn.setText("  WAKE WORD: DOWNLOAD")
             self._wake_btn.setStyleSheet(_off)
             self._wake_sleep_btn.hide()
         elif st["enabled"]:
-            self._wake_btn.setText("🎙  WAKE WORD: ON")
+            self._wake_btn.setText("  WAKE WORD: ON")
+            set_icon(self._wake_btn, "mic", C.GREEN, 13)
             self._wake_btn.setStyleSheet(_on)
             self._wake_sleep_btn.show()
-            self._wake_sleep_btn.setText("😴  SLEEP NOW" if st["awake"] else "👂  WAKE NOW")
+            self._wake_sleep_btn.setText(
+                "  SLEEP NOW" if st["awake"] else "  WAKE NOW")
+            set_icon(self._wake_sleep_btn,
+                     "power" if st["awake"] else "mic",
+                     C.RED if st["awake"] else C.GREEN, 13)
             self._wake_sleep_btn.setStyleSheet(_off)
         else:
-            self._wake_btn.setText("🎙  WAKE WORD: OFF")
+            self._wake_btn.setText("  WAKE WORD: OFF")
+            set_icon(self._wake_btn, "mic-off", C.TEXT_DIM, 13)
             self._wake_btn.setStyleSheet(_off)
             self._wake_sleep_btn.hide()
 
@@ -5166,8 +8218,9 @@ class MainWindow(QMainWindow):
             QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}"""
 
         ptt = get_push_to_talk_enabled()
-        self._ptt_btn.setText(f"🎚  PUSH-TO-TALK: {chord_label()}" if ptt
-                              else "🎚  PUSH-TO-TALK: OFF")
+        self._ptt_btn.setText(f"  PUSH-TO-TALK: {chord_label()}" if ptt
+                              else "  PUSH-TO-TALK: OFF")
+        set_icon(self._ptt_btn, "mic", C.PRI if ptt else C.TEXT_DIM, 13)
         self._ptt_btn.setStyleSheet(_on if ptt else _off)
         self._ptt_btn.setToolTip(
             "Microphone stays closed until you hold the key — nothing is sent "
@@ -5185,8 +8238,10 @@ class MainWindow(QMainWindow):
                 border: 1px solid {C.BORDER_A}; border-radius: 3px;
                 text-align: left; padding: 0 8px; }}
             QPushButton:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}"""
-        self._hud_btn.setText("🧑  HUD: ANIMATED FACE" if face
-                              else "◉  HUD: REACTOR CORE")
+        self._hud_btn.setText("  HUD: ANIMATED FACE" if face
+                              else "  HUD: REACTOR CORE")
+        set_icon(self._hud_btn, "eye" if face else "activity",
+                 C.PRI, 13)
         self._hud_btn.setStyleSheet(style)
         self._hud_btn.setToolTip(
             "An animated head that speaks your words and shows what JARVIS is "
@@ -5275,7 +8330,7 @@ class MainWindow(QMainWindow):
         st = self._wake_state()
         if not st["ready"]:
             # First time: download openwakeword + model in a worker thread.
-            self._wake_btn.setText("⬇  DOWNLOADING… (one-time)")
+            self._wake_btn.setText("  DOWNLOADING… (one-time)")
             self._wake_btn.setEnabled(False)
             def _work():
                 try:
@@ -5316,7 +8371,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, '_brief_btn'):
             return
         if enabled:
-            self._brief_btn.setText("☀  MORNING BRIEF: ON")
+            self._brief_btn.setText("  MORNING BRIEF: ON")
+            set_icon(self._brief_btn, "inbox", C.GREEN, 13)
             self._brief_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: #001a08; color: {C.GREEN};
@@ -5326,7 +8382,8 @@ class MainWindow(QMainWindow):
                 QPushButton:hover {{ background: #002010; }}
             """)
         else:
-            self._brief_btn.setText("☀  MORNING BRIEF: OFF")
+            self._brief_btn.setText("  MORNING BRIEF: OFF")
+            set_icon(self._brief_btn, "inbox", C.TEXT_DIM, 13)
             self._brief_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent; color: {C.TEXT_DIM};
@@ -5462,6 +8519,25 @@ class MainWindow(QMainWindow):
         ov = getattr(self, "_confirm_overlay", None)
         if ov is not None:
             ov.hide()
+
+    # ── Translate lens overlay ────────────────────────────────────────────────
+    def _show_lens(self, pairs, src: str, dst: str) -> None:
+        """Floating original → translated panel (Report I). Replaces any
+        live frame already up; auto-dismisses on its own timer."""
+        try:
+            prev = getattr(self, "_lens_ov", None)
+            if prev is not None:
+                try:
+                    prev.hide()
+                except Exception:
+                    pass
+            ov = _LensOverlay(pairs, src, dst, parent=self.centralWidget())
+            self._lens_ov = ov
+            self._centre_overlay(ov)
+            ov.show()
+            ov.raise_()
+        except Exception:
+            pass
             ov.deleteLater()
             self._confirm_overlay = None
 
@@ -5560,7 +8636,8 @@ class MainWindow(QMainWindow):
 
     def _style_mute_btn(self):
         if self._muted:
-            self._mute_btn.setText("🔇  MICROPHONE MUTED")
+            self._mute_btn.setText("  MICROPHONE MUTED")
+            set_icon(self._mute_btn, "mic-off", C.RED, 13)
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: #140006; color: {C.MUTED_C};
@@ -5568,7 +8645,8 @@ class MainWindow(QMainWindow):
                 }}
             """)
         else:
-            self._mute_btn.setText("🎙  MICROPHONE ACTIVE")
+            self._mute_btn.setText("  MICROPHONE ACTIVE")
+            set_icon(self._mute_btn, "mic", C.GREEN, 13)
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: #00140a; color: {C.GREEN};
@@ -5576,6 +8654,11 @@ class MainWindow(QMainWindow):
                 }}
                 QPushButton:hover {{ background: #001f10; }}
             """)
+
+    def _quick_say(self, prompt: str):
+        """One-press quick action: fill + send through the normal path."""
+        self._input.setText(prompt)
+        self._send()
 
     def _send(self):
         txt = self._input.text().strip()
@@ -5585,9 +8668,40 @@ class MainWindow(QMainWindow):
         if self.on_text_command:
             threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
 
+    def _apply_emotion(self, emotion: str):
+        """Act a content-driven emotion on the avatar (R2 acting)."""
+        av = getattr(self, "_avatar", None)
+        if av is not None and hasattr(av, "set_emotion"):
+            try:
+                av.set_emotion(emotion)
+            except Exception:
+                pass
+
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        # Header pill mirrors the state — icon + text, same colour language
+        # as the web UI (no emoji glyphs anywhere in the chrome).
+        pill = getattr(self, "_state_pill", None)
+        if pill is not None:
+            col = {"LISTENING": C.GREEN, "SPEAKING": C.PRI,
+                   "THINKING": C.ACC, "SLEEPING": C.TEXT_DIM,
+                   "ERROR": C.RED}.get(state, C.TEXT_MED)
+            ico = {"LISTENING": "mic", "SPEAKING": "volume",
+                   "THINKING": "sparkles", "SLEEPING": "power",
+                   "ERROR": "alert"}.get(state, "activity")
+            pill.setText(f"  {state}")
+            pill.setStyleSheet(
+                f"color: {col}; background: transparent;"
+                f" border: none; font-weight: bold;")
+            wrap = getattr(self, "_state_wrap", None)
+            if wrap is not None:
+                wrap.setStyleSheet(
+                    f"background: {C.PANEL};"
+                    f" border: 1px solid {col}; border-radius: 11px;")
+            ip = getattr(self, "_state_icon", None)
+            if ip is not None:
+                ip.setPixmap(icon_pm(ico, col, 12))
 
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
@@ -5638,9 +8752,12 @@ class JarvisUI:
     def __init__(self, face_path: str, size=None):
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
+        install_global_qss(self._app)          # baseline alignment, once
         self._win = MainWindow(face_path)
         self.root = _RootShim(self._app)
         self._win.show()
+        # Set by main.py: (title, text) → dashboard render surface.
+        self._content_hook = None
 
     @property
     def muted(self) -> bool:
@@ -5792,6 +8909,10 @@ class JarvisUI:
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
 
+    def set_emotion(self, emotion: str):
+        """Thread-safe: model replies act an emotion on the avatar."""
+        self._win._emo_sig.emit(emotion)
+
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
 
@@ -5799,9 +8920,43 @@ class JarvisUI:
         while not self._win._ready:
             time.sleep(0.1)
 
+    def set_dashboard_api(self, url: str, token: str) -> None:
+        """Wire the loopback dashboard API for the workspace sections
+        (Spaces/Agents/Computers/Calls/Agenda). Called by main.py once the
+        dashboard server is up — thread-safe (plain attribute writes)."""
+        try:
+            self._win._dash_api.configure(url, token)
+            self._win.refresh_pending_badge()
+            for name in ("spaces", "agents", "computers", "calls",
+                         "agenda", "memory", "skills"):
+                page = getattr(self._win, f"_{name}_panel", None)
+                if page is not None and hasattr(page, "refresh"):
+                    page.refresh()
+        except Exception:
+            pass
+
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
+        # Universal render surface: mirror to whatever the host attached
+        # (main.py routes it to the dashboard's CHAT|DISPLAY|SCAN|3D|WEB
+        # tabs). The hook runs on the CALLER's thread — it must be
+        # thread-safe itself; failures never break the on-screen panel.
+        hook = self._content_hook
+        if hook is not None:
+            try:
+                hook(title, text)
+            except Exception:
+                pass
+
+    def show_lens(self, pairs, src: str = "", dst: str = "") -> None:
+        """Thread-safe: floating translate-lens overlay (original →
+        translated). No-op when the HUD window is gone."""
+        try:
+            self._win._lens_sig.emit(list(pairs), str(src or ""),
+                                     str(dst or ""))
+        except Exception:
+            pass
 
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.

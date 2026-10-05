@@ -1,0 +1,25 @@
+# ── MARK LV / JARVIS — project tooling ────────────────────────────────────────
+# Single source of truth for lint, format and test configuration.
+# Run locally:   ruff check .   ·   python -m pytest tests/ -q
+
+[tool.ruff]
+target-version = "py311"          # setup.py hard floor; also silences the
+line-length = 100                 # BaseExceptionGroup false positive (3.11+ builtin)
+
+[tool.ruff.lint]
+# E4/E7/E9 = import & statement errors + syntax; F = pyflakes (undefined names,
+# unused imports/variables). This is the "does the code actually work" set.
+select = ["E4", "E7", "E9", "F"]
+# E701/E702 — the codebase's deliberate one-liner style (`if x: return y`).
+# E402      — guarded imports after sys.path/flag setup are intentional.
+# E741      — short names (l/I/O) in compact loops; renaming risks shadowing.
+ignore = ["E701", "E702", "E402", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# The dispatcher test extracts a slice of main.py with exec() on purpose —
+# it must load the real production method without importing Qt.
+"tests/*" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

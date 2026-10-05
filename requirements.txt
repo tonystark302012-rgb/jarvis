@@ -63,7 +63,8 @@ qrcode[pil]>=7,<9
 google-api-python-client     # gmail_control, calendar_control — OAuth
 google-auth-oauthlib         # gmail_control, calendar_control — OAuth
 tinytuya                     # home_assistant — Tuya / Smart Life bulbs
-paho-mqtt                    # printer_control — MQTT printers
+paho-mqtt                    # printer_control — MQTT printers;
+                             # smart_home — HA/zigbee2mqtt/Tasmota pub-sub
 openpyxl                     # excel_writer — spreadsheet output
 youtube-transcript-api       # youtube_video — transcript fetch for summaries
 pygetwindow                  # game_updater, chat_takeover — window geometry
@@ -86,6 +87,9 @@ ddgs>=9,<10                  # web_search — the maintained successor to
                              # duckduckgo-search, which is tried first and
                              # falls back to the old name automatically
 pdfplumber                   # file_processor — PDF text and tables
+tree-sitter>=0.23,<1         # code_outline — exact AST when installed
+tree-sitter-python>=0.23,<1  # code_outline — Python grammar pack (.py
+                             # falls back to stdlib ast without it)
 PyPDF2                       # file_processor — PDF fallback reader
 python-docx                  # file_processor — .docx reading
 pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
@@ -98,6 +102,14 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 #   pip install pydub        # file_processor: audio metadata and conversion
 #                            #   (also needs ffmpeg on PATH for most formats)
 #   pip install mediapipe    # pushup_counter: elbow-angle rep detection
+
+# ── Auto-discovered actions & scheduling engines ──────────────────────────────
+croniter>=2,<3          # dots scheduler: cron / at-style recurring task windows
+feedparser>=6,<7        # feed action: RSS/Atom + GitHub releases.atom watching
+sqlite-vec>=0.1,<1      # hybrid RAG: vector search inside SQLite
+trafilatura>=1.8,<2     # scrape: article-grade HTML → text extraction
+pypdfium2>=4,<7         # file_processor: render scanned-PDF pages for OCR
+duckdb>=1,<2            # data_query: SQL over CSV/Parquet files
 
 # ── Optional: local wake word ("Hey Jarvis") ──────────────────────────────────
 # Deliberately NOT installed by default — it's opt-in. Enable it (and download

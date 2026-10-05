@@ -134,11 +134,15 @@ def resolve(accepted: bool) -> None:
 
     if time.monotonic() - p.at > TIMEOUT_SECONDS:
         _log(f"SYS: Confirmation expired — {p.title}")
+        _note(p.title, "expired")
         return
 
     if not accepted:
         _log(f"SYS: Cancelled — {p.title}")
+        _note(p.title, "cancelled")
         return
+
+    _note(p.title, "confirmed")
 
     def _worker():
         try:
@@ -149,6 +153,35 @@ def resolve(accepted: bool) -> None:
 
     threading.Thread(target=_worker, daemon=True,
                      name=f"confirm-{p.key}").start()
+
+
+# ── Proactive 3.0: decision memory ───────────────────────────────────────────
+# Recent outcomes so the next proactive prompt can (a) surface a decision
+# still waiting and (b) mention missed/expired ones — never re-ask answered.
+_history: list[dict] = []
+_HISTORY_CAP = 20
+_hist_lock = threading.Lock()
+
+
+def _note(title: str, outcome: str) -> None:
+    with _hist_lock:
+        _history.append({"title": str(title)[:120], "outcome": outcome,
+                         "at": time.time()})
+        del _history[:-_HISTORY_CAP]
+
+
+def stats() -> dict:
+    """Snapshot for the proactive prompt: live pending + recent outcomes."""
+    with _lock:
+        pending = _pending
+    live: dict = {}
+    if pending is not None and time.monotonic() - pending.at <= TIMEOUT_SECONDS:
+        live = {"title": pending.title,
+                "age_s": round(time.monotonic() - pending.at)}
+    with _hist_lock:
+        recent = list(_history[-5:])
+    return {"pending": live, "recent": recent,
+            "total": len(_history)}
 
 
 def pending_title() -> str:

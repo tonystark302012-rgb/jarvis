@@ -90,6 +90,30 @@ def _rate(dt: float, tau: float) -> float:
     return 1.0 - math.exp(-dt / tau)
 
 
+def emotion_overlay(name: str, brow: float, lid: float,
+                    bias: list[float]) -> tuple[float, float, list[float]]:
+    """Blend an emotion over the state's face targets. Pure — tests."""
+    b, l = brow, lid
+    bias = list(bias)
+    if name == "happy":
+        b += 0.35
+        l = max(l, 1.0)
+        bias = [0.0, 0.06]            # eyes lift toward the user
+    elif name == "concerned":
+        b -= 0.28
+        l = min(l, 0.86)
+        bias = [0.0, -0.10]
+    elif name == "thinking":
+        b -= 0.25
+        if bias == [0.0, 0.0]:
+            bias = [0.55, 0.35]       # glance aside like THINKING does
+    elif name == "surprised":
+        b += 0.60
+        l = max(l, 1.0)
+        bias = [0.0, 0.10]
+    return b, l, bias
+
+
 def _c(col: QColor, a: float) -> QColor:
     """Copy of `col` at alpha `a` (0-255, clamped)."""
     q = QColor(col)
@@ -191,6 +215,7 @@ class HoloAvatar:
         self._lids = 1.0           # 1 = wide, 0 = shut; low while asleep
         self._brow_bias = 0.0      # concentration pulls the brows down
         self._glance = None        # (dx, dy, until_t) — a deliberate look
+        self._emo = ("", 0.0)      # (name, until_t) — content-driven acting
 
         # ── viseme ──────────────────────────────────────────────────────────
         # Loudness alone only answers "how far open", which is why an RMS-driven
@@ -359,6 +384,15 @@ class HoloAvatar:
             brow_bias = 0.10 if st == "LISTENING" else 0.0
             lid_tgt = 1.0
 
+        # ── emotion overlay (content-driven, held a few seconds) ────────────
+        if self._emo[0]:
+            if t >= self._emo[1]:
+                self._emo = ("", 0.0)
+            else:
+                brow_bias, lid_tgt, bias_tgt = emotion_overlay(
+                    self._emo[0], brow_bias, lid_tgt, self._bias_tgt)
+                self._bias_tgt = bias_tgt
+
         for i in (0, 1):
             self._gaze_bias[i] += (self._bias_tgt[i] - self._gaze_bias[i]) * 0.06
         self._lids += (lid_tgt - self._lids) * 0.08
@@ -414,6 +448,21 @@ class HoloAvatar:
                 self._blink = 1.0
                 gap = 5.5 if thinking else 3.4
                 self._blink_at = t + gap + 3.1 * random.random()
+
+    # ── emotion acting (R2) ──────────────────────────────────────────────────
+    # Content-driven expression: core.emotion.tag() picks the word, this
+    # method holds it for `hold` seconds while step() blends it over the
+    # normal state face. Pure blend lives in emotion_overlay() for tests.
+
+    _EMO_SET = ("happy", "concerned", "thinking", "surprised", "neutral")
+
+    def set_emotion(self, emotion: str, hold: float = 4.0) -> str:
+        """Act an emotion for `hold` seconds. Returns the applied name."""
+        name = str(emotion or "").lower().strip()
+        if name not in self._EMO_SET:
+            name = "neutral"
+        self._emo = (name, (self._t or 0.0) + max(0.0, float(hold)))
+        return name
 
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
         """Look deliberately somewhere for `hold` seconds, then wander again.

@@ -218,6 +218,20 @@ def save_turn_tuning(values: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
 
+def get_barge_in_enabled() -> bool:
+    """Auto barge-in: cut the reply short when the user talks over it.
+
+    On by default — the echo-aware classifier in core/echo.py only fires
+    after sustained evidence, so a cough cannot stop JARVIS. Set
+    "barge_in": false in config/api_keys.json to restore the old
+    always-listen-to-the-end behaviour."""
+    return bool(load_api_keys().get("barge_in", True))
+
+
+def save_barge_in_enabled(enabled: bool) -> None:
+    _save_flag("barge_in", bool(enabled))
+
+
 def get_proactive_audio_enabled() -> bool:
     """Whether the model gets to decide an utterance was not aimed at it and
     stay quiet.

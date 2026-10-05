@@ -1,165 +1,88 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#0b1220">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>JARVIS Dashboard</title>
+  <title>JARVIS</title>
   <script src="/static/crypto.js"></script>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg:      #07090f;
-      --surface: rgba(255,255,255,0.04);
-      --border:  rgba(255,255,255,0.07);
-      --accent:  #6366f1;
-      --adim:    rgba(99,102,241,0.14);
-      --text:    #dde3ed;
-      --muted:   #5e6a7e;
-      --green:   #22c55e;
-      --gdim:    rgba(34,197,94,0.14);
-    }
-    html, body {
-      height: 100%; background: var(--bg); color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      display: flex; flex-direction: column; overflow: hidden;
-    }
-
-    /* ── HEADER ── */
-    header {
-      flex-shrink: 0; display: flex; align-items: center; gap: 10px;
-      padding: 12px 16px; border-bottom: 1px solid var(--border);
-      background: rgba(7,9,15,0.95);
-    }
-    .logo { font-size: 15px; font-weight: 700; letter-spacing: 6px; }
-    .logo em { color: var(--accent); font-style: normal; }
-    .pill {
-      display: flex; align-items: center; gap: 6px; padding: 4px 11px;
-      border-radius: 99px; background: var(--surface); border: 1px solid var(--border);
-      font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;
-      color: var(--muted); transition: all 0.3s;
-    }
-    .pill.on { background: var(--gdim); border-color: rgba(34,197,94,0.3); color: var(--green); }
-    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); transition: background 0.3s; }
-    .pill.on .dot { background: var(--green); animation: blink 2s infinite; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
-    .spacer { flex: 1; }
-    .enc-badge {
-      font-size: 9px; font-weight: 700; letter-spacing: 1.5px; padding: 3px 8px;
-      border-radius: 4px; display: none;
-    }
-    .enc-badge.on  { display: block; background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.25); color: var(--green); }
-    .enc-badge.off { display: block; background: rgba(255,100,100,0.08); border: 1px solid rgba(255,100,100,0.2); color: #f87171; }
-    .url { font-size: 10px; font-family: monospace; color: var(--muted); padding: 4px 9px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
-
-    /* ── FEED ── */
-    main { flex: 1; overflow-y: auto; padding: 14px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
-    main::-webkit-scrollbar { width: 3px; }
-    main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.55; animation: pop 0.18s ease; }
-    @keyframes pop { from { opacity:0; transform:translateY(4px); } }
-    .msg-j   { align-self:flex-start; background:var(--adim);   border:1px solid rgba(99,102,241,0.18); border-bottom-left-radius:4px; }
-    .msg-u   { align-self:flex-end;   background:var(--surface); border:1px solid var(--border);        border-bottom-right-radius:4px; }
-    .msg-sys { align-self:center; font-size:11px; color:var(--muted); padding:2px 0; background:transparent; border:none; letter-spacing:0.3px; }
-    .lbl { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; margin-bottom:4px; }
-    .msg-j .lbl { color:var(--accent); }
-    .msg-u .lbl { color:var(--muted); text-align:right; }
-
-    /* ── FILE CARD ── */
-    .msg-file {
-      align-self: flex-end;
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 14px; border-bottom-right-radius: 4px;
-      padding: 11px 14px; display: flex; align-items: center; gap: 12px;
-      max-width: 82%; animation: pop 0.18s ease;
-    }
-    .fc-icon { font-size: 26px; flex-shrink: 0; }
-    .fc-meta { flex: 1; min-width: 0; }
-    .fc-lbl  { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; color:var(--muted); margin-bottom:4px; }
-    .fc-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .fc-size { font-size: 11px; color: var(--muted); margin-top: 2px; }
-    .fc-bar-wrap { height: 3px; background: var(--border); border-radius: 2px; margin-top: 7px; overflow: hidden; }
-    .fc-bar { height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width 0.12s linear; }
-    .fc-status { font-size: 10px; font-weight: 700; letter-spacing: 1px; flex-shrink: 0; color: var(--muted); }
-    .fc-status.done { color: var(--green); }
-    .fc-status.err  { color: #f87171; }
-    .fc-dl { display:block; margin-top:6px; font-size:11px; color:var(--accent); text-decoration:none; font-weight:600; }
-    .fc-dl:hover { opacity: 0.8; }
-
-    /* ── FOOTER ── */
-    footer { flex-shrink:0; padding:10px 14px; border-top:1px solid var(--border); background:rgba(7,9,15,0.95); display:flex; gap:8px; align-items:center; }
-    #inp { flex:1; padding:11px 14px; background:var(--surface); border:1.5px solid var(--border); border-radius:12px; color:var(--text); font-size:14px; outline:none; transition:border-color 0.15s; }
-    #inp:focus { border-color: var(--accent); }
-    #inp::placeholder { color: var(--muted); }
-    .btn { padding:11px 15px; border:none; border-radius:12px; font-size:11px; font-weight:700; letter-spacing:1.5px; cursor:pointer; transition:opacity 0.15s,transform 0.1s; }
-    .btn:active { transform: scale(0.96); }
-    .btn:hover  { opacity: 0.82; }
-    .btn-send { background: var(--accent); color: #fff; }
-    .btn-wake { background:var(--surface); border:1px solid var(--border); color:var(--muted); display:none; }
-    .btn-wake.show { display:block; color:var(--green); border-color:rgba(34,197,94,0.35); }
-    .btn-attach {
-      background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-      padding: 11px 13px; font-size: 16px; line-height: 1; border-radius: 12px;
-      cursor: pointer; transition: opacity 0.15s, transform 0.1s; display: flex;
-      align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    .btn-attach:hover  { opacity: 0.82; border-color: var(--accent); color: var(--accent); }
-    .btn-attach:active { transform: scale(0.96); }
-
-    /* ── MIC BUTTON ── */
-    #mic-btn {
-      background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-      padding: 11px 13px; font-size: 16px; line-height: 1; border-radius: 12px;
-      cursor: pointer; transition: opacity 0.15s, transform 0.1s, background 0.2s, border-color 0.2s;
-      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    #mic-btn:hover  { opacity: 0.82; border-color: var(--accent); color: var(--accent); }
-    #mic-btn:active { transform: scale(0.96); }
-    #mic-btn.recording {
-      background: rgba(239,68,68,0.15); border-color: rgba(239,68,68,0.45); color: #ef4444;
-      animation: mic-pulse 1s ease-in-out infinite;
-    }
-    #mic-btn.unsupported { opacity: 0.3; cursor: not-allowed; }
-    @keyframes mic-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.65;transform:scale(0.97)} }
-
-    /* ── TOAST ── */
-    #toast {
-      position:fixed; top:66px; left:50%; transform:translateX(-50%) translateY(-8px);
-      background:rgba(34,197,94,0.16); border:1px solid rgba(34,197,94,0.4);
-      color:var(--green); font-size:12px; font-weight:700; letter-spacing:1px;
-      padding:7px 18px; border-radius:99px;
-      opacity:0; transition:opacity 0.22s,transform 0.22s;
-      pointer-events:none; white-space:nowrap;
-    }
-    #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
-  </style>
+  <link rel="stylesheet" href="/static/css/jarvis.css">
 </head>
 <body>
   <div id="toast"></div>
+
   <header>
     <div class="logo"><em>J</em>ARVIS</div>
     <div class="pill" id="pill"><span class="dot"></span><span id="st">Connecting</span></div>
     <div class="enc-badge" id="enc">AES-256</div>
+    <button class="h-btn hidden" id="pending-badge" title="Proposals waiting for your review">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg> PROPOSALS <span id="pending-count">0</span>
+    </button>
     <div class="spacer"></div>
     <div class="url">__IP__:__PORT__</div>
   </header>
-  <main id="feed"></main>
-  <footer>
-    <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
-    <label class="btn-attach" for="file-inp" title="Send file">📎</label>
-    <input type="file" id="file-inp" multiple accept="*/*" style="display:none">
-    <button id="mic-btn" onclick="doMic()" title="Voice command">🎤</button>
-    <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
-    <button class="btn btn-send" onclick="doSend()">SEND</button>
-  </footer>
+
+  <div class="shell">
+    <nav id="rail">
+      <button class="nav-item on" data-tab="chat"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><span class="nlabel">CHAT</span></button>
+
+      <div class="rail-group">Workspace</div>
+      <button class="nav-item" data-tab="spaces"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg></span><span class="nlabel">SPACES</span><span class="n-badge" id="nb-spaces"></span></button>
+      <button class="nav-item" data-tab="agents"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><path d="M8 16h.01"/><path d="M16 16h.01"/></svg></span><span class="nlabel">AGENTS</span></button>
+      <button class="nav-item" data-tab="computers"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></span><span class="nlabel">COMPUTERS</span></button>
+      <button class="nav-item" data-tab="calls"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg></span><span class="nlabel">CALLS</span></button>
+      <button class="nav-item" data-tab="agenda"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span><span class="nlabel">AGENDA</span></button>
+
+      <div class="rail-group">Studio</div>
+      <button class="nav-item" data-tab="display"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></span><span class="nlabel">DISPLAY</span><span class="t-dot"></span></button>
+      <button class="nav-item" data-tab="scan"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></span><span class="nlabel">SCAN</span><span class="t-dot"></span></button>
+      <button class="nav-item" data-tab="3d"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96L12 12.01l8.73-5.05"/><path d="M12 22.08V12"/></svg></span><span class="nlabel">3D</span><span class="t-dot"></span></button>
+      <button class="nav-item" data-tab="web"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span><span class="nlabel">WEB</span><span class="t-dot"></span></button>
+    </nav>
+
+    <main>
+      <!-- CHAT -->
+      <section class="pane on" id="pane-chat">
+        <div id="feed"></div>
+        <footer>
+          <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
+          <label class="btn-attach" for="file-inp" title="Send file"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></label>
+          <input type="file" id="file-inp" multiple accept="*/*" style="display:none">
+          <button id="mic-btn" onclick="doMic()" title="Voice command"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg></button>
+          <button class="btn btn-wake" id="mirror-btn" onclick="doMirror()" title="Screen mirror"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></button>
+          <button class="btn btn-wake" id="cam-btn" onclick="doCamera()" title="Stream phone camera to JARVIS (PC vision)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
+          <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
+          <button class="btn btn-send" onclick="doSend()">SEND</button>
+        </footer>
+      </section>
+
+      <!-- STUDIO (display | scan | 3d | web — one surface pane) -->
+      <section class="pane" id="pane-studio">
+        <div id="surface"><div class="sf-empty">Nothing rendered on this surface yet — charts, diagrams and reports land on DISPLAY, OCR on SCAN, models on 3D, scraped pages on WEB.</div></div>
+      </section>
+
+      <!-- SPACES / AGENTS / COMPUTERS / CALLS / AGENDA — built by js/*.js -->
+      <section class="pane" id="pane-spaces"></section>
+      <section class="pane" id="pane-agents"></section>
+      <section class="pane" id="pane-computers"></section>
+      <section class="pane" id="pane-calls"></section>
+      <section class="pane" id="pane-agenda"></section>
+    </main>
+  </div>
+
+  <div id="mirror-view" style="display:none"><img id="mirror-img" alt="PC screen"><video id="mirror-video" style="display:none" autoplay playsinline muted></video></div>
+  <div id="cam-view">
+    <video id="cam-video" autoplay playsinline muted></video>
+    <span class="cam-tag" id="cam-tag">LIVE</span>
+  </div>
+  <div id="slash-menu"></div>
 
   <script>
     // ── Auth — bearer token ───────────────────────────────────────────────────
     const _authToken  = sessionStorage.getItem('jarvis_token');
     const _sessionKey = sessionStorage.getItem('jarvis_key');
-
-    if (!_authToken) {
-      location.replace('/login');
-    }
+    if (!_authToken) location.replace('/login');
 
     function _authHeader() { return { 'Authorization': `Bearer ${_authToken}` }; }
     function _authFetch(url, opts = {}) {
@@ -167,48 +90,120 @@
       return fetch(url, opts);
     }
 
-    // ── AES-256-CBC encryption (CryptoJS) ────────────────────────────────────
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function fmtSize(bytes) {
+      if (bytes < 1024)             return bytes + ' B';
+      if (bytes < 1024 * 1024)     return (bytes / 1024).toFixed(1) + ' KB';
+      if (bytes < 1024 ** 3)       return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+      return (bytes / 1024 ** 3).toFixed(2) + ' GB';
+    }
+
+
+    // ── Vector icon registry (no emoji anywhere in the chrome) ──────────────
+    const _ICONS = {
+      "message": "<path d=\"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z\"/>",
+      "file-text": "<path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z\"/><path d=\"M14 2v6h6\"/><path d=\"M16 13H8\"/><path d=\"M16 17H8\"/><path d=\"M10 9H8\"/>",
+      "bot": "<rect x=\"3\" y=\"11\" width=\"18\" height=\"10\" rx=\"2\"/><circle cx=\"12\" cy=\"5\" r=\"2\"/><path d=\"M12 7v4\"/><path d=\"M8 16h.01\"/><path d=\"M16 16h.01\"/>",
+      "monitor": "<rect x=\"2\" y=\"3\" width=\"20\" height=\"14\" rx=\"2\"/><path d=\"M8 21h8\"/><path d=\"M12 17v4\"/>",
+      "phone": "<path d=\"M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z\"/>",
+      "clock": "<circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M12 6v6l4 2\"/>",
+      "search": "<circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"M21 21l-4.35-4.35\"/>",
+      "box": "<path d=\"M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z\"/><path d=\"M3.27 6.96L12 12.01l8.73-5.05\"/><path d=\"M12 22.08V12\"/>",
+      "globe": "<circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M2 12h20\"/><path d=\"M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z\"/>",
+      "paperclip": "<path d=\"M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48\"/>",
+      "mic": "<rect x=\"9\" y=\"2\" width=\"6\" height=\"11\" rx=\"3\"/><path d=\"M19 10v2a7 7 0 0 1-14 0v-2\"/><path d=\"M12 19v3\"/>",
+      "camera": "<path d=\"M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z\"/><circle cx=\"12\" cy=\"13\" r=\"4\"/>",
+      "alert": "<path d=\"M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z\"/><path d=\"M12 9v4\"/><path d=\"M12 17h.01\"/>",
+      "image": "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/><circle cx=\"8.5\" cy=\"8.5\" r=\"1.5\"/><path d=\"M21 15l-5-5L5 21\"/>",
+      "film": "<rect x=\"2\" y=\"2\" width=\"20\" height=\"20\" rx=\"2.18\"/><path d=\"M7 2v20\"/><path d=\"M17 2v20\"/><path d=\"M2 12h20\"/><path d=\"M2 7h5\"/><path d=\"M2 17h5\"/><path d=\"M17 17h5\"/><path d=\"M17 7h5\"/>",
+      "music": "<path d=\"M9 18V5l12-2v13\"/><circle cx=\"6\" cy=\"18\" r=\"3\"/><circle cx=\"18\" cy=\"16\" r=\"3\"/>",
+      "table": "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/><path d=\"M3 9h18\"/><path d=\"M3 15h18\"/><path d=\"M12 3v18\"/>",
+      "archive": "<rect x=\"2\" y=\"3\" width=\"20\" height=\"5\" rx=\"1\"/><path d=\"M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8\"/><path d=\"M10 12h4\"/>",
+      "settings": "<circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z\"/>",
+      "folder": "<path d=\"M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z\"/>",
+      "eye": "<path d=\"M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/>",
+      "pencil": "<path d=\"M17 3a2.83 2.83 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5z\"/>",
+      "book": "<path d=\"M4 19.5A2.5 2.5 0 0 1 6.5 17H20\"/><path d=\"M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z\"/>",
+      "file": "<path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z\"/><path d=\"M14 2v6h6\"/>",
+      "stop": "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"1\"/>",
+      "download": "<path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><path d=\"M7 10l5 5 5-5\"/><path d=\"M12 15V3\"/>",
+      "presentation": "<path d=\"M2 3h20\"/><path d=\"M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3\"/><path d=\"M7 21l5-5 5 5\"/>"
+    };
+    function _svgIcon(name, size) {
+      const p = _ICONS[name] || _ICONS['file'];
+      size = size || 16;
+      return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" `
+        + `stroke="currentColor" stroke-width="2" stroke-linecap="round" `
+        + `stroke-linejoin="round" style="vertical-align:-2px">${p}</svg>`;
+    }
+    // ── Shared helpers for the section modules (js/*.js) ──────────────────────
+    const _showHooks = {};          // pane name -> fn (called on every show)
+    window.JV = {
+      token: _authToken,
+      authFetch: _authFetch,
+      esc, fmtSize,
+      onShow(name, fn) { _showHooks[name] = fn; },
+      api: async (path, opts = {}) => {
+        opts.headers = Object.assign(
+          { 'Content-Type': 'application/json' }, _authHeader(), opts.headers);
+        const r = await fetch(path, opts);
+        let data = null;
+        try { data = await r.json(); } catch (_) { data = null; }
+        if (!r.ok) {
+          const err = new Error((data && (data.error || data.detail)) ||
+                                `HTTP ${r.status}`);
+          err.status = r.status; err.data = data;
+          throw err;
+        }
+        return data;
+      },
+      svg: (n, sz) => _svgIcon(n, sz),
+      refreshPending: () => _refreshPending(),
+      toast: (m) => toast(m),
+      sys:   (m) => sys(m),
+      append:(sp, t) => append(sp, t),
+    };
+
+    // ── AES-256-CBC encryption (CryptoJS) — unchanged client contract ─────────
     const _AES_SALT = 'JARVIS-DASHBOARD-v1';
     let _aesKey = null;
-
     function _initCrypto(key) {
       if (typeof CryptoJS === 'undefined') return false;
       _aesKey = CryptoJS.SHA256(key + _AES_SALT);
       return true;
     }
-
     function _encrypt(plaintext) {
       if (!_aesKey || typeof CryptoJS === 'undefined') return null;
       try {
         const iv  = CryptoJS.lib.WordArray.random(16);
         const enc = CryptoJS.AES.encrypt(
           CryptoJS.enc.Utf8.parse(plaintext), _aesKey,
-          { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
-        );
+          { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 });
         const ivHex = iv.toString(CryptoJS.enc.Hex);
-        const ctHex = enc.ciphertext.toString(CryptoJS.enc.Hex);
-        const hex   = ivHex + ctHex;
+        const hex   = ivHex + enc.ciphertext.toString(CryptoJS.enc.Hex);
         const bytes = new Uint8Array(hex.length / 2);
         for (let i = 0; i < bytes.length; i++)
           bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
         return btoa(String.fromCharCode(...bytes));
       } catch { return null; }
     }
-
     const _encReady = _sessionKey ? _initCrypto(_sessionKey) : false;
     const encBadge  = document.getElementById('enc');
-    if (_encReady) { encBadge.className = 'enc-badge on'; }
+    if (_encReady) encBadge.className = 'enc-badge on';
     else           { encBadge.className = 'enc-badge off'; encBadge.textContent = 'NO ENC'; }
 
-    // ── WebSocket ─────────────────────────────────────────────────────────────
-    const feed  = document.getElementById('feed');
-    const pill  = document.getElementById('pill');
-    const stTxt = document.getElementById('st');
-    const wake  = document.getElementById('wake');
+    // ── WebSocket ──────────────────────────────────────────────────────────────
+    const feed    = document.getElementById('feed');
+    const pill    = document.getElementById('pill');
+    const stTxt   = document.getElementById('st');
+    const wakeBtn = document.getElementById('wake');
 
     const _wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
     const _wsUrl   = `${_wsProto}://${location.host}/ws?token=${encodeURIComponent(_authToken)}`;
     const ws       = new WebSocket(_wsUrl);
+    JV.ws = ws;
 
     ws.onopen    = () => { sys('Remote session active.'); toast('Connected to JARVIS'); };
     ws.onclose   = () => sys('Connection lost — refresh to reconnect.');
@@ -220,16 +215,82 @@
       if (m.type === 'wake')          sys('Wake word detected — connecting…');
       if (m.type === 'sys')           sys(m.text);
       if (m.type === 'file_received') _onFileReceived(m);
+      if (m.type === 'activity')      _onActivity(m);
+      if (m.type === 'frame')         _onFrame(m);
+      if (m.type === 'motion')        _onMotion(m);
+      if (m.type === 'content')       _onContent(m);
     };
 
-    function setStatus(s) {
-      if (s === 'active') {
-        pill.className = 'pill on'; stTxt.textContent = 'Active'; wake.classList.remove('show');
+    // ── Panes: CHAT | STUDIO surfaces | workspace sections ─────────────────────
+    const _SURFACES = ['display', 'scan', '3d', 'web'];
+    let _tab = 'chat';
+    const _surfaces = {};   // surface -> {title, text}
+
+    function showTab(name) {
+      _tab = name;
+      document.querySelectorAll('#rail .nav-item').forEach(b => {
+        const on = b.dataset.tab === name;
+        b.classList.toggle('on', on);
+        if (on) b.classList.remove('has-new');
+      });
+      document.querySelectorAll('.pane').forEach(p => p.classList.remove('on'));
+      if (name === 'chat') {
+        document.getElementById('pane-chat').classList.add('on');
+      } else if (_SURFACES.includes(name)) {
+        document.getElementById('pane-studio').classList.add('on');
+        _renderSurface(name);
       } else {
-        pill.className = 'pill'; stTxt.textContent = 'Sleeping'; wake.classList.add('show');
+        const pane = document.getElementById('pane-' + name);
+        if (pane) pane.classList.add('on');
+      }
+      if (_showHooks[name]) { try { _showHooks[name](); } catch (e) { console.error(e); } }
+    }
+    document.querySelectorAll('#rail .nav-item').forEach(b => {
+      b.onclick = () => showTab(b.dataset.tab);
+    });
+    const pendingBadge = document.getElementById('pending-badge');
+    pendingBadge.onclick = () => showTab('spaces');
+
+    function _renderSurface(name) {
+      const el  = document.getElementById('surface');
+      const got = _surfaces[name];
+      el.innerHTML = '';
+      if (!got) {
+        const d = document.createElement('div');
+        d.className = 'sf-empty';
+        d.textContent = `Nothing on this surface yet — its results will appear here.`;
+        el.appendChild(d);
+        return;
+      }
+      const t = document.createElement('div');
+      t.className = 'sf-title'; t.textContent = got.title || name.toUpperCase();
+      const b = document.createElement('div');
+      b.className = 'sf-body';  b.textContent = got.text || '';
+      el.appendChild(t); el.appendChild(b);
+    }
+
+    function _onContent(m) {
+      const s = String(m.surface || 'display');
+      _surfaces[s] = { title: String(m.title || ''), text: String(m.text || '') };
+      const studioOpen = document.getElementById('pane-studio').classList.contains('on');
+      if (studioOpen && _tab === s) {
+        _renderSurface(s);            // live update while the tab is open
+      } else {
+        const btn = document.querySelector(`#rail .nav-item[data-tab="${s}"]`);
+        if (btn) btn.classList.add('has-new');
       }
     }
 
+    // ── Status / feed rendering ────────────────────────────────────────────────
+    function setStatus(s) {
+      if (s === 'active') {
+        pill.className = 'pill on'; stTxt.textContent = 'Active';
+        wakeBtn.classList.remove('show');
+      } else {
+        pill.className = 'pill'; stTxt.textContent = 'Sleeping';
+        wakeBtn.classList.add('show');
+      }
+    }
     function append(speaker, text) {
       const d = document.createElement('div');
       if (speaker === 'jarvis') {
@@ -242,44 +303,142 @@
       feed.appendChild(d);
       feed.scrollTop = feed.scrollHeight;
     }
-
     function sys(text) {
       const d = document.createElement('div');
       d.className = 'msg msg-sys'; d.textContent = text;
       feed.appendChild(d); feed.scrollTop = feed.scrollHeight;
     }
 
-    function esc(s) {
-      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    // Camera motion alert (server-side frame diff, dashboard/motion.py)
+    let _motionLast = 0;
+    function _onMotion(m) {
+      const now = Date.now();
+      if (now - _motionLast < 1500) return;
+      _motionLast = now;
+      sys(`Motion detected in camera view (score ${m.score})`);
     }
+
+    // ── Mission Control feed (tool activity from the PC) ──────────────────────
+    const _ACT_MAX = 60;
+    function _onActivity(a) {
+      const d = document.createElement('div');
+      const mark = a.running ? '…' : (a.ok ? '✓' : '✗');
+      const dur  = (a.duration != null && !a.running) ? ` ${a.duration}s` : '';
+      const args = a.args ? ` (${a.args})` : '';
+      d.className = 'msg ' + (a.running ? 'msg-sys' : (a.ok ? 'msg-j' : 'msg-u'));
+      d.innerHTML = `<div class="lbl">${esc(a.when)} · ${mark} ${esc(a.name)}${dur}</div>`
+                  + (args ? `<span style="opacity:.75">${esc(args)}</span>` : '')
+                  + ((a.preview && a.ok === false)
+                     ? `<div style="opacity:.75">${esc(a.preview)}</div>` : '');
+      feed.appendChild(d);
+      while (feed.children.length > _ACT_MAX * 3) feed.removeChild(feed.firstChild);
+      feed.scrollTop = feed.scrollHeight;
+    }
+
+    // ── Screen mirror (PC → phone) ────────────────────────────────────────────
+    let _mirrorOn = false;
+    function doMirror() {
+      _mirrorOn = !_mirrorOn;
+      const v = document.getElementById('mirror-view');
+      v.style.display = _mirrorOn ? 'block' : 'none';
+      document.getElementById('mirror-btn').style.opacity = _mirrorOn ? '1' : '';
+      if (ws.readyState === 1) ws.send(JSON.stringify({type: 'mirror', on: _mirrorOn}));
+      toast(_mirrorOn ? 'Screen mirror on' : 'Screen mirror off');
+    }
+    function _onFrame(m) {
+      if (!_mirrorOn) return;
+      document.getElementById('mirror-img').src = 'data:image/jpeg;base64,' + m.data;
+    }
+
+    // ── Phone camera → PC vision ──────────────────────────────────────────────
+    let _camOn = false, _camStream = null, _camTimer = null;
+    const _camCanvas = document.createElement('canvas');
+    async function doCamera() {
+      if (_camOn) { _camStop(); return; }
+      try {
+        _camStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false });
+      } catch (err) {
+        toast('Camera denied: ' + (err && err.name ? err.name : 'error'));
+        return;
+      }
+      _camOn = true;
+      const v = document.getElementById('cam-video');
+      v.srcObject = _camStream;
+      await v.play().catch(() => {});
+      document.getElementById('cam-view').style.display = 'block';
+      document.getElementById('cam-btn').classList.add('on');
+      toast('Camera streaming to JARVIS');
+      _camTimer = setInterval(_camShot, 1500);
+      _camShot();
+    }
+    function _camStop() {
+      _camOn = false;
+      clearInterval(_camTimer); _camTimer = null;
+      if (_camStream) { _camStream.getTracks().forEach(t => t.stop()); _camStream = null; }
+      document.getElementById('cam-view').style.display = 'none';
+      document.getElementById('cam-btn').classList.remove('on');
+      toast('Camera off');
+    }
+    function _camShot() {
+      const v = document.getElementById('cam-video');
+      if (!_camOn || !v.videoWidth) return;
+      const scale = Math.min(1, 640 / v.videoWidth);
+      _camCanvas.width  = Math.round(v.videoWidth  * scale);
+      _camCanvas.height = Math.round(v.videoHeight * scale);
+      _camCanvas.getContext('2d').drawImage(v, 0, 0, _camCanvas.width, _camCanvas.height);
+      let data;
+      try { data = _camCanvas.toDataURL('image/jpeg', 0.7); }
+      catch { return; }
+      _authFetch('/api/camera-frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ frame: data, ts: Date.now() / 1000 }),
+      }).then(r => r.json()).then(j => {
+        const tag = document.getElementById('cam-tag');
+        if (j && j.ok) tag.textContent = 'SENT ' + (j.size > 999
+          ? (j.size / 1024).toFixed(0) + 'KB' : j.size + 'B');
+        else if (j && j.error) tag.textContent = 'ERR';
+      }).catch(() => { document.getElementById('cam-tag').textContent = 'OFFLINE'; });
+    }
+
+    // ── Approvals badge (Dots proposals waiting for the owner) ────────────────
+    let _pendingN = 0;
+    async function _refreshPending() {
+      try {
+        const rows = await JV.api('/api/pending?status=pending');
+        _pendingN = Array.isArray(rows) ? rows.length : 0;
+      } catch (_) { _pendingN = 0; }
+      const badge = document.getElementById('pending-badge');
+      document.getElementById('pending-count').textContent = _pendingN;
+      badge.classList.toggle('hidden', _pendingN === 0);
+      const nb = document.getElementById('nb-spaces');
+      if (nb) {
+        nb.textContent = _pendingN;
+        nb.classList.toggle('show', _pendingN > 0);
+      }
+      JV.pendingCount = _pendingN;
+    }
+    _refreshPending();
+    setInterval(_refreshPending, 45000);
 
     // ── File helpers ──────────────────────────────────────────────────────────
     function _fileIcon(name) {
       const ext = (name.split('.').pop() || '').toLowerCase();
-      if (['jpg','jpeg','png','gif','webp','heic','heif','avif','bmp','svg'].includes(ext)) return '🖼️';
-      if (['mp4','mov','avi','mkv','webm','m4v','3gp'].includes(ext))                       return '🎬';
-      if (['mp3','m4a','wav','flac','aac','ogg','opus'].includes(ext))                      return '🎵';
-      if (['pdf'].includes(ext))                                                             return '📋';
-      if (['doc','docx','txt','md','rtf','odt'].includes(ext))                              return '📝';
-      if (['xls','xlsx','csv','ods'].includes(ext))                                         return '📊';
-      if (['ppt','pptx','odp'].includes(ext))                                               return '📑';
-      if (['zip','rar','7z','tar','gz','bz2','xz'].includes(ext))                          return '📦';
-      if (['apk','exe','dmg','deb','rpm','msi'].includes(ext))                              return '⚙️';
-      return '📎';
+      if (['jpg','jpeg','png','gif','webp','heic','heif','avif','bmp','svg'].includes(ext)) return _svgIcon('image', 15);
+      if (['mp4','mov','avi','mkv','webm','m4v','3gp'].includes(ext))   return _svgIcon('film', 15);
+      if (['mp3','m4a','wav','flac','aac','ogg','opus'].includes(ext)) return _svgIcon('music', 15);
+      if (['pdf'].includes(ext))                                        return _svgIcon('file-text', 15);
+      if (['doc','docx','txt','md','rtf','odt'].includes(ext))          return _svgIcon('file', 15);
+      if (['xls','xlsx','csv','ods'].includes(ext))                     return _svgIcon('table', 15);
+      if (['ppt','pptx','odp'].includes(ext))                           return _svgIcon('presentation', 15);
+      if (['zip','rar','7z','tar','gz','bz2','xz'].includes(ext))       return _svgIcon('archive', 15);
+      if (['apk','exe','dmg','deb','rpm','msi'].includes(ext))          return _svgIcon('settings', 15);
+      return _svgIcon('paperclip', 15);
     }
 
-    function _fmtSize(bytes) {
-      if (bytes < 1024)             return bytes + ' B';
-      if (bytes < 1024 * 1024)     return (bytes / 1024).toFixed(1) + ' KB';
-      if (bytes < 1024 ** 3)       return (bytes / 1024 / 1024).toFixed(1) + ' MB';
-      return (bytes / 1024 ** 3).toFixed(2) + ' GB';
-    }
-
-    // ── File upload (phone → computer) ────────────────────────────────────────
     function _uploadFile(file) {
       const id = 'fc_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-
-      // Create file card in feed
       const card = document.createElement('div');
       card.className = 'msg-file';
       card.id = id;
@@ -288,7 +447,7 @@
         <div class="fc-meta">
           <div class="fc-lbl">Sending</div>
           <div class="fc-name">${esc(file.name)}</div>
-          <div class="fc-size">${_fmtSize(file.size)}</div>
+          <div class="fc-size">${fmtSize(file.size)}</div>
           <div class="fc-bar-wrap"><div class="fc-bar" id="${id}_bar"></div></div>
         </div>
         <div class="fc-status" id="${id}_st">0%</div>
@@ -299,7 +458,6 @@
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/upload');
       xhr.setRequestHeader('Authorization', `Bearer ${_authToken}`);
-
       xhr.upload.onprogress = (e) => {
         if (!e.lengthComputable) return;
         const pct = Math.round(e.loaded / e.total * 100);
@@ -308,7 +466,6 @@
         if (bar) bar.style.width = pct + '%';
         if (st)  st.textContent  = pct + '%';
       };
-
       xhr.onload = () => {
         const bar  = document.getElementById(`${id}_bar`);
         const st   = document.getElementById(`${id}_st`);
@@ -322,7 +479,7 @@
           if (st)   { st.textContent = '✓'; st.className = 'fc-status done'; }
           if (lbl)  lbl.textContent = 'Sent';
           if (meta) meta.insertAdjacentHTML('beforeend',
-            `<a class="fc-dl" href="${dlUrl}" download="${esc(savedName)}">⬇ Download back</a>`);
+            `<a class="fc-dl" href="${dlUrl}" download="${esc(savedName)}">↓ Download back</a>`);
           toast('File sent!');
         } else {
           let errMsg = 'Upload failed';
@@ -332,20 +489,17 @@
           if (lbl) lbl.textContent = errMsg;
         }
       };
-
       xhr.onerror = () => {
         const st  = document.getElementById(`${id}_st`);
         const lbl = card.querySelector('.fc-lbl');
         if (st)  { st.textContent = 'ERR'; st.className = 'fc-status err'; }
         if (lbl) lbl.textContent = 'Connection error';
       };
-
       const fd = new FormData();
       fd.append('file', file);
       xhr.send(fd);
     }
 
-    // File received by another WebSocket client (e.g., second open tab)
     function _onFileReceived(m) {
       const dlUrl = `/uploads/${encodeURIComponent(m.name)}?token=${encodeURIComponent(_authToken)}`;
       const card  = document.createElement('div');
@@ -355,8 +509,8 @@
         <div class="fc-meta">
           <div class="fc-lbl">Received</div>
           <div class="fc-name">${esc(m.name)}</div>
-          <div class="fc-size">${_fmtSize(m.size)}</div>
-          <a class="fc-dl" href="${dlUrl}" download="${esc(m.name)}">⬇ Download</a>
+          <div class="fc-size">${fmtSize(m.size)}</div>
+          <a class="fc-dl" href="${dlUrl}" download="${esc(m.name)}">↓ Download</a>
         </div>
         <div class="fc-status done">✓</div>
       `;
@@ -365,10 +519,9 @@
       toast('File received on computer!');
     }
 
-    // File input change handler
     document.getElementById('file-inp').addEventListener('change', function () {
       Array.from(this.files).forEach(_uploadFile);
-      this.value = ''; // reset so the same file can be re-sent
+      this.value = '';
     });
 
     // ── Commands ──────────────────────────────────────────────────────────────
@@ -386,12 +539,10 @@
         body: JSON.stringify(body)
       });
     }
-
     function doWake() {
       sys('Sending wake signal…');
       _authFetch('/api/wake', { method: 'POST' });
     }
-
     document.getElementById('inp').addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
     });
@@ -406,19 +557,14 @@
     }
 
     // ── Real-time Voice — PCM16 WebSocket → Gemini Live ──────────────────────
-    const micBtn  = document.getElementById('mic-btn');
-    let _voiceWs  = null;
-    let _audioCtx = null;
-    let _micStm   = null;
-    let _audioNd  = null;
+    const micBtn = document.getElementById('mic-btn');
+    let _voiceWs  = null, _audioCtx = null, _micStm = null, _audioNd = null;
 
     function _micIdle() {
-      micBtn.innerHTML = '🎤';
+      micBtn.innerHTML = _svgIcon('mic', 15);
       micBtn.title     = 'Voice — tap to speak';
       micBtn.classList.remove('recording');
     }
-
-    // Float32 PCM → resample to 16 kHz + convert to Int16
     function _f32toPcm16(f32, srcRate) {
       let s = f32;
       if (srcRate !== 16000) {
@@ -435,28 +581,24 @@
     }
 
     function _showVoiceSetup() {
-      if (document.getElementById('voice-setup')) return; // show once
+      if (document.getElementById('voice-setup')) return;
       const origin = location.origin;
       const card = document.createElement('div');
       card.id = 'voice-setup';
-      card.style.cssText = [
-        'align-self:stretch', 'background:rgba(99,102,241,0.07)',
-        'border:1px solid rgba(99,102,241,0.22)', 'border-radius:14px',
-        'padding:16px 18px', 'font-size:13px', 'line-height:1.8',
-        'animation:pop 0.18s ease'
-      ].join(';');
+      card.className = 'card';
+      card.style.cssText = 'align-self:stretch;background:rgba(99,102,241,0.07);' +
+        'border:1px solid rgba(99,102,241,0.22);animation:pop .18s ease';
       card.innerHTML =
-        '<div style="font-weight:700;color:#818cf8;letter-spacing:.5px;margin-bottom:10px">🎤 One-time voice setup</div>' +
+        '<div style="font-weight:700;color:#818cf8;letter-spacing:.5px;margin-bottom:10px">One-time voice setup</div>' +
         '<ol style="padding-left:18px;color:#8899aa;margin:0;display:flex;flex-direction:column;gap:4px">' +
         '<li>Open a new tab → go to <span style="background:rgba(255,255,255,0.07);padding:1px 6px;border-radius:4px;font-family:monospace;font-size:12px">chrome://flags</span></li>' +
         '<li>Search: <strong style="color:#dde3ed">Insecure origins treated as secure</strong></li>' +
         '<li>Paste this URL into the box:<br><span id="flags-url" style="background:rgba(255,255,255,0.07);padding:2px 8px;border-radius:4px;font-family:monospace;font-size:11px;user-select:all;cursor:pointer">' + esc(origin) + '</span></li>' +
         '<li>Set to <strong style="color:#22c55e">Enabled</strong> → tap <strong style="color:#dde3ed">Relaunch</strong></li>' +
-        '<li>Return here and tap 🎤</li>' +
+        '<li>Return here and tap the mic button</li>' +
         '</ol>';
       feed.appendChild(card);
       feed.scrollTop = feed.scrollHeight;
-      // tap to copy
       card.querySelector('#flags-url').addEventListener('click', () => {
         navigator.clipboard?.writeText(origin).then(() => toast('URL copied!')).catch(() => {});
       });
@@ -464,11 +606,7 @@
 
     async function doMic() {
       if (_voiceWs) { _stopVoice(); return; }
-
-      if (!navigator.mediaDevices?.getUserMedia) {
-        _showVoiceSetup();
-        return;
-      }
+      if (!navigator.mediaDevices?.getUserMedia) { _showVoiceSetup(); return; }
       let stream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -480,32 +618,26 @@
           : 'Mic error: ' + e.message);
         return;
       }
-
-      // 16 kHz context (fall back to native rate — _f32toPcm16 resamples)
       let ctx;
       try { ctx = new AudioContext({ sampleRate: 16000 }); }
       catch (_) { ctx = new AudioContext(); }
       if (ctx.state === 'suspended') await ctx.resume();
 
       const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(
+      const vws = new WebSocket(
         `${wsProto}://${location.host}/ws/phone-audio?token=${encodeURIComponent(_authToken)}`
       );
-      ws.binaryType = 'arraybuffer';
+      vws.binaryType = 'arraybuffer';
 
-      ws.onopen = async () => {
+      vws.onopen = async () => {
         const rate = ctx.sampleRate;
         const src  = ctx.createMediaStreamSource(stream);
-
-        // AudioWorklet (modern) — runs in dedicated audio thread
         const wCode = `class J extends AudioWorkletProcessor{process(i){const c=i[0]?.[0];if(c)this.port.postMessage(c.slice());return true;}}registerProcessor('j',J);`;
         try {
           const burl = URL.createObjectURL(new Blob([wCode], { type: 'application/javascript' }));
           await ctx.audioWorklet.addModule(burl);
           URL.revokeObjectURL(burl);
           const nd = new AudioWorkletNode(ctx, 'j');
-          // Buffer to 1024 samples (64 ms at 16 kHz) before sending —
-          // matches PC mic chunk size, prevents queue flooding on the server.
           let _pbuf = [], _plen = 0;
           nd.port.onmessage = e => {
             const chunk = new Int16Array(_f32toPcm16(e.data, rate));
@@ -513,40 +645,33 @@
             if (_plen >= 1024) {
               const out = new Int16Array(_plen); let off = 0;
               for (const c of _pbuf) { out.set(c, off); off += c.length; }
-              if (ws.readyState === 1) ws.send(out.buffer);
+              if (vws.readyState === 1) vws.send(out.buffer);
               _pbuf = []; _plen = 0;
             }
           };
           src.connect(nd);
           _audioNd = nd;
         } catch (_) {
-          // ScriptProcessor fallback (deprecated, still works everywhere)
           const sp = ctx.createScriptProcessor(4096, 1, 1);
           sp.onaudioprocess = e => {
-            if (ws.readyState === 1) ws.send(_f32toPcm16(e.inputBuffer.getChannelData(0), rate));
+            if (vws.readyState === 1) vws.send(_f32toPcm16(e.inputBuffer.getChannelData(0), rate));
           };
           src.connect(sp); sp.connect(ctx.destination);
           _audioNd = sp;
         }
-
-        micBtn.innerHTML = '⏹';
+        micBtn.innerHTML = _svgIcon('stop', 13);
         micBtn.title     = 'Tap to stop';
         micBtn.classList.add('recording');
         sys('Voice live — speak now');
-        toast('🎤 Live');
+        toast('Voice live');
       };
-
-      ws.onclose = () => { _stopVoice(); };
-      ws.onerror = () => { sys('Voice connection failed.'); _stopVoice(); };
-
-      _voiceWs  = ws;
-      _audioCtx = ctx;
-      _micStm   = stream;
+      vws.onclose = () => { _stopVoice(); };
+      vws.onerror = () => { sys('Voice connection failed.'); _stopVoice(); };
+      _voiceWs = vws; _audioCtx = ctx; _micStm = stream;
     }
-
     function _stopVoice() {
-      if (_audioNd)  { try { _audioNd.disconnect(); }  catch (_) {}; _audioNd  = null; }
-      if (_audioCtx) { try { _audioCtx.close(); }      catch (_) {}; _audioCtx = null; }
+      if (_audioNd)  { try { _audioNd.disconnect(); } catch (_) {} _audioNd = null; }
+      if (_audioCtx) { try { _audioCtx.close(); } catch (_) {} _audioCtx = null; }
       if (_micStm)   { _micStm.getTracks().forEach(t => t.stop()); _micStm = null; }
       if (_voiceWs)  {
         const w = _voiceWs; _voiceWs = null;
@@ -555,5 +680,12 @@
       _micIdle();
     }
   </script>
+  <script src="/static/js/workspaces.js"></script>
+  <script src="/static/js/agents.js"></script>
+  <script src="/static/js/computers.js"></script>
+  <script src="/static/js/calls.js"></script>
+  <script src="/static/js/agenda.js"></script>
+  <script src="/static/pwa.js"></script>
+  <script src="/static/webrtc.js"></script>
 </body>
 </html>

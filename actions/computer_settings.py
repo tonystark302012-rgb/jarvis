@@ -12,7 +12,9 @@ try:
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.05
     _PYAUTOGUI = True
-except ImportError:
+except Exception:
+    # Optional dep: ImportError (absent) or KeyError('DISPLAY')/X errors when
+    # no display — stay discoverable, just disabled.
     _PYAUTOGUI = False
 
 try:
@@ -98,7 +100,6 @@ def volume_get() -> int | None:
     undoable — a wrong undo is worse than no undo."""
     try:
         if _OS == "Windows":
-            import math
             from ctypes import cast, POINTER
             from comtypes import CLSCTX_ALL
             from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
