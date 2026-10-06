@@ -39,9 +39,8 @@ import requests
 _SENT_END = re.compile(r'(?<=[.!?])\s+|(?<=\n)\s*\n')
 
 def get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    from core.paths import base_dir
+    return base_dir()
 
 
 BASE_DIR    = get_base_dir()

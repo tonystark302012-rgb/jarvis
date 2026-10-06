@@ -1,24 +1,25 @@
 # config/__init__.py
 import json
 import platform
-import sys
 from pathlib import Path
 
 _CONFIG_PATH = Path(__file__).parent / "api_keys.json"
 
 
 def get_base_dir() -> Path:
-    """Repository/app root — the folder that contains main.py.
+    """The app root. One implementation lives in `core/paths.py`.
 
-    Frozen (PyInstaller) builds resolve to the executable's folder instead.
-    Every module that needs a stable anchor for config/, macros/, diagrams/
-    imports this one function rather than re-deriving it (four copies of
-    that derivation existed before and one caller imported a name that was
-    never defined — see tests/test_new_features.py::TestWiringGuards).
+    This used to re-derive it (`sys.frozen` → executable folder, else
+    `__file__.parent.parent`), as did seventeen other modules. Each copy was
+    correct only because of where its file happened to sit, and the name it is
+    reached by here (`config`) is also shipped by OpenCV as `cv2/config.py` —
+    see the sys.path guard in main.py. Delegating keeps the ~30 existing
+    `from config import get_base_dir` callers working without a second copy of
+    the logic to get wrong.
     """
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    from core.paths import base_dir
+    return base_dir()
+
 
 def _platform_os() -> str:
     """Auto-detect OS when config file is absent."""

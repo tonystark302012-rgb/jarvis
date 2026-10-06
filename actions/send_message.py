@@ -1,6 +1,5 @@
 import json
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -21,9 +20,8 @@ except ImportError:
     _PYPERCLIP = False
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    from core.paths import base_dir
+    return base_dir()
 
 def _get_os() -> str:
     try:

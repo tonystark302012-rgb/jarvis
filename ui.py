@@ -96,9 +96,8 @@ except Exception:      # pragma: no cover — HUD must never die over cosmetics
 
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
+    from core.paths import base_dir
+    return base_dir()
 
 BASE_DIR   = _base_dir()
 CONFIG_DIR = BASE_DIR / "config"

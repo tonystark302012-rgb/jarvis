@@ -38,7 +38,6 @@ import asyncio
 import re
 import threading
 import time
-import json
 import sys
 import traceback
 from datetime import datetime
@@ -107,13 +106,11 @@ from core.wake_word            import (
 # again (wake-word mode only).
 WAKE_SLEEP_TIMEOUT = 120.0   # seconds (2 minutes)
 
-def get_base_dir():
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
+def get_base_dir() -> Path:
+    from core.paths import base_dir
+    return base_dir()
 
 BASE_DIR        = get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 # The conversation's model. A NAME, not a decision: the ladder lives in
 # core/gemini.py and this is only whichever rung is currently in use, kept here
@@ -309,8 +306,10 @@ def _render_prompt(template: str, values: dict) -> str:
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    """The Gemini key, via the one reader in core.paths (a missing key is a
+    MissingAPIKey with an actionable message, not a bare KeyError)."""
+    from core.paths import get_api_key
+    return get_api_key()
 
 
 def _load_system_prompt() -> str:
@@ -1190,7 +1189,8 @@ class JarvisLive:
 
         # Load customization from config
         try:
-            _cfg = json.loads(open(API_CONFIG_PATH, encoding="utf-8").read())
+            from core.paths import read_config
+            _cfg = read_config()
             self._asst_name = (_cfg.get("assistant_name") or "JARVIS").strip()
             _user_name = (_cfg.get("user_name") or "").strip()
         except Exception:

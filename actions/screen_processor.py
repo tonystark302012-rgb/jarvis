@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import io
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -36,9 +35,8 @@ except ImportError:
 
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    from core.paths import base_dir
+    return base_dir()
 
 
 _BASE        = _base_dir()

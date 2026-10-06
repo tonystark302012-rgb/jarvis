@@ -7,7 +7,6 @@ import re
 import shutil
 import string
 import subprocess
-import sys
 
 if platform.system() == "Windows":
     _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
@@ -37,9 +36,8 @@ except ImportError:
     _PYPERCLIP = False
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    from core.paths import base_dir
+    return base_dir()
 
 
 _BASE         = _base_dir()
@@ -62,7 +60,10 @@ def _get_os() -> str:
 
 
 def _get_api_key() -> str:
-    return _load_config().get("gemini_api_key", "")
+    """Soft read: this caller PROBES (it degrades to another path when vision
+    is unavailable), so a missing key is an answer, not an error."""
+    from core.paths import api_key_or_empty
+    return api_key_or_empty()
 
 _SAFE_SCREENSHOT_ROOTS = (
     Path.home(),
