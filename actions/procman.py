@@ -40,7 +40,7 @@ def _fmt_row(p) -> str:
         return f"{p.pid:>7}  (gone)"
 
 
-def procman(parameters: dict = None, player=None, session_memory=None) -> str:
+def procman(parameters: dict | None = None, player=None, session_memory=None) -> str:
     psutil = _psutil()
     params = parameters or {}
     action = str(params.get("action", "list")).lower().strip()
@@ -66,10 +66,12 @@ def procman(parameters: dict = None, player=None, session_memory=None) -> str:
         else:
             return "Give a pid or a name to kill."
         banned = _self_pids()
-        killed, refused, missing = [], [], []
+        killed: list[int] = []
+        refused: list[str] = []          # always formatted, never a bare pid
+        missing: list[int] = []
         for pid in targets:
             if pid in banned or pid <= 0:
-                refused.append(pid)
+                refused.append(f"{pid} (protected)")
                 continue
             try:
                 p = psutil.Process(pid)

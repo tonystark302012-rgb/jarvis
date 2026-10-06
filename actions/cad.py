@@ -79,7 +79,7 @@ def _build_script(code: str, stl: Path, step: Path, svg: Path) -> str:
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def cad(parameters: dict = None, player=None,
+def cad(parameters: dict | None = None, player=None,
         session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "build")).lower().strip()

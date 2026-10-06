@@ -1,6 +1,4 @@
 #web_search.py
-import json
-import sys
 import threading
 import time
 from pathlib import Path
@@ -64,18 +62,13 @@ def _run_bounded(fn, timeout: float, label: str = "task"):
     return box[0]
 
 def _get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    from core.paths import base_dir
+    return base_dir()
 
 
 BASE_DIR        = _get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
 
 
 def _gemini_search(query: str) -> str:

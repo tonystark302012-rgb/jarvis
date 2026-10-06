@@ -59,7 +59,9 @@ def _decode(data: bytes) -> list[float] | None:
     try:
         with Image.open(io.BytesIO(data)) as img:
             thumb = img.convert("L").resize(GRID)
-            return [float(p) for p in thumb.getdata()]
+            # PIL's stub types getdata() loosely (ImagingCore); the value is
+            # iterable at runtime for an "L" image.
+            return [float(v) for v in list(thumb.getdata())]  # type: ignore[arg-type]
     except Exception:
         return None
 

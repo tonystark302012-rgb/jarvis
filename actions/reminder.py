@@ -6,15 +6,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-_CNW: dict = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW}
-    if platform.system() == "Windows" else {}
-)
+from config import WIN_HIDE as _CNW            # no console flash on Windows
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    from core.paths import base_dir
+    return base_dir()
 
 
 def _get_os() -> str:

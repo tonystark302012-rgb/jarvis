@@ -25,6 +25,7 @@ sentence the assistant can say out loud, never a traceback.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 
 try:
@@ -62,9 +63,9 @@ def _describe(code) -> str:
 
 
 def _geocode(city: str) -> dict | None:
-    r = requests.get(_GEOCODE_URL,
-                     params={"name": city, "count": 1, "language": "en", "format": "json"},
-                     timeout=_TIMEOUT)
+    params: dict[str, Any] = {"name": city, "count": 1,
+                              "language": "en", "format": "json"}
+    r = requests.get(_GEOCODE_URL, params=params, timeout=_TIMEOUT)
     r.raise_for_status()
     results = (r.json() or {}).get("results") or []
     return results[0] if results else None
@@ -79,7 +80,7 @@ def _forecast(lat: float, lon: float, days: int = 3,
         "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code",
         "timezone": "auto",
         "forecast_days": days,
-    }
+    }  # type: dict[str, Any]
     if hourly:
         params["hourly"] = "temperature_2m,precipitation_probability,weather_code"
         params["forecast_hours"] = 12
@@ -97,7 +98,7 @@ def _log(message: str, player=None) -> None:
             pass
 
 
-def weather_action(parameters: dict = None, player=None, session_memory=None) -> str:
+def weather_action(parameters: dict | None = None, player=None, session_memory=None) -> str:
     """Live weather for a city. Free, no API key, no browser tab."""
     params = parameters or {}
     city = (params.get("city") or "").strip()
@@ -131,6 +132,8 @@ def weather_action(parameters: dict = None, player=None, session_memory=None) ->
         # 'hourly' / 'next hours' asks → pull the 12-hour strip as well.
         want_hourly = ("hour" in when or "tonight" in when
                        or str(params.get("hourly", "")).lower() in ("1", "true", "yes"))
+        if lat is None or lon is None:
+            return f"Could not find coordinates for {city!r}."
         data = _forecast(lat, lon, hourly=want_hourly)
         if not data:
             msg = f"Sir, the weather service returned nothing for {label}."
@@ -151,7 +154,7 @@ def weather_action(parameters: dict = None, player=None, session_memory=None) ->
             parts = [f"In {label}, {cond}"]
         else:
             parts = [f"In {label} it is {temp}\u00b0C, {cond}"]
-        if None not in (feels, temp) and abs(feels - temp) >= 2:
+        if feels is not None and temp is not None and abs(feels - temp) >= 2:
             parts.append(f"feels like {feels}\u00b0C")
         if humid is not None:
             parts.append(f"humidity {humid}%")

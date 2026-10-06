@@ -70,7 +70,7 @@ def _out_path() -> Path:
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def mermaid(parameters: dict = None, player=None,
+def mermaid(parameters: dict | None = None, player=None,
             session_memory=None) -> str:
     params = parameters or {}
     source = _normalize(params.get("source", "") or params.get("diagram", ""))

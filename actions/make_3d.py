@@ -179,9 +179,9 @@ def _parse_spec(spec: str) -> tuple[list[tuple[list[Tri], str]], list[str]]:
         if m:
             kind = m.group("kind").lower()
             dims = [float(x) for x in m.group("dims").split()]
-        elif _PRIM_KIND.match(body):
+        elif (named_m := _PRIM_KIND.match(body)):
             # named-dims form: "cylinder r=6 h=10", "box w=40 h=20 d=8"
-            kind = _PRIM_KIND.match(body).group("kind").lower()
+            kind = named_m.group("kind").lower()
             named = {k.lower(): float(v)
                      for k, v in re.findall(
                          r"([a-zA-Z]{1,6})\s*=\s*([-\d.]+)", body)}
@@ -273,7 +273,7 @@ def _write_obj(tris: list[Tri], path: Path) -> None:
 
 # ── handler ──────────────────────────────────────────────────────────────────
 
-def make_3d(parameters: dict = None, player=None, session_memory=None) -> str:
+def make_3d(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     spec = str(params.get("spec") or params.get("description") or "").strip()
     if not spec:

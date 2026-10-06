@@ -281,7 +281,7 @@ def _row_line(i: int, it: sqlite3.Row) -> str:
     return f"{i}. [{when}] {one}"
 
 
-def clip_history(parameters: dict = None, player=None,
+def clip_history(parameters: dict | None = None, player=None,
                  session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "list")).lower().strip()

@@ -193,9 +193,10 @@ def text_to_visemes(text: str) -> list[tuple[str, float]]:
             i += 1
             if not base:
                 continue
-            v = _LETTER.get(base)
-            if v is None:
+            found = _LETTER.get(base)
+            if found is None:
                 continue
+            v = found
         # A doubled letter is one sound in every orthography we handle here.
         if out and out[-1][0] == v:
             continue

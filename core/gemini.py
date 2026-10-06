@@ -69,14 +69,10 @@ import json
 import sys
 import time
 import threading
-from pathlib import Path
 
-if getattr(sys, "frozen", False):
-    _BASE = Path(sys.executable).parent
-else:
-    _BASE = Path(__file__).resolve().parent.parent
+from core.paths import api_keys_path
 
-_KEY_FILE = _BASE / "config" / "api_keys.json"
+_KEY_FILE = api_keys_path()
 
 # Ladders, tried left to right. Change a model HERE and the whole app follows.
 FAST = "fast"      # short classification, extraction, one-line decisions

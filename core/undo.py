@@ -40,6 +40,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from core.logging_setup import get_logger
+
+log = get_logger(__name__)
+
 # How many reversible operations we keep. Ten is roughly "this conversation":
 # far enough back to catch a mistake you noticed a few commands later, short
 # enough that a closure holding a file's old contents cannot pile up in RAM.
@@ -73,7 +77,7 @@ def push_undo(label: str, undo_fn: Callable[[], str]) -> None:
             while len(_stack) > MAX_DEPTH:
                 _stack.pop(0)
     except Exception as e:                                  # pragma: no cover
-        print(f"[Undo] push failed: {e}")
+        log.warning(f"push failed: {e}")
 
 
 def can_undo() -> bool:

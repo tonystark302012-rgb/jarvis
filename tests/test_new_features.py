@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import pytest
+from tests._ui_source import ui_source
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1678,72 +1679,24 @@ class TestCameraFrameEndpoint:
 # ────────────────────────────────────────────────────────────────────────────
 
 class TestMainWiring:
+    """What used to be a class of source greps over main.py.
+
+    The behavior half moved to tests/test_main_behavior.py, where the real
+    `JarvisLive` is constructed: the window callbacks, the event engine, the
+    activity event count per tool call, the output cap and the injection seam.
+
+    These two stay on the source on purpose — both are about a task being
+    *started*, which no behavior test can observe from outside the session.
+    """
+
     SRC = Path("main.py").read_text(encoding="utf-8")
 
-    def test_fire_phrase_helper_exists(self):
-        assert "def _fire_phrase_rules(self, text: str) -> list[str]:" in self.SRC
-
-    def test_fire_phrase_on_all_three_input_paths(self):
-        # 1. HUD text box
-        on_text = self.SRC[self.SRC.index("def _on_text_command"):self.SRC.index("def _on_text_command") + 3000]
-        assert "self._fire_phrase_rules(text)" in on_text
-        # 2. live voice transcript (the full_in block)
-        full_in = self.SRC[self.SRC.index('full_in = " ".join(in_buf)'):]
-        full_in = full_in[:full_in.index("full_out")]
-        assert "self._fire_phrase_rules(full_in)" in full_in
-        # 3. phone/dashboard command queue
-        drain = self.SRC[self.SRC.index("async def _process_dashboard_commands"):]
-        nxt = drain.find("async def ", 10)          # skip the header itself
-        drain = drain[:nxt] if nxt != -1 else drain[:6000]
-        assert "self._fire_phrase_rules(text)" in drain
-
-    def test_agent_runner_wraps_activity(self):
-        # task/rules steps must land in Mission Control — the runner has to
-        # begin/finish an event around registry.run (registry itself doesn't)
-        runner = self.SRC[self.SRC.index("def _agent_runner"):self.SRC.index("_task_agent.set_runner")]
-        assert "_act_mod.begin(" in runner
-        assert "_act_mod.finish(" in runner
-        assert "_act_mod.fail(" in runner
-        assert "_action_registry.run(tool, tool_args, ctx)" in runner
-
-    def test_activity_listener_uses_stored_loop(self):
-        # get_running_loop() raises off-loop (rules tick, focus timers,
-        # executor threads) → event silently dropped. The listener must
-        # prefer the STORED self._loop and call_soon_threadsafe.
-        listener = self.SRC[self.SRC.index("def _activity_to_dash"):]
-        listener = listener[:listener.index("_activity.add_listener")]
-        assert "self._loop" in listener
-        assert "call_soon_threadsafe" in listener
-        assert "get_running_loop" in listener          # fallback still present
-
-    def test_rules_tick_task_created(self):
+    def test_the_rules_tick_is_started_at_connect(self):
         assert "asyncio.create_task(self._run_rules_tick())" in self.SRC
 
-    def test_focus_callbacks_and_mute_gate_wired(self):
-        assert "set_callbacks(on_phase=_focus_phase, on_mute=_focus_mute)" in self.SRC
-        assert "if self._focus_muted:" in self.SRC
-        mute_block = self.SRC[self.SRC.index("def _focus_mute"):]
-        mute_block = mute_block[:mute_block.index("set_callbacks")]
-        assert "self._focus_muted = bool(on)" in mute_block
-
-    def test_execute_tool_has_single_begin_and_total_close(self):
-        # exactly ONE begin in _execute_tool; every return path is covered
-        # (the 2 returns each sit after a finish, plus except→fail / else→finish)
-        body = self.SRC[self.SRC.index("async def _execute_tool"):]
-        body = body[:body.index("async def _send_realtime")]
-        assert body.count("_activity.begin(") == 1
-        assert body.count("_activity.finish(") >= 2
-        assert "_activity.fail(" in body
-        # save_memory early-return closes its event BEFORE returning
-        early = body[:body.index("recall_memory")]
-        assert early.index("_activity.finish") < early.index("return types.FunctionResponse")
-
-    def test_dashboard_commands_wake_before_send(self):
-        # remote commands must wake an asleep JARVIS (no WAKE button on phone)
-        drain = self.SRC[self.SRC.index("async def _process_dashboard_commands"):]
-        assert 'wake(reason="remote command")' in drain[:4000]
-
-
+    # The two greps that used to sit here — the event watch wiring and the
+    # remote-command wake — are behaviour tests now, over the real object and
+    # the real relay: tests/test_main_behavior.py.
 # ────────────────────────────────────────────────────────────────────────────
 # Batch 1 — free keyless actions: image_gen, feed, backup, sky (+ wtype)
 # ────────────────────────────────────────────────────────────────────────────
@@ -3450,18 +3403,16 @@ class TestEmotionActing:
         assert av.set_emotion("sad") == "neutral"      # unknown → neutral
 
     def test_ui_wires_emo_signal(self):
-        src = Path("ui.py").read_text(encoding="utf-8")
+        src = ui_source()
         assert "_emo_sig        = pyqtSignal(str)" in src
         assert "_emo_sig.connect(self._apply_emotion)" in src
         assert "def _apply_emotion" in src
         assert "def set_emotion(self, emotion: str)" in src
 
-    def test_main_tags_before_logging(self):
-        src = Path("main.py").read_text(encoding="utf-8")
-        i_tag = src.index("tag_and_clean(")
-        i_log = src.index('self.ui.write_log(f"{self._asst_name}: {full_out}")')
-        assert i_tag < i_log               # clean first, then log
-        assert "self.ui.set_emotion(_e)" in src
+    # `test_main_tags_before_logging` lived here as a grep over main.py. The
+    # receive loop it was reading moved to core/audio_loop.py (P2-15) and the
+    # order it cared about is now asserted by running that loop over a fake
+    # session: tests/test_audio_loop.py::TestTheReceiveLoop.
 
 
 class TestEvalAB:

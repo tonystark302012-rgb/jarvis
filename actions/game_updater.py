@@ -1,5 +1,4 @@
 import os
-import platform
 import re
 import sys
 import json
@@ -11,10 +10,7 @@ from datetime import datetime
 
 from config import is_windows, is_mac, is_linux
 
-_CNW: dict = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW}
-    if platform.system() == "Windows" else {}
-)
+from config import WIN_HIDE as _CNW            # no console flash on Windows
 
 _KNOWN_APPIDS: dict[str, tuple[str, str]] = {
     "pubg":                ("578080",  "PUBG: Battlegrounds"),
@@ -515,7 +511,7 @@ def _search_steam_appid(game_name: str) -> tuple[str | None, str | None]:
 
     return None, None
 
-def _update_steam_games(steam_path: Path, game_name: str = None) -> str:
+def _update_steam_games(steam_path: Path, game_name: str | None = None) -> str:
     if not _ensure_steam_running(steam_path):
         return "Could not start Steam."
 
@@ -567,8 +563,8 @@ def _update_steam_games(steam_path: Path, game_name: str = None) -> str:
         parts.append(f"Errors: {'; '.join(errors)}.")
     return " ".join(parts) if parts else "No games to update."
 
-def _install_steam_game(steam_path: Path, game_name: str = None,
-                        app_id: str = None) -> str:
+def _install_steam_game(steam_path: Path, game_name: str | None = None,
+                        app_id: str | None = None) -> str:
     if not _ensure_steam_running(steam_path):
         return "Could not start Steam."
 
@@ -761,7 +757,7 @@ def _is_epic_running() -> bool:
         return False
 
 
-def _update_epic_games(epic_exe: Path, game_name: str = None) -> str:
+def _update_epic_games(epic_exe: Path, game_name: str | None = None) -> str:
     games = _get_epic_games()
 
     if game_name:

@@ -11,7 +11,7 @@ from __future__ import annotations
 from core import privacy as _p
 
 
-def privacy(parameters: dict = None, player=None, session_memory=None) -> str:
+def privacy(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     raw = str(params.get("state") or params.get("action") or "").strip().lower()
     if raw in ("on", "enable", "true", "1", "private"):

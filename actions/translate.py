@@ -96,7 +96,7 @@ def _resolve_pair(params: dict) -> tuple[str, str]:
     return src, dst
 
 
-def translate(parameters: dict = None, player=None, session_memory=None) -> str:
+def translate(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "").lower().strip()
 

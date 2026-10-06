@@ -138,9 +138,30 @@ That middle row is where the time was going. Only quota and 404 used to be coole
 #### 🧩 Everything bundled drives the computer
 The bundled skill list had grown to seventeen, and some of it was nobody's business but its author's. **Not everyone updates games; everyone opens applications.**
 
-Mark LV ships **eighteen** self-describing skills (every `actions/*.py` that declares a `TOOL` dict — counted by CI), and all of them fall into two honest groups: driving this machine — applications, the browser, files, the desktop, the screen — and fetching for it — search, weather, flights, video. The rule is written into the project tree, so the next skill lands in the right folder without anyone having to ask.
+Mark LV ships **76** self-describing skills (every `actions/*.py` that declares — or re-exports — a `TOOL` dict), across 80 files in `actions/`; the other four are support modules the skills call into. They fall into two honest groups: driving this machine — applications, the browser, files, the desktop, the screen — and fetching for it — search, weather, flights, video. The rule is written into the project tree, so the next skill lands in the right folder without anyone having to ask.
 
-This is not only tidiness. Every bundled skill is declared to the model on **every** connection, whether you ever use it or not. The declarations sent at startup dropped from **16,827 characters to 12,907** — roughly a thousand tokens off every session, and five fewer wrong tools for the model to reach for.
+**Every one of those 76 can be reached — but they are no longer all announced.** Two of them matter here: the declaration cost, and the fact that 76 tools is a lot of surface to pick the wrong one from.
+
+JARVIS now declares a **core tier of 21 tools** and **one router called `toolbox`**. The tier is drawn on one line: **entry points and safety levers are core, leaf utilities are deferred.** So it holds the things asked for constantly (open an app, search, weather, a reminder, a file, play a video, remember this, undo that), the user's own levers (`privacy`, `autonomy` — a safety switch is the last thing that should need a lookup), and the tools that *start a workflow* rather than perform one action (`rules`, `dots`, `pages`, `obsidian`, `task_agent`). "Roz subah 8 baje research karo" is not one call — it needs `rules` to schedule it and `dots` to pick the researcher, and those round trips land in the middle of a spoken sentence. Everything else waits behind it: the model searches (`toolbox action=search query="3d model"`), gets the matching tools with their full parameter schemas, and runs one (`toolbox action=run tool=make_3d parameters_json=...`). A deferred tool costs one extra round trip; "open Chrome" never pays it.
+
+The saving is large and measurable:
+
+| | Declarations | Prompt copy | **Total per connection** |
+|---|---|---|---|
+| All declared | 72,263 ch · 76 tools | 12,024 ch | **93,661 ch ≈ 23,400 tokens** |
+| Tiered (default) | 28,614 ch · 21 + router | 4,229 ch | **42,217 ch ≈ 10,550 tokens** |
+
+**~15,250 tokens off every session — 66% smaller — before a word is spoken.**
+
+> Both rows are generated, not remembered:
+>
+> ```bash
+> python tools/count_tools.py
+> ```
+>
+> Flip it at runtime from **⚙ CONTROLS → TOOLS**. The "all declared" side is not a debug leftover: it is what you want while writing a new action, so the model can see the tool without searching first.
+
+**Deferred does not mean unsandboxed.** A routed call re-enters the same executor as a direct one, so the autonomy gate, the confirmation gate, the undo stack, the Mission Control timeline and the tamper-evident audit chain all see the *real* tool name — `tests/test_tool_tiers.py` asserts exactly that by driving the real dispatch path, because a performance change must never quietly become a sandbox bypass.
 
 ### 🩹 Fixes
 * An unanswering model was retried on **every call**, at 12–15 seconds a time, because only quota and 404 failures were ever cooled down. 503/504 now rest for 30 minutes — **11.2 seconds saved per call**.
@@ -304,6 +325,7 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 | 🌲 **Code Outline** | `code_outline file=…` — tree-sitter AST symbols with line numbers and nesting; stdlib `ast` for .py, labelled approximate scan elsewhere |
 | 🤖 **Local LLM by Default** | Ollama + llama3.2 on localhost:11434 out of the box; LM Studio / LocalAI / Jan aliases normalize to the OpenAI-compatible path |
 | 🧠 **Replanning Brain** | The planner asks before it guesses (ambiguous goals → one clarifying question, nothing runs) and re-plans up to twice when a step fails — bounded, same-plan loops detected and stopped, everything auditable in the report |
+| 🧾 **Episode Memory** | Every finished run leaves a one-line lesson (which tool failed there, and what got past it). The next comparable goal gets up to two of them in its planner prompt — so a plan stops walking back into a dead end. Derived from the run history, deterministic, and silenced entirely by `privacy on` |
 | 🛑 **Voice Cancel** | "Stop the task" mid-run: cooperative cancellation at the next step boundary, status `cancelled`, plan + finished steps kept — `task_agent action=resume` picks up where it stopped |
 | 🕹 **Autonomy Modes** | `observe` (mutating tools refuse — watch only) · `ask` (confirm per action) · `auto` (confirmed actions enhance themselves), with TTL so auto forgets itself; `shutdown`, `send_message`, vault and macro stay manual in every mode |
 | 🔌 **MCP Native Tools** | Every tool on every configured MCP server appears as a first-class `mcp__server__tool` in the session — no JSON round trip, TTL-cached declarations, dead servers simply absent, sanitised names with collision suffixes |
@@ -327,7 +349,7 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 
 ## 🖥️ The HUD v2 — the desktop app was rebuilt
 
-The PyQt HUD (`ui.py`) is a complete redesign on one design system — vector
+The PyQt HUD (the `ui/` package) is a complete redesign on one design system — vector
 icons everywhere (zero emoji in the chrome), a five-colour accent that themes
 the whole window, and every panel wired to the **same dashboard API the web UI
 uses**, so both front-ends show live data instead of mockups.
@@ -386,11 +408,11 @@ Duplicate rule held throughout: barge-in was found already shipped (EchoGuard) a
 ```bash
 git clone https://github.com/tonystark302012-rgb/jarvis.git
 cd jarvis
-python setup.py        # installs deps for YOUR OS + the browser automation engine
+python bootstrap.py    # installs deps for YOUR OS + the browser automation engine
 python main.py
 ```
 
-`setup.py` only ever installs what your operating system needs — the Windows-only libraries are skipped automatically on macOS and Linux, and vice-versa. It also checks your Python version up front, so a wrong interpreter fails with a sentence instead of a wall of pip output. Prefer to do it by hand? `pip install -r requirements.txt` works too.
+`bootstrap.py` only ever installs what your operating system needs — the Windows-only libraries are skipped automatically on macOS and Linux, and vice-versa. It also checks your Python version up front, so a wrong interpreter fails with a sentence instead of a wall of pip output. Prefer to do it by hand? `pip install -r requirements.txt` works too.
 
 > ⚠️ **Installation Note:** If you hit a `ModuleNotFoundError` for an OS-specific package, install it with `pip install <module_name>`. The optional **wake word** engine is *not* installed here — grab it in one click from **⚙ → WAKE WORD** inside the app.
 
@@ -399,15 +421,27 @@ python main.py
 ## 🛠️ Development
 
 ```bash
-pip install -r requirements-dev.txt   # pytest + ruff + test deps (fast, no PyQt needed)
-ruff check .                          # lint — pyflakes + statement errors, must be clean
-python -m pytest tests/ -q            # full suite — offline, no mic/display/API key
-python tools/ui_smoke.py              # offscreen HUD E2E (needs PyQt6 + a display server stub)
-python tools/ui_preview.py            # bootstrap the dashboard preview on :8712 with a PREVIEW token
-python tools/feature_audit.py         # live probe: every feature's real entry point (19 checks, exit≠0 = broken)
+pip install -r requirements-dev.txt   # pytest + ruff + mypy + test deps (fast, no PyQt needed)
+make test                             # full suite — offline, no mic/display/API key
+make lint                             # ruff — pyflakes + statement errors, must be clean
+make typecheck                        # mypy on the curated module list in pyproject.toml
+make audit                            # live probe: every feature's real entry point (19 checks)
+make doctor                           # what is missing on this machine
+make help                             # every target
 ```
 
-CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`). The suite covers the security invariants: no `shell=True` in `open_app`/`dev_agent`, the run-command allowlist, project-path containment, pip-flag injection, the dashboard AES round-trip, brute-force lockout, memory recall and parallel tool dispatch.
+`make` wraps the commands so there is one definition of each; the equivalents are
+`python -m pytest tests/ -q`, `ruff check .`, `python -m mypy`. Two more, run
+directly because they need a display stub or start a server:
+
+```bash
+python tools/ui_smoke.py              # offscreen HUD E2E (needs PyQt6)
+python tools/ui_preview.py            # dashboard preview on :8712 with a PREVIEW token
+```
+
+CI runs on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`): ruff, a curated mypy gate, `compileall` over every module, then the suite. Two additional checks run **warn-only** and print their numbers — `ruff format` (185 files would change; the tree is deliberately not format-clean) and mypy over the whole app (374 errors today, nearly all missing annotations in deliberately dynamic code). Formatting is still a roadmap item; the type count is not gated but it is not unmanaged either — 127 of 160 modules are held clean by the curated list, and the number above is what is left.
+
+The suite covers the security invariants: no `shell=True` in `open_app`/`dev_agent`, the run-command allowlist, project-path containment, pip-flag injection, the dashboard AES round-trip and token TTL, brute-force lockout, memory recall and parallel tool dispatch.
 
 ## 📋 Requirements
 
@@ -419,7 +453,7 @@ CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13**
 | **Speakers** | Required for voice replies |
 | **API Key** | Free Gemini API key (entered on first launch → `config/api_keys.json`) |
 | **GPU** | **Not required.** The avatar is rendered in software, and so is HUD video |
-| **YouTube on the HUD** | `yt-dlp`, installed by `setup.py`. Without it, local files and direct URLs still play and YouTube links open in the browser with an explanation |
+| **YouTube on the HUD** | `yt-dlp`, installed by `bootstrap.py`. Without it, local files and direct URLs still play and YouTube links open in the browser with an explanation |
 | **Wake word** *(optional)* | One-click download from ⚙ → WAKE WORD (`openwakeword`, a few MB, fully local) |
 
 ---
@@ -428,13 +462,14 @@ CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13**
 
 ```
 jarvis/
-├── main.py                   # Core loop — Gemini Live session, audio I/O, viseme extraction, tool dispatch
-├── ui.py                     # PyQt6 HUD v2 — vector-icon design system, live dashboard panels, palette
-├── setup.py                  # OS-aware installer (skips wrong-OS dependencies, checks your Python)
-├── pyproject.toml            # ruff + pytest configuration (lint must stay clean in CI)
+├── main.py                   # Core loop — the Live session, its state machines and the run loop
+│                             #   (audio I/O, tool dispatch and the relays live in core/, as mixins)
+├── ui/                       # PyQt6 HUD v2 — app.py is the window, display_panel.py the screen
+├── bootstrap.py              # OS-aware installer (skips wrong-OS dependencies, checks your Python)
+├── pyproject.toml            # project metadata + ruff/mypy/pytest configuration
 ├── requirements.txt          # Runtime dependencies (OS markers filter per platform)
 ├── requirements-dev.txt      # Test/lint dependencies — pip install -r requirements-dev.txt
-├── .github/workflows/ci.yml  # CI: ruff + compileall + pytest on Python 3.11/3.12/3.13
+├── .github/workflows/ci.yml  # CI: ruff + mypy (gated) + compileall + pytest, 3.11/3.12/3.13
 ├── .gitignore                # Keeps your API key, TLS key and memories out of the repository
 ├── tests/
 │   ├── test_roadmap.py       # Biggest suite — every roadmap batch: tools, privacy, presence, agents
@@ -513,6 +548,10 @@ jarvis/
 │   ├── undo.py               # One shared undo stack — actions register how to reverse themselves
 │   ├── confirm.py            # Irreversible-action gate — the token is issued by the UI, not the model
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name
+│   ├── audio_pcm.py          # Audio format constants + PCM→level/viseme/transcript helpers
+│   ├── audio_loop.py         # Mic in, Live session, speakers out — the audio third of the session
+│   ├── tool_dispatch.py      # Batch scheduler, toolbox router, the single tool entry point
+│   ├── wake_and_relay.py     # Wake state machine + phone/dashboard relays
 │   ├── display.py            # Qt-free content panel renderer (unit-tested)
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
@@ -551,6 +590,20 @@ Everything stays on your machine. There is no MARK server, no telemetry and no a
 All three are listed in `.gitignore`, so a fork or a pull request cannot leak them by accident. **If you have already committed `config/api_keys.json` anywhere public, revoke that key** at [aistudio.google.com](https://aistudio.google.com/app/apikey) and generate a new one — removing the file in a later commit does not remove it from the history.
 
 Your voice is streamed to Google's Gemini Live API while a session is open; that is the one thing that leaves your computer, and it stops when you mute or close the app.
+
+---
+
+## ⚠️ Known Limitations
+
+Things worth knowing before you rely on them. Each one is a deliberate, documented trade-off rather than a bug — but none of them are obvious from the feature list.
+
+**WhatsApp messages are sent blind.** `send_message` drives WhatsApp by typing into the app — it opens the window, searches the contact, types the message and presses Enter **without reading back which conversation received it**. On a slow machine the keystrokes can land in the wrong chat. There is a safe path in `actions/send_message.py` that verifies the window and the recipient, but it needs a driver that does not ship with JARVIS; drop a `plugins/_whatsapp_core.py` exposing `get()` and it takes over automatically. Until then, treat a WhatsApp send as unverified. Telegram, Signal and the rest go through the same keystroke path.
+
+**Remote dashboard sessions expire.** A phone paired by QR gets a 12-hour session and can re-pair itself for 30 days, after which it must scan a new code. "Revoke devices" now kills the live bearer tokens *and* the pairing, so a revoked phone stops working immediately instead of at the next restart. (It did not, before this branch — it cleared the pairing only, so the phone in the room kept its access while the UI reported success.)
+
+**Most skills are found, not announced.** 21 core tools travel with every session; the other 55 are reached through `toolbox`, which costs one extra round trip. If the model seems to have forgotten an ability, ask it to search `toolbox` — or switch **⚙ CONTROLS → TOOLS** to "ALL DECLARED" and it sees everything up front for ~13,000 more tokens a session. Run `python tools/count_tools.py` to see the current cost.
+
+**The GUI and the audio path have no automated tests.** `tools/feature_audit.py` proves the tool registry and the platform integrations run in *this* environment, and CI proves the logic layer — but nothing exercises the PyQt HUD, the TTS/STT pipeline or the wake word end to end. Run `python tools/feature_audit.py` after an upgrade rather than assuming.
 
 ---
 

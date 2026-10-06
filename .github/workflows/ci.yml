@@ -39,11 +39,57 @@ jobs:
       - name: Lint (ruff — pyflakes + statement errors)
         run: ruff check .
 
+      # ── Warn-only steps ───────────────────────────────────────────────────
+      # Two checks that would be red today, kept green on purpose so the work
+      # they represent is visible without blocking every PR. Each one prints
+      # what is left, so the number can be watched going down. See
+      # PROJECT_ANALYSIS.md P1-9 and P3-28 for what closing them means.
+      - name: Formatting (ruff format — warn only, the tree is not format-clean)
+        continue-on-error: true
+        run: |
+          echo "::group::files ruff format would change"
+          ruff format --check . | tail -20 || true
+          echo "::endgroup::"
+          total=$(ruff format --check . 2>/dev/null | tail -1 || true)
+          echo "ruff format: $total"
+
+      - name: Types (mypy — whole repo, warn only)
+        continue-on-error: true
+        run: |
+          echo "::group::current mypy error count"
+          # Not `.`: a local `python -m build` leaves build/lib behind, which
+          # mypy then sees as a duplicate copy of every package.
+          python -m mypy --ignore-missing-imports core actions dashboard \
+            memory dots ui tools config main.py bootstrap.py 2>/dev/null \
+            | tail -1 || true
+          echo "::endgroup::"
+
+      # The curated list in pyproject.toml, on the other hand, is expected to be
+      # clean: it only ever contains modules that pass with no suppressions.
+      # A red run here means a real regression in one of them.
+      - name: Types (mypy — curated module list)
+        run: python -m mypy
+
+      # A silent handler is not automatically a bug — a teardown path must not
+      # raise a second exception while handling the first — so this reports
+      # rather than gates. It counts the ones with no log and no comment on a
+      # feature-shaped path: the number that should go down.
+      - name: Silent-exception report (warn only)
+        continue-on-error: true
+        run: |
+          python tools/silent_except_audit.py | head -30
+
       - name: Syntax-check every module (catches what tests don't import)
-        run: python -m compileall -q actions core dashboard memory ui config main.py ui.py setup.py
+        run: python -m compileall -q actions core dashboard memory dots ui config main.py bootstrap.py
 
       - name: Tests
-        run: python -m pytest tests/ -q --junitxml=junit.xml | tee pytest.log
+        # `set -o pipefail` is load-bearing, not decoration. Without it bash
+        # takes the exit status of the LAST command in the pipeline, and `tee`
+        # only ever fails if it cannot write its file — so a red suite produced
+        # a green job. This step must be the thing that fails the build.
+        run: |
+          set -o pipefail
+          python -m pytest tests/ -q --junitxml=junit.xml | tee pytest.log
 
       - name: Surface failing tests as annotations
         if: failure()

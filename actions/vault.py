@@ -146,7 +146,7 @@ def _entries() -> dict:
     return _VAULT.setdefault("entries", {})
 
 
-def vault(parameters: dict = None, player=None, session_memory=None) -> str:
+def vault(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "list").lower().strip()
     site = str(params.get("site") or params.get("name") or "").strip().lower()

@@ -211,7 +211,7 @@ def _list() -> str:
     return "Macros:\n" + "\n".join(lines)
 
 
-def macro(parameters: dict = None, player=None, session_memory=None) -> str:
+def macro(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "list")).lower().strip()
     name = str(params.get("name", "macro")).strip() or "macro"

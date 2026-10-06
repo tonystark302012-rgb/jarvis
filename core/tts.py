@@ -4,6 +4,12 @@ Text-to-Speech engines for MARK XL.
 EdgeTTS     – free Microsoft TTS (internet required, no API key)
 Kokoro      – fully offline neural TTS (~330 MB model)
 ElevenLabs  – cloud API (API key required, best quality)
+
+NOT on the Live audio path. In a normal session JARVIS speaks with the audio
+frames Gemini Live sends back, so nothing calls create_tts_player() today — this
+is self-contained code with a tested contract waiting for the one thing it is
+for: offline/local voice, where there is no Live stream to speak for it. See
+PROJECT_ANALYSIS.md P1-10; the tests are in tests/test_tts.py.
 """
 from __future__ import annotations
 
@@ -15,6 +21,11 @@ from typing import Callable, Optional
 
 import numpy as np
 import sounddevice as sd
+
+from core.logging_setup import get_logger
+from typing import Any
+
+log = get_logger(__name__)
 
 
 
@@ -299,9 +310,12 @@ class KokoroTTSEngine:
                 raise
 
         print("[TTS] Kokoro compiling (first-time only)…")
+        pipeline = self._pipeline
+        if pipeline is None:            # the loader above either set it or raised
+            raise RuntimeError("Kokoro pipeline failed to load")
         # Warmup: compiles PyTorch JIT graph so first real speak() call is instant.
         try:
-            for _ in self._pipeline("hello", voice=self.voice, speed=self.speed):
+            for _ in pipeline("hello", voice=self.voice, speed=self.speed):
                 pass
             print("[TTS] Kokoro ready.")
         except Exception as e:
@@ -363,7 +377,9 @@ class ElevenLabsTTSEngine:
             "xi-api-key":   self.api_key,
             "Content-Type": "application/json",
         }
-        payload = {
+        # `Any`, not `object`: requests' JsonType is recursive, and the nested
+        # voice_settings dict is what an object-typed dict cannot express.
+        payload: dict[str, Any] = {
             "text":     text,
             "model_id": "eleven_multilingual_v2",
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
@@ -409,7 +425,7 @@ class TTSPlayer:
                 on_start()
             self._engine.speak(text)
         except Exception as e:
-            print(f"[TTS] Error: {e}")
+            log.warning(f"Error: {e}")
         finally:
             with self._lock:
                 self._playing = False
@@ -428,6 +444,7 @@ class TTSPlayer:
 
 def create_tts_player(config: dict) -> TTSPlayer:
     engine_name = config.get("tts_engine", "edgetts").lower()
+    engine: KokoroTTSEngine | ElevenLabsTTSEngine | EdgeTTSEngine
     if engine_name == "kokoro":
         voice  = config.get("tts_voice", "af_heart")
         speed  = float(config.get("tts_speed", 1.0))

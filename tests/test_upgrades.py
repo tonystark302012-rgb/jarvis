@@ -317,12 +317,17 @@ class _Types:
 
 
 def _dispatcher():
-    """Load the real _run_tool_calls out of main.py without importing Qt."""
-    src = Path("main.py").read_text(encoding="utf-8")
+    """Load the real _run_tool_calls without importing Qt.
+
+    The method lives in core/tool_dispatch.py now (P2-15 split it out of
+    main.py, where the whole class used to be). It is extracted as source
+    rather than imported because importing it pulls in the actions and the
+    genai client, and the point here is to time the scheduler itself."""
+    src = Path("core/tool_dispatch.py").read_text(encoding="utf-8")
     start = src.index("    _READ_ONLY_TOOLS = frozenset(")
     end = src.index("    async def _execute_tool(self, fc)", start)
-    # main.py imports `traceback` at module level (line 43); the extracted
-    # method relies on it, so it has to be in the namespace here too.
+    # the method relies on module-level `traceback`, so it has to be in the
+    # namespace here too.
     ns = {"types": _Types()}
     exec("import asyncio\nimport traceback\nclass _S:\n" + src[start:end], ns)
     return ns["_S"]
@@ -818,3 +823,233 @@ class TestLLMFreeRungs:
         from core import llm_client as m
         assert m._DEFAULTS["llm_provider"] == "ollama"
         assert m.get_llm_preset() == "" or True   # reads live config
+
+
+# ── P0-2: every external command in computer_settings.py has a deadline ───────
+# The Windows branches set `timeout=5` but the macOS/Linux ones did not, and
+# these run inside a model turn — a wedged `pactl`/`osascript`/`xrandr` hung the
+# whole tool call. They now all route through one `_run` wrapper; these tests
+# keep it that way, because the failure mode is invisible until a user's
+# machine happens to wedge a helper binary.
+
+class TestComputerSettingsTimeouts:
+    def _mod(self):
+        from actions import computer_settings
+        return computer_settings
+
+    def test_no_call_site_bypasses_the_wrapper(self):
+        """A raw `subprocess.run` in this module means a command with no
+        deadline — exactly the bug this replaced."""
+        src = (Path(__file__).resolve().parent.parent
+               / "actions" / "computer_settings.py").read_text(encoding="utf-8")
+        lines = src.split("\n")
+        start = next(i for i, l in enumerate(lines) if l.startswith("def _run("))
+        stray = [i + 1 for i, l in enumerate(lines)
+                 if "subprocess.run(" in l
+                 and i > start
+                 and "subprocess.run(args" not in l]
+        assert stray == [], f"unbounded subprocess call at line(s) {stray}"
+
+    def test_wrapper_injects_a_default_deadline(self, monkeypatch):
+        m = self._mod()
+        seen = {}
+        import subprocess as sp
+
+        def fake_run(args, **kw):
+            seen.update(kw)
+            return sp.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        m._run(["echo", "hi"])
+        assert "timeout" in seen and seen["timeout"] == m._SUBPROCESS_TIMEOUT
+
+    def test_explicit_timeout_still_wins(self, monkeypatch):
+        m = self._mod()
+        seen = {}
+        import subprocess as sp
+
+        def fake_run(args, **kw):
+            seen.update(kw)
+            return sp.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        m._run(["echo", "hi"], timeout=0.5)
+        assert seen["timeout"] == 0.5
+
+    def test_timeout_returns_a_failed_result_not_an_exception(self, monkeypatch):
+        """Callers here all check `returncode` / read `stdout`, so a timeout
+        must look like any other failed command rather than a new crash."""
+        m = self._mod()
+
+        def fake_run(args, **kw):
+            raise m.subprocess.TimeoutExpired(args, kw.get("timeout"))
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        r = m._run(["sleep", "999"])
+        assert r.returncode != 0
+        assert r.stdout == ""
+        assert "timed out" in r.stderr
+
+    def test_a_real_hang_is_cut_short(self):
+        """End-to-end proof: a command that would run for five minutes comes
+        back in about the configured deadline."""
+        m = self._mod()
+        if m._SUBPROCESS_TIMEOUT > 15:
+            pytest.skip("deadline too long for a fast test")
+        t0 = time.time()
+        r = m._run([sys.executable, "-c", "import time; time.sleep(300)"])
+        elapsed = time.time() - t0
+        assert r.returncode != 0
+        assert elapsed < m._SUBPROCESS_TIMEOUT + 5
+
+    def test_a_normal_command_is_untouched(self):
+        m = self._mod()
+        r = m._run([sys.executable, "-c", "print('ok')"],
+                   capture_output=True, text=True)
+        assert r.returncode == 0
+        assert r.stdout.strip() == "ok"
+
+
+# ── P0-3: the README's skill count must match the tree ───────────────────────
+# The README claimed "eighteen self-describing skills — counted by CI" against
+# a tree with 76 declarations, because nothing could regenerate the number.
+# `tools/count_tools.py` is now the source of truth; this keeps the two from
+# drifting apart again.
+
+class TestSkillCountIsHonest:
+    def _counts(self):
+        import importlib.util
+        tool = (Path(__file__).resolve().parent.parent
+                / "tools" / "count_tools.py")
+        spec = importlib.util.spec_from_file_location("count_tools", tool)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)                       # noqa: SLF001
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions").resolve())
+        files, _without = mod.files_declaring_tool(Path("actions").resolve())
+        return files, reg.get_tool_declarations()
+
+    def test_file_count_matches_registry_count(self):
+        """Every file that declares or re-exports a TOOL must actually be
+        registered. A mismatch means a skill exists on disk but the model
+        never learns about it — a silent, invisible failure."""
+        files, decls = self._counts()
+        assert len(files) == len(decls), (
+            f"{len(files)} files declare a TOOL but {len(decls)} are "
+            "registered — one was dropped at discovery")
+
+    def test_names_are_unique(self):
+        _files, decls = self._counts()
+        names = [d.get("name") for d in decls]
+        dupes = {n for n in names if names.count(n) > 1}
+        assert not dupes, f"duplicate tool names reach the model: {dupes}"
+
+    def test_readme_quotes_the_real_number(self):
+        """If the README states a count, it has to be the measured one."""
+        import re
+        _files, decls = self._counts()
+        readme = (Path(__file__).resolve().parent.parent
+                  / "README.md").read_text(encoding="utf-8")
+        stated = re.search(r"ships \*\*(\d+)\*\* self-describing skills", readme)
+        if not stated:
+            pytest.skip("README no longer states a skill count")
+        assert int(stated.group(1)) == len(decls), (
+            f"README says {stated.group(1)} skills, the tree has {len(decls)}")
+
+
+# ── P1-1: the app root must win the name `config` ────────────────────────────
+# Found while testing tool tiering, unrelated to it. This project's own package
+# is `config/` and ~30 modules reach it with `from config import get_base_dir`.
+# OpenCV ships `cv2/config.py` AND appends its own package directory to
+# sys.path when it loads, which puts a second top-level `config` on the path.
+# Which one wins is decided by sys.path order, and losing that race raises
+# `NameError: name 'LOADER_DIR' is not defined` from inside the library — a
+# message that points nowhere near the cause.
+
+class TestConfigNameIsNotShadowed:
+    def test_opencv_really_does_expose_a_competing_config(self):
+        """The hazard is concrete, not hypothetical: if this ever stops being
+        true the guard in main.py becomes dead weight and should be removed."""
+        cv2_dir = (Path(__file__).resolve().parent.parent
+                   / ".venv" / "lib" / "python3.11" / "site-packages" / "cv2")
+        if not cv2_dir.exists():
+            pytest.skip("cv2 not installed in this environment")
+        # A `config.py` beside the opencv package is importable as `config`
+        # the moment that directory is on sys.path.
+        assert (cv2_dir / "config.py").exists()
+
+    def test_the_repo_package_is_the_one_that_defines_get_base_dir(self):
+        """The name is load-bearing: only the repo's config defines the
+        function every action imports."""
+        import config as repo_config
+        assert Path(repo_config.__file__).resolve().parent == \
+            Path(__file__).resolve().parent.parent / "config"
+        assert callable(repo_config.get_base_dir)
+
+    def test_main_pins_the_app_root_for_a_script_launch(self):
+        """main.py must put the app root at sys.path[0] before anything can
+        pull opencv in.
+
+        This one is a wiring assertion rather than a behaviour test: driving it
+        end to end means running main.py, which needs the PyQt6 GL stack and
+        PortAudio. The guard itself is three lines and its condition is stated
+        here so a change to it fails loudly.
+        """
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text(
+            encoding="utf-8")
+        assert "sys.path.insert(0, str(Path(__file__).resolve().parent))" in src
+        # Only for the real launch — importing main must not mutate the
+        # caller's sys.path.
+        assert '__name__ == "__main__"' in src
+
+
+# ── the test step must actually be able to fail the build ────────────────────
+# This is the one guard in the suite that reads a file instead of exercising
+# behaviour, and it earns the exception because the failure it prevents is
+# SILENT. The step used to be
+#
+#     python -m pytest tests/ -q --junitxml=junit.xml | tee pytest.log
+#
+# Bash takes the exit status of the last command in a pipeline, and `tee` only
+# fails when it cannot write its file — so a red suite produced a green job,
+# and the "if: failure()" step below it was dead too. Nothing can catch that at
+# runtime; only the config can be checked.
+
+class TestCIStepCanActuallyFail:
+    def _workflow(self) -> str:
+        return (Path(__file__).resolve().parent.parent
+                / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    def test_pytest_step_sets_pipefail(self):
+        """Look at the pytest COMMAND line, not the step text: YAML's own
+        `run: |` block marker is a pipe character too, and matching it would
+        make this test pass for the wrong reason."""
+        lines = self._workflow().splitlines()
+        cmds = [i for i, ln in enumerate(lines)
+                if "python -m pytest" in ln or "pytest tests/" in ln]
+        assert cmds, "no pytest command found in the workflow"
+        for i in cmds:
+            if " | " not in lines[i]:         # not piped, nothing masked
+                continue
+            # Walk back to the enclosing `run:` and collect its real commands.
+            # Comments are skipped: the comment explaining this fix quotes the
+            # directive, and matching that would pass for the wrong reason.
+            start = i
+            while start > 0 and not lines[start].lstrip().startswith("run:"):
+                start -= 1
+            block = [ln.strip() for ln in lines[start:i]
+                     if not ln.strip().startswith("#")]
+            assert "set -o pipefail" in block, (
+                f"line {i + 1} pipes pytest into another command without "
+                "`set -o pipefail` — a failing suite reports success:\n"
+                f"    {lines[i].strip()}")
+
+    def test_ci_installs_everything_the_suite_imports(self):
+        """The masked failure was hiding this: tests/test_tool_tiers.py imports
+        main.py, which imports google.genai at module level, and CI installs
+        only requirements-dev.txt."""
+        root = Path(__file__).resolve().parent.parent
+        dev = (root / "requirements-dev.txt").read_text(encoding="utf-8")
+        assert "google-genai" in dev, (
+            "tests import main.py (google.genai) — the dev requirements CI "
+            "installs must provide it, or the file cannot even collect")

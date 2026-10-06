@@ -33,7 +33,7 @@ import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 _AWAY_AFTER_S = 300.0          # 5 minutes with zero interaction → away
 _HISTORY_MAX = 50
@@ -92,11 +92,12 @@ class PresenceTracker:
         self._last_os_probe: Optional[float] = None   # os idle at last poll
         self._since = time.time()                     # current-state since
         self.history: deque = deque(maxlen=_HISTORY_MAX)
+        self._lock: Any = None          # a real Lock below, in practice
         try:
             import threading
             self._lock = threading.Lock()
         except Exception:                              # pragma: no cover
-            self._lock = None
+            pass                        # single-threaded fallback: no lock
 
     # ── inputs ────────────────────────────────────────────────────────
     def note_activity(self, kind: str = "input") -> Optional[str]:

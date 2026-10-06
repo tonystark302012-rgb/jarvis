@@ -17,6 +17,7 @@ All paths are re-resolved at act() time (the live tree moves), and
 every failure is reported as-is.
 """
 from __future__ import annotations
+from typing import Any
 
 
 _INSTALL = ("AT-SPI bindings missing — free install: "
@@ -74,10 +75,10 @@ def _prop(node, name: str, default: str = "") -> str:
 def _node_dict(node, depth: int) -> dict:
     role = _prop(node, "roleName", "?")
     name = _prop(node, "name", "")
-    d = {"role": role, "name": name,
-         "desc": _prop(node, "description", ""),
-         "states": _prop(node, "states", "")[:120],
-         "children": []}
+    d: dict[str, Any] = {"role": role, "name": name,
+                         "desc": _prop(node, "description", ""),
+                         "states": _prop(node, "states", "")[:120],
+                         "children": []}
     if depth <= 0:
         return d
     for c in _children(node):
@@ -116,7 +117,7 @@ def _crumb_text(crumbs: tuple) -> str:
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def atspi(parameters: dict = None, player=None,
+def atspi(parameters: dict | None = None, player=None,
           session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "scan")).lower().strip()

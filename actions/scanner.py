@@ -19,6 +19,7 @@ import socket
 import time
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Callable
 
 try:
     import psutil
@@ -305,8 +306,8 @@ def scan_dupes(target: str = "", top: int = 12) -> str:
     groups.sort(key=lambda g: -g[0].stat().st_size)
     lines = [f"{len(groups)} duplicate group(s), {_gb(wasted)} reclaimable:"]
     for g in groups[:top]:
-        sz = _gb(g[0].stat().st_size)
-        lines.append(f"  {sz} × {len(g)} copies:")
+        human = _gb(g[0].stat().st_size)      # bytes live in `sz` above
+        lines.append(f"  {human} × {len(g)} copies:")
         for p in g[:4]:
             try:
                 lines.append(f"     {p.relative_to(root)}")
@@ -435,7 +436,7 @@ def scan_startup() -> str:
     return f"Autostart entries ({len(entries)}):\n" + "\n".join(entries[:30])
 
 
-_SCANS = {
+_SCANS: dict[str, Callable[..., str]] = {
     "system": scan_system,
     "network": scan_network,
     "ports": scan_ports,
@@ -448,7 +449,7 @@ _SCANS = {
 }
 
 
-def scan_action(parameters: dict = None, player=None, session_memory=None) -> str:
+def scan_action(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     what = (params.get("what") or params.get("action") or "system").strip().lower()
     target = (params.get("path") or "").strip()

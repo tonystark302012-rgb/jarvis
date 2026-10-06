@@ -1,5 +1,13 @@
 """
-MARK LIV — one-time setup.
+MARK LIV — one-time setup.   Run: python bootstrap.py
+
+This file used to be called setup.py. It is not a packaging script — nothing
+here builds a distribution, and it never calls setuptools. The name was a
+collision with the most famous filename in Python packaging: `pip install .`
+reads setup.py as a build script, and anyone who has ever maintained a package
+expects one here to do that. Naming it bootstrap.py says what it is (fetch the
+dependencies for this OS, once) and stops the tooling from guessing wrong.
+
 
 Installs the Python dependencies for THIS operating system only: the OS-specific
 packages in requirements.txt carry `sys_platform` markers, so a macOS or Linux
@@ -50,8 +58,8 @@ def _check_python() -> None:
         print(f"\n❌ Python {v[0]}.{v[1]} detected — MARK LIV needs at "
               f"least Python {MIN_PY[0]}.{MIN_PY[1]}.")
         print("   Install a supported version and run setup with it, e.g.:")
-        print(f"     py -{MIN_PY[0]}.{MIN_PY[1]} setup.py        (Windows)")
-        print(f"     python{MIN_PY[0]}.{MIN_PY[1]} setup.py      (macOS / Linux)")
+        print(f"     py -{MIN_PY[0]}.{MIN_PY[1]} bootstrap.py  (Windows)")
+        print(f"     python{MIN_PY[0]}.{MIN_PY[1]} bootstrap.py  (macOS / Linux)")
         sys.exit(1)
 
 

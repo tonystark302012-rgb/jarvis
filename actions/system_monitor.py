@@ -3,6 +3,7 @@ System Monitor — background metric checks with voice alert support.
 Zero subprocess calls on all platforms — uses ctypes/pynvml/psutil/wmi only.
 """
 import ctypes
+from typing import Any
 import platform
 import time
 
@@ -21,8 +22,8 @@ _COOLDOWN   = 300
 _CPU_STREAK = 3
 
 # ── NVML DLL cache (Windows: nvml.dll, Linux: libnvidia-ml.so.1) ─────────────
-_nvml_lib: object = None
-_nvml_ok:  object = None   # None=untested  True=works  False=unavailable
+_nvml_lib: Any = None       # ctypes CDLL once loaded
+_nvml_ok:  Any = None       # None=untested  True=works  False=unavailable
 
 
 def _nvml_gpu() -> float:
@@ -36,8 +37,8 @@ def _nvml_gpu() -> float:
 
         if _nvml_lib is None:
             if _OS == "Windows":
-                candidates = ("nvml", r"C:\Windows\System32\nvml.dll")
-                _load = ctypes.WinDLL
+                candidates: tuple[str, ...] = ("nvml", r"C:\Windows\System32\nvml.dll")
+                _load = ctypes.WinDLL  # type: ignore[attr-defined]  # Windows only
             else:
                 candidates = (
                     "libnvidia-ml.so.1",

@@ -93,7 +93,7 @@ def _offline(code, text) -> str:
     return f"Obsidian API error {code}: {str(text)[:200]}"
 
 
-def obsidian(parameters: dict = None, player=None,
+def obsidian(parameters: dict | None = None, player=None,
              session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "status")).lower().strip()

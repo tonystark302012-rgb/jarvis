@@ -78,7 +78,7 @@ def _entry_line(name: str, e) -> str:
     return " — ".join(parts)
 
 
-def feed(parameters: dict = None, player=None, session_memory=None) -> str:
+def feed(parameters: dict | None = None, player=None, session_memory=None) -> str:
     try:
         import feedparser
     except Exception:

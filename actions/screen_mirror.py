@@ -28,7 +28,7 @@ def _server():
         return None
 
 
-def screen_mirror(parameters: dict = None, player=None,
+def screen_mirror(parameters: dict | None = None, player=None,
                   session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "status").lower().strip()

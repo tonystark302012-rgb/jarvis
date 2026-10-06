@@ -54,7 +54,7 @@ def _resolve_page(params: dict):
     return hit
 
 
-def pages(parameters: dict = None, player=None, session_memory=None) -> str:
+def pages(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "list").lower().strip()
     from dots import store

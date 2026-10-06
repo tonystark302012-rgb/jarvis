@@ -1,8 +1,17 @@
 """
-MARK XL — Dependency auto-installer.
+MARK XL — Dependency installer.
 
-Called automatically on first launch and after engine reconfiguration.
-Installs only the packages that are actually missing, then exits cleanly.
+NOT called automatically. It used to say it ran on first launch; nothing had
+called it in a long time, which left this file unreachable and one promise
+broken — `actions/dictation.py` and `actions/meeting.py` need faster-whisper,
+and nothing installed it.
+
+It is now reached from `python main.py --doctor --fix` (tools/doctor.py), which
+is the honest place for it: the doctor reports what is missing, and installing
+packages happens when the user asks for it — never behind their back.
+
+Installs only the packages that are actually missing, and reports what failed
+instead of raising.
 """
 from __future__ import annotations
 
@@ -58,6 +67,12 @@ _TTS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+#: Flattened views for callers that have a package name and need the import
+#: name (or vice versa) without knowing which table it lives in.
+_STT_ALL = [pair for pairs in _STT.values() for pair in pairs]
+_TTS_ALL = [pair for pairs in _TTS.values() for pair in pairs]
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def _available(module: str) -> bool:
@@ -83,6 +98,34 @@ def _pip(package: str, log: Callable | None = None) -> bool:
 
 
 # ── Public API ────────────────────────────────────────────────────────────
+
+def install_missing(packages: list[str], log: Callable | None = None,
+                    import_names: dict[str, str] | None = None) -> list[str]:
+    """pip-install each package (skipping the ones already importable).
+
+    Returns the pip names that FAILED, so a caller can report them and carry on.
+
+    `packages` are pip names ("faster-whisper"), but the thing that decides
+    whether they are needed is the IMPORT name, and the two differ often enough
+    that guessing is how you reinstall a package on every run. Lookup order:
+    the caller's own mapping (the doctor has the full dependency table, and it
+    covers packages this file's tables never mentioned — `paho-mqtt` installs
+    `paho.mqtt`, not `paho_mqtt`), then this file's tables, then a dash-to-
+    underscore best effort.
+    """
+    by_pip = dict(import_names or {})
+    by_pip.update({pip: imp for imp, pip in _CORE + _WINDOWS + _STT_ALL + _TTS_ALL})
+    failed: list[str] = []
+    for pip_name in packages:
+        import_name = by_pip.get(pip_name) or pip_name.replace("-", "_")
+        if _available(import_name):
+            if log:
+                log(f"{import_name} already present")
+            continue
+        if not _pip(pip_name, log):
+            failed.append(pip_name)
+    return failed
+
 
 def install_for_config(config: dict, log: Callable | None = None) -> None:
     """

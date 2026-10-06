@@ -192,7 +192,8 @@ def _mindmap_svg(spec: str, title: str) -> str:
             if bname:
                 branches.append((bname, leaves))
     if not branches:
-        branches = [(ln.strip(), []) for ln in spec.splitlines() if ln.strip()][:8]
+        # one branch per line, none of them with children
+        branches = [(ln.strip(), list[str]()) for ln in spec.splitlines() if ln.strip()][:8]
     if not branches:
         raise ValueError("expected 'idea (branch (leaf))' or lines of branches")
 
@@ -262,7 +263,7 @@ _RENDERERS = {
 }
 
 
-def diagram(parameters: dict = None, player=None, session_memory=None) -> str:
+def diagram(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     kind = str(params.get("kind", "flow")).lower().strip()
     spec = str(params.get("spec", "")).strip()

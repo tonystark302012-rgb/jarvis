@@ -111,7 +111,7 @@ def status() -> str:
             f"break {s['break_min']}m, started {s['started']}).")
 
 
-def focus(parameters: dict = None, player=None, session_memory=None) -> str:
+def focus(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "status")).lower().strip()
 

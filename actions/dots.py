@@ -102,7 +102,7 @@ def _require_dot(params: dict) -> tuple[dict | None, str | None]:
     return d, None
 
 
-def dots(parameters: dict = None, player=None, session_memory=None) -> str:
+def dots(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "chat").lower().strip()
     from dots import store

@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from core import activity
+from core.action_loader import (RESULT_BLOCKED, RESULT_FAILED,
+                                classify_result)
 
 # Tools that change or destroy state beyond the ordinary. Opening a file is
 # fine; deleting a drive is not. The list is consulted by run_task() and is
@@ -170,10 +172,25 @@ def run_task(
             try:
                 result = runner(step.tool, step.args)
                 elapsed = time.time() - t0
-                # A runner returns its outcome as text; empty is still success
-                # unless it raised. Trust the exception channel, not wording.
-                activity.finish(ev, True, result)
-                report.steps.append(StepResult(step, True, str(result or ""), elapsed))
+                text = "" if result is None else str(result)
+                # The exception channel is NOT the failure channel. The runner
+                # main.py wires in is `ActionRegistry.run`, which catches the
+                # handler's exception and returns it as an honest STRING
+                # ("Tool 'x' failed: …") — it never raises. Judging only by
+                # exceptions therefore marked every failed step ✓, which meant
+                # `report.ok` was always True: `stop_on_error` never stopped,
+                # task_agent returned "done", and its documented bounded replan
+                # was unreachable in production. Same classifier as the rules
+                # engine, the timeline and the audit chain.
+                #
+                # `empty` counts as success on purpose — a tool that ran and
+                # found nothing did its job.
+                kind = classify_result(text)
+                ok = kind not in (RESULT_FAILED, RESULT_BLOCKED)
+                activity.finish(ev, ok, text)
+                report.steps.append(StepResult(step, ok, text, elapsed))
+                if not ok and stop_on_error:
+                    report.stopped_early = True
                 break
             except Exception as e:
                 elapsed = time.time() - t0
@@ -196,13 +213,20 @@ def run_task(
     return report
 
 
-def planner_prompt(goal: str, tool_names: list[str]) -> str:
-    """Prompt handed to the LLM planner. Instructs a strict JSON reply."""
+def planner_prompt(goal: str, tool_names: list[str], lessons: str = "") -> str:
+    """Prompt handed to the LLM planner. Instructs a strict JSON reply.
+
+    `lessons` is an optional note about comparable past runs (see
+    core.episode_memory). Empty by default, so a caller that has no history —
+    or that should not read any — builds exactly the prompt it always did.
+    """
+    past = f"{lessons}\n\n" if lessons else ""
     return (
         "You are the planning stage of a desktop automation agent. "
         "Break the goal into a short sequence of steps. Each step MUST be one "
         "of the available tools with simple JSON arguments.\n\n"
         f"Available tools: {', '.join(sorted(tool_names))}\n\n"
+        f"{past}"
         f"Goal: {goal}\n\n"
         "Reply with ONLY a JSON array, no prose, max 8 steps, ordered:\n"
         '[{"tool": "name", "args": {"param": "value"}, "why": "one short reason"}]\n'

@@ -98,7 +98,7 @@ def _ask(frame_path: Path, prompt: str, mode: str) -> str:
         return f"Couldn't read the vision reply: {e}"
 
 
-def phone_vision(parameters: dict = None, player=None, session_memory=None) -> str:
+def phone_vision(parameters: dict | None = None, player=None, session_memory=None) -> str:
     from core import privacy as _privacy
     blocked = _privacy.gate("phone_vision")
     if blocked:

@@ -120,7 +120,7 @@ def _loop() -> None:
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def dictation(parameters: dict = None, player=None,
+def dictation(parameters: dict | None = None, player=None,
               session_memory=None) -> str:
     global _ON, _DEST, _FILE, _PLAYER, _THREAD
     params = parameters or {}

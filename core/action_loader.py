@@ -38,6 +38,74 @@ _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
 _CTX_KEYS = ("player", "speak", "response", "session_memory")
 
+# ── result classification — the ONE place that reads a tool's verdict ────────
+# A tool never raises out of `run()`: a failure comes back as a STRING. So
+# every caller that has to know whether a call worked reads the same text.
+# That test used to be copy-pasted into `run()` (for the audit chain) and
+# `main._agent_runner` (for the Mission Control timeline) — and the automation
+# engine had no copy at all, which is why a rule whose tool answered
+# "denied: …" or "No results found for: …" was filed as a success and never
+# reached the user. One function, four verdicts, no third copy.
+#
+# Nothing here is guessed from a tool's own prose. The markers are (a) the
+# shapes this module emits, (b) the honest prefixes the tool layer already
+# uses, and (c) the explicit "I ran and found nothing" shapes listed below.
+# `terminal` is safe to classify because it wraps output as
+# "$ cmd\n[exit N]\n…" rather than handing back raw stdout.
+RESULT_OK = "ok"
+RESULT_EMPTY = "empty"        # ran fine, honestly found nothing
+RESULT_BLOCKED = "blocked"    # a policy layer said no (autonomy mode)
+RESULT_FAILED = "failed"      # did not work
+
+_FAILED_PREFIXES = ("Action '", "Tool '", "error:", "denied:", "refused:",
+                    "unknown tool:")
+_FAILED_MARKERS = ("failed:", "not available")
+_BLOCKED_PREFIXES = ("Autonomy mode is OBSERVE",)
+
+#: "I ran and there was nothing there" — the shapes bundled tools actually
+#: return: "No results found for: X" (web_search), "No files found."
+#: (file_controller), "No Steam games found." (game_updater), "No references
+#: found from x:1:1." (code_intel). The regex is anchored at the start on
+#: purpose — a tool that reports "Saved. No errors found." is a success, and
+#: matching keywords alone would file it as empty.
+_EMPTY_RE = re.compile(r"^\s*(?:no|zero)\b[^.!?\n]{0,40}?\bfound\b", re.I)
+_EMPTY_MARKERS = ("nothing found", "no matches", "0 results", "none found")
+
+_CLASSIFY_HEAD = 120
+
+
+def classify_result(text: object) -> str:
+    """Map a handler's return value to RESULT_* — never raises.
+
+    Order matters: a blocked call is reported as blocked (not failed), and an
+    empty result is only considered after the failure shapes, so a tool that
+    says "search failed:" is a failure rather than an empty result.
+    """
+    t = "" if text is None else str(text)
+    if not t.strip():
+        return RESULT_EMPTY
+    if _looks_failed(t):
+        return RESULT_FAILED
+    if any(t.startswith(p) for p in _BLOCKED_PREFIXES):
+        return RESULT_BLOCKED
+    head = t[:_CLASSIFY_HEAD]
+    if _EMPTY_RE.match(head):
+        return RESULT_EMPTY
+    low = head.lower()
+    if any(m in low for m in _EMPTY_MARKERS):
+        return RESULT_EMPTY
+    return RESULT_OK
+
+
+def _looks_failed(text: str) -> bool:
+    """The predicate as it shipped, kept byte-compatible on purpose — the
+    audit chain and the timeline already depend on exactly these windows."""
+    return (("failed:" in text[:70]) or
+            text.startswith("Action '") or
+            text.startswith("Tool '") or
+            ("not available" in text[:80]) or
+            any(text.startswith(p) for p in _FAILED_PREFIXES))
+
 
 # A tool may declare that the model should NOT be held up waiting for it.
 # `behavior` goes to the API with the declaration; `scheduling` decides when the
@@ -105,6 +173,9 @@ class ActionRegistry:
             _audit(name, parameters, "unavailable",
                    rec.error if rec else "unknown action")
             return f"Action '{name}' is not available."
+        if rec.handler is None:            # never True for a valid record
+            _audit(name, parameters, "unavailable", "no handler")
+            return f"Action '{name}' has no handler."
         try:
             out = _call_handler(rec.handler, parameters, ctx or {}) or "Done."
         except Exception as e:
@@ -113,10 +184,10 @@ class ActionRegistry:
             _audit(name, parameters, "error", str(e))
             return f"Tool '{name}' failed: {e}"
         text = out if isinstance(out, str) else str(out)
-        failed = (("failed:" in text[:70]) or
-                  text.startswith("Action '") or text.startswith("Tool '") or
-                  "not available" in text[:80])
-        _audit(name, parameters, "failed" if failed else "ok",
+        kind = classify_result(text)
+        failed = kind == RESULT_FAILED
+        _audit(name, parameters,
+               {"failed": "failed", "blocked": "blocked"}.get(kind, "ok"),
                text[:200] if failed else "")
         return out
 

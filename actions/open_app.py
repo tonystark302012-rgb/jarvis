@@ -106,12 +106,14 @@ def _launch_windows(app_name: str) -> bool:
     if ":" in app_name:
         # URI schemes (ms-settings:, https:) — os.startfile is the documented
         # Windows API for ShellExecute; no cmd.exe, no `start`, no metacharacters.
-        try:
-            os.startfile(app_name)  # noqa: S606 — validated input, native API
-            time.sleep(1.0)
-            return True
-        except Exception:
-            pass
+        starter = getattr(os, "startfile", None)   # Windows only
+        if starter is not None:
+            try:
+                starter(app_name)  # noqa: S606 — validated input, native API
+                time.sleep(1.0)
+                return True
+            except Exception:
+                pass
 
     try:
         import pyautogui

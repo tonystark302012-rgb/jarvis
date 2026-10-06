@@ -23,8 +23,9 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
-_STATE: dict = {
+_STATE: dict[str, Any] = {
     "running": False, "path": "", "cmd": "", "runs": 0, "fails": 0,
     "last_run": 0.0, "last_status": "", "error": "", "thread": None,
     "stop": None,
@@ -179,7 +180,7 @@ def _loop(path: str, cmd: str) -> None:
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def dev_loop(parameters: dict = None, player=None,
+def dev_loop(parameters: dict | None = None, player=None,
              session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "status")).lower().strip()
@@ -234,9 +235,9 @@ def dev_loop(parameters: dict = None, player=None,
     if action == "stop":
         if not _STATE.get("running"):
             return "Test loop was not running."
-        stop = _STATE.get("stop")
-        if stop is not None:
-            stop.set()
+        stopper = _STATE.get("stop")
+        if stopper is not None:
+            stopper.set()
         _STATE["running"] = False
         return (f"Test loop STOPPED — {_STATE['runs']} run(s), "
                 f"{_STATE['fails']} fail(s).")

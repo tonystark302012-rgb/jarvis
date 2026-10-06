@@ -19,7 +19,7 @@ try:
     _QT = True
 except ImportError:                                     # pragma: no cover
     _QT = False
-    QWidget = object                                    # import-safe without Qt
+    QWidget = object                                    # type: ignore[misc,assignment]  # import-safe placeholder
 
 
 try:

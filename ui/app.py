@@ -46,10 +46,9 @@ from pathlib import Path
 
 import psutil
 
-if platform.system() == "Windows":
-    _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
-else:
-    _WIN_HIDE: dict = {}
+# Windows-only subprocess flags (0 elsewhere) — defined once in config
+from config import CREATE_NO_WINDOW as _NO_WINDOW
+from config import DETACHED_PROCESS as _DETACHED
 
 # Qt's video backend prints the ffmpeg stream banner — codec, bitrate, the
 # whole signed googlevideo URL — to the console for every stream it opens. That
@@ -95,10 +94,11 @@ except Exception:      # pragma: no cover — HUD must never die over cosmetics
     HoloAvatar = None
 
 
+from core.paths import base_dir
+
+
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
+    return base_dir()
 
 BASE_DIR   = _base_dir()
 CONFIG_DIR = BASE_DIR / "config"
@@ -426,6 +426,8 @@ def set_icon(btn, name: str, color: str | None = None, size: int = 15) -> None:
         btn.setIcon(QIcon(icon_pm(name, color, size)))
         btn.setIconSize(QSize(size, size))
     except Exception:                                 # noqa: BLE001
+        # A pixmap that cannot be composed leaves the button bare — the label
+        # still reads, and the HUD stays up. Deliberate.
         pass
 
 
@@ -563,22 +565,17 @@ def install_global_qss(app: QApplication) -> None:
 
 
 def _load_display_panel(parent=None):
-    """
-    Load DisplayPanel from ui/display_panel.py BY PATH.
+    """The screen inside JARVIS — ui/display_panel.py.
 
-    `from ui.display_panel import …` can never work here: `ui` resolves to
-    THIS module (ui.py), which is not a package, so the submodule import
-    always raised `'ui' is not a package` and the display screen silently
-    never opened. Load the file directly instead — same widget, works.
+    This used to load the file by path, with a comment explaining why the
+    normal import could never work: `ui` resolved to this module (ui.py), which
+    is not a package, so `from ui.display_panel import DisplayPanel` raised
+    "'ui' is not a package" and the display screen silently never opened. The
+    by-path loader was the workaround. `ui/` is a real package now, so the
+    normal import is the fix and the machinery is gone.
     """
-    import importlib.util
-    path = BASE_DIR / "ui" / "display_panel.py"
-    spec = importlib.util.spec_from_file_location("_jarvis_display_panel", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"display panel not found at {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.DisplayPanel(parent)
+    from ui.display_panel import DisplayPanel
+    return DisplayPanel(parent)
 
 
 # ── Windows GPU via NVML DLL (no subprocess, no console window) ──────────────
@@ -851,6 +848,9 @@ class HudCanvas(QWidget):
             if self._avatar is not None:
                 self._avatar.glance(dx, dy, hold)
         except Exception:
+            # Eyelid tracking is the least important thing on screen; it is
+            # also driven per frame from the audio path, so raising here would
+            # take the window down mid-sentence. Deliberate.
             pass
 
     def push_visemes(self, frames, hop: float, at: float) -> None:
@@ -904,6 +904,9 @@ class HudCanvas(QWidget):
             self._visemes = (new, at, hop)
             self._vis_i = None
         except Exception:
+            # A malformed frame schedule costs one mouth animation, not the
+            # call: the audio is already queued and the transcript still lands.
+            # This runs per chunk, so a log line here would be a flood.
             pass
 
     def set_audio_level(self, level: float) -> None:
@@ -6345,7 +6348,7 @@ class MainWindow(QMainWindow):
                 f.write(vbs)
             proc = subprocess.Popen(
                 ["wscript.exe", "/nologo", tmp],
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+                creationflags=_DETACHED | _NO_WINDOW,
             )
             proc.wait(timeout=10)
         finally:
@@ -6441,12 +6444,12 @@ class MainWindow(QMainWindow):
         Never opens a terminal, console, or PowerShell window on any platform.
         """
         import stat as _stat
-        script  = Path(__file__).resolve().parent / "main.py"
+        script  = base_dir() / "main.py"
         python  = Path(sys.executable)
         desktop = self._get_desktop_dir()
 
         # Arc-reactor icon (.ico — also exported as .png for Linux/macOS)
-        ico_path = Path(__file__).resolve().parent / "config" / "jarvis.ico"
+        ico_path = base_dir() / "config" / "jarvis.ico"
         if not ico_path.exists():
             self._build_jarvis_icon(ico_path)
 
@@ -7391,8 +7394,65 @@ class MainWindow(QMainWindow):
         self._hud_btn.clicked.connect(self._toggle_hud_style)
         self._refresh_hud_btn()
 
+        # Tool tiering changes the next connection, not this one — the Live API
+        # fixes its tool list when the socket opens, so the button says so
+        # rather than pretending the change is instant.
+        self._tier_btn = _row(QPushButton())
+        self._tier_btn.clicked.connect(self._toggle_tool_tiering)
+        self._refresh_tier_btn()
+
+        # Diagnostics: the log file is only useful if it can leave the machine.
+        # One press writes a zip (log + redacted config + audit tail) and says
+        # where it went, because "send me the log" is the first thing anyone
+        # asks and hunting for ~/.jarvis/logs is the first thing that fails.
+        self._diag_btn = _row(QPushButton())
+        self._diag_btn.setText("  EXPORT DIAGNOSTICS")
+        self._diag_btn.setStyleSheet(self._BTN_DIM)
+        set_icon(self._diag_btn, "save", C.TEXT_MED, 13)
+        self._diag_btn.clicked.connect(self._export_diagnostics)
+
         w.adjustSize()
         return w
+
+    def _export_diagnostics(self) -> None:
+        """Write the bundle and tell the user exactly where it landed."""
+        try:
+            from core import logging_setup
+            if not logging_setup.is_configured():
+                logging_setup.setup(console=False)
+            dest = logging_setup.export_diagnostics()
+            self.write_log(f"SYS: Diagnostics written → {dest}")
+        except Exception as e:
+            self.write_log(f"SYS: Could not write diagnostics — {e}")
+
+    def _refresh_tier_btn(self) -> None:
+        from memory.config_manager import get_tool_tiering_enabled
+        on = get_tool_tiering_enabled()
+        self._tier_btn.setText("  TOOLS: CORE + SEARCH" if on
+                               else "  TOOLS: ALL DECLARED")
+        set_icon(self._tier_btn, "layers", C.PRI if on else C.TEXT_MED, 13)
+        self._tier_btn.setStyleSheet(self._BTN_PRI if on else self._BTN_DIM)
+
+    def _toggle_tool_tiering(self) -> None:
+        """Declare only the core tools, or every tool — takes effect on the
+        next session (the Live API cannot add declarations mid-socket).
+
+        The "all declared" side is not a debugging leftover: it is what you want
+        while writing a new action, so the model can see the tool without going
+        through a search first.
+        """
+        from memory.config_manager import (get_tool_tiering_enabled,
+                                           save_tool_tiering_enabled)
+        new_val = not get_tool_tiering_enabled()
+        save_tool_tiering_enabled(new_val)
+        self._refresh_tier_btn()
+        self.write_log(
+            "SYS: Tool tiering "
+            + ("ON — core tools declared, the rest found through toolbox. "
+               "Applies on the next connection."
+               if new_val else
+               "OFF — every tool declared up front, ~16k more tokens per "
+               "session. Applies on the next connection."))
 
     def _warm_wake_state(self) -> None:
         """Work out the wake-word state off the UI thread, once.
@@ -8058,7 +8118,7 @@ class MainWindow(QMainWindow):
     def _toggle_autostart(self):
         currently_on = self._check_autostart()
         try:
-            script = str(Path(__file__).resolve().parent / "main.py")
+            script = str(base_dir() / "main.py")
             if _OS == "Windows":
                 import winreg
                 reg = winreg.OpenKey(winreg.HKEY_CURRENT_USER,

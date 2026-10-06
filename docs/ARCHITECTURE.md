@@ -11,7 +11,7 @@
 > local-VLM provider (Ollama); MCP Streamable HTTP; world_view (NASA
 > GIBS + OSM); screen_mirror as a thin tool over the EXISTING dashboard
 > mirror (duplicate rejected — see §2.8). Gates at final: **693/693**,
-> ruff clean, 50 actions discovered.
+> ruff clean, mypy clean on the curated module list (127 of 160 modules), 50 actions discovered.
 > §4 backlog below now holds only what is deliberately still open.
 > Everything here maps to real code paths (file:line cited where it matters).
 > Nothing in this document is a prototype: each subsystem ships implemented
@@ -26,24 +26,33 @@
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ PRESENTATION                                                         │
-│   ui.py (PyQt HUD)  ·  dashboard/ (phone: FastAPI + WS)  ·  voice    │
+│   ui/ (PyQt HUD)    ·  dashboard/ (phone: FastAPI + WS)  ·  voice    │
 ├──────────────────────────────────────────────────────────────────────┤
 │ SESSION                                                               │
-│   main.py — Gemini Live session, audio I/O, barge-in (EchoGuard),     │
-│   presence gate, proactive loop, event engine, rules tick (30s)       │
+│   main.py — Gemini Live session, run loop, presence gate, proactive   │
+│   loop, event engine, rules tick (30s). Its three mixes:              │
+│     core/tool_dispatch.py  — batch scheduler + tool entry point       │
+│     core/audio_loop.py     — mic/speakers, barge-in (EchoGuard)       │
+│     core/wake_and_relay.py — wake state machine + phone relays        │
 ├──────────────────────────────────────────────────────────────────────┤
 │ TOOL PLANE                                                            │
-│   ActionRegistry (core/action_loader) — 46 bundled tools (TOOL dicts) │
+│   ActionRegistry (core/action_loader) — 76 bundled tools (TOOL dicts) │
 │   PluginRegistry (core/plugin_loader) — gmail, calendar              │
+│   ToolTiers (core/tool_tiers) — 21 declared + `toolbox` router,      │
+│     ~55 deferred; measured 23.4k → 10.6k tokens per connection       │
+│     (`tools/count_tools.py` regenerates those numbers)               │
 │   confirm (unforgeable UI token) · undo journal · privacy gate       │
 ├──────────────────────────────────────────────────────────────────────┤
 │ AGENT PLANE (today: three bespoke loops)                              │
-│   task_agent  → planner LLM → core/orchestrator (sequential steps)   │
+│   task_agent  → episode_memory.lessons_for(goal) → planner LLM        │
+│              → core/orchestrator (sequential steps)                   │
 │   browser agent → snapshot→reason→act→verify (browser_control)       │
 │   multi_agent → planner→coder→tester (dry-run diffs)                 │
 ├──────────────────────────────────────────────────────────────────────┤
 │ PERSISTENCE & SIGNALS                                                 │
 │   taskstore (sqlite runs) · history_search (sqlite FTS) · memory     │
+│   episode_memory (reads taskstore runs → planner lessons; no store   │
+│     of its own — delete a run and its lesson goes with it)           │
 │   activity (Mission Control timeline) · events bus · rules JSON      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -256,12 +265,23 @@ def call_native(full_name: str, args: dict) -> str
     # → tools/call → concatenate TextContent blocks → honest error strings
 ```
 
-main.py wiring (both source-indexed in tests, since main isn't importable
+main.py wiring (the session is constructed for real in tests now — see
+tests/test_main_behavior.py — so only the task-group starts are source-indexed
 without PyQt):
 
-* `_build_config`: `_all_decls = base + actions + plugins + native_declarations()`
+* `_build_config`: `_all_decls = base + actions + plugins + native_declarations()`,
+  then `core/tool_tiers.split_declarations()` keeps the core tier and the
+  `toolbox` router and stores the rest on `self._deferred_decls` for the router
+  to search. The Live API fixes its tool list when the socket opens (no
+  `update_tools` on `AsyncSession`), so a tool that is not declared here can
+  only ever be reached through the router.
 * `_execute_tool`: new `elif name.startswith("mcp__"):` **before** the
   registry check → `await loop.run_in_executor(call_native, …)`.
+* `_execute_tool`: `toolbox` is intercepted at the top and, for `action=run`,
+  **re-enters `_execute_tool`** with the real tool name. Routing is therefore
+  not a second dispatch path — the autonomy gate, confirm gate, activity
+  timeline and audit chain see the real tool exactly as they do for a direct
+  call (`tests/test_tool_tiers.py::TestRoutedCallsAreNotUnsandboxed`).
 
 **Cross-questions**
 
@@ -460,7 +480,7 @@ tests). What is honestly still open:
 1. Additive dataclass fields only (`cancelled: bool = False`) — old tests
    must pass untouched.
 2. Every new public function gets failure-path tests, not just happy path.
-3. main.py changes are paired with source-index tests (PyQt absent in CI).
+3. session changes are paired with tests that run the object (PyQt absent in CI).
 4. No new required dependencies. Optional imports degrade with instructions.
 5. LLM-shaped seams (`planner`, `replan`, `_decide`) are injectable callables —
    tests script exact JSON, never the network.

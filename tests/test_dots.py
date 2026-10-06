@@ -1488,10 +1488,17 @@ class TestScheduler:
         run = _wait_for(lambda: store.last_run(t["id"]))
         assert run is not None and run["status"] == "ok"
         assert "scripted reply to:" in run["output"]
-        # history accumulates on the task convo for the NEXT run
+        # dots/scheduler._execute writes the run row FIRST and the dot's
+        # reply / the reschedule after it, so waiting on the row alone races
+        # the worker thread. Wait for the thing actually being asserted.
+        assert _wait_for(lambda: len(store.list_messages(f"task:{t['id']}")) >= 2
+                         and store.list_messages(f"task:{t['id']}")[-1]["role"] == "dot",
+                         timeout=4), "the dot's reply never reached the history"
         msgs = store.list_messages(f"task:{t['id']}")
         assert msgs[-2]["role"] == "user" and msgs[-1]["role"] == "dot"
         # next_run advanced by exactly one window here (no missed slots)
+        assert _wait_for(lambda: store.get_task(t["id"])["next_run_at"]
+                         >= t["next_run_at"] + 3600, timeout=4)
         fresh = store.get_task(t["id"])
         assert fresh["next_run_at"] >= t["next_run_at"] + 3600
         assert fresh["last_run_at"] is not None
@@ -1505,7 +1512,10 @@ class TestScheduler:
         base = time.time() - 35                       # 3.5 windows missed
         t = store.create_task("m", "do the thing", 10, 1, next_run_at=base)
         assert scheduler.tick() == 1
-        assert _wait_for(lambda: store.last_run(t["id"]))
+        # `advance_next_run` runs after `record_run`, so wait for the advance
+        # itself rather than for the run row.
+        assert _wait_for(lambda: store.get_task(t["id"])["next_run_at"] > base,
+                         timeout=4), "the next window was never advanced"
         fresh = store.get_task(t["id"])
         jump = fresh["next_run_at"] - base
         assert jump % 10 == 0 and 30 <= jump <= 70    # whole multiples only
@@ -1579,6 +1589,13 @@ class TestScheduler:
         run = _wait_for(lambda: store.last_run(t["id"]))
         assert run["status"] == "failed"
         assert run["output"].startswith("No brain reachable")
+        # The run ROW is written before the worker clears `_live`, and the
+        # retry path refuses while the task is live ("already running") — so
+        # waiting for the row alone races the thread. `advance_next_run` (a DB
+        # write) and the `finally: _live.pop()` both sit after `record_run`.
+        # Seen on CI's py3.13 runner; reproducible locally by slowing
+        # `advance_next_run` by half a second.
+        assert _wait_for(lambda: t["id"] not in scheduler._live, timeout=4)
         # retry with brain fixed → ok
         brain.set_llm(lambda system, hist: "recovered now")
         out = dots_action({"action": "task_retry", "which": str(t["id"])})

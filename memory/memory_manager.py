@@ -3,19 +3,17 @@ import re
 from datetime import datetime
 from threading import Lock
 from pathlib import Path
-import sys
 
 
 try:                                   # normal package import
     from . import semantic_recall
 except ImportError:                    # loaded as a top-level module
-    import semantic_recall
+    import semantic_recall            # type: ignore[no-redef]
 
 
 def get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    from core.paths import base_dir
+    return base_dir()
 
 
 BASE_DIR         = get_base_dir()

@@ -1,6 +1,5 @@
 import json
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -21,9 +20,8 @@ except ImportError:
     _PYPERCLIP = False
 
 def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    from core.paths import base_dir
+    return base_dir()
 
 def _get_os() -> str:
     try:
@@ -152,31 +150,37 @@ def _desktop_send(app_name: str, receiver: str, message: str) -> str:
     return f"Message sent to {receiver} via {app_name}."
 
 def _send_whatsapp(receiver: str, message: str) -> str:
-    """WhatsApp goes through the verified driver when there is one.
+    """WhatsApp sends through the verified driver **if one has been installed**.
 
-    _desktop_send below is a sequence of keystrokes with sleeps between them:
-    it presses Win, types the app name, presses Ctrl+F, types the contact,
-    presses Enter twice and reports success — without ever reading back which
-    window received any of that. When the machine is a second slower than the
-    sleeps assume, the whole sequence lands somewhere else and the user is
+    ⚠️ This module does NOT ship a WhatsApp driver. JARVIS falls back to
+    `_desktop_send`, which is a sequence of keystrokes with sleeps between
+    them: it presses Win, types the app name, presses Ctrl+F, types the
+    contact, presses Enter twice and reports success — **without ever reading
+    back which window received any of that**. On a machine a second slower
+    than the sleeps assume, the sequence lands somewhere else and the user is
     still told the message was sent.
 
-    plugins/_whatsapp_core.py already drives WhatsApp properly for the calling
-    plugins: it finds the real window, opens the conversation, checks the
-    conversation is the right person's, types, and confirms the box emptied
-    before it says "sent". Using it here costs nothing and removes the one
-    failure that matters — a message reported as delivered that never left.
+    The branch below is an opt-in seam, not a bundled feature. Drop a
+    `plugins/_whatsapp_core.py` exposing `get() -> (transport, why)` — where
+    `transport.send_message_to(receiver, message) -> (sent, failure)` — and
+    the safe path takes over: it finds the real window, opens the
+    conversation, checks it is the right person's, types, and confirms the box
+    emptied before reporting "sent".
 
-    The blind path stays as the fallback for a machine where the driver cannot
-    run at all (the plugin file removed, a missing dependency, no WhatsApp).
-    But once the driver HAS run, its answer stands: falling back after it
-    refused to send is how a message ends up typed into the wrong
-    conversation, which is worse than not sending it.
+    Once the driver HAS run, its answer stands: falling back after it refused
+    to send is how a message ends up typed into the wrong conversation, which
+    is worse than not sending it.
     """
     try:
-        from plugins import _whatsapp_core as wa
+        # Not shipped with the project — a user can drop a driver in here.
+        from plugins import _whatsapp_core as wa  # type: ignore[attr-defined]
+    except ImportError:
+        # The expected case — no driver installed. Not an error, so it does
+        # not print: a scary line on every send trains people to ignore logs.
+        return _desktop_send("WhatsApp", receiver, message)
     except Exception as e:
-        print(f"[SendMessage] WhatsApp driver unavailable ({e}) — typing blind.")
+        print(f"[SendMessage] WhatsApp driver present but unloadable ({e}) "
+              f"— typing blind.")
         return _desktop_send("WhatsApp", receiver, message)
 
     try:

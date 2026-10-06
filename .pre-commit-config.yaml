@@ -1,0 +1,53 @@
+# ── Pre-commit: the checks that must not reach CI ─────────────────────────────
+#
+#   pip install pre-commit && pre-commit install
+#
+# Deliberately NOT here: `ruff format`. The repository is not format-clean on
+# purpose — it is 74,000 lines of compact, hand-laid-out code, and reformatting
+# it would rewrite every file and bury every real diff. Formatting is available
+# as `make format` (and as a manual pre-commit stage below) for anyone who wants
+# it on the file they are already touching.
+#
+# See CONTRIBUTING.md. CI runs `pre-commit run --all-files` for the fast hooks
+# and the full test suite separately.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'        # markdown hard-wraps with two spaces on purpose
+      - id: end-of-file-fixer
+        exclude: '\.(obj|png|ico|wav|mp3)$'
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=2048']
+      - id: check-yaml
+      - id: check-json
+        exclude: '^config/'     # api_keys.json is never committed anyway
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ['--fix=no']
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # ── Repository-specific guards ──────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: no-secrets-staged
+        name: no secret files staged (api_keys.json, certs, tokens)
+        entry: python tools/check_staged_secrets.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: ruff-format
+        name: ruff format (manual — run with `pre-commit run ruff-format --all-files`)
+        entry: ruff format
+        language: system
+        types: [python]
+        stages: [manual]

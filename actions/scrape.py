@@ -23,7 +23,7 @@ _TITLE_TAG = "title"
 class _TextExtractor(HTMLParser):
     """Stdlib fallback: keep text, drop chrome, mark block boundaries."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._skip = 0
         self._in_title = False
@@ -118,7 +118,7 @@ def _fetch(url: str, timeout: int = 20) -> str:
     return resp.text
 
 
-def scrape(parameters: dict = None, player=None, session_memory=None) -> str:
+def scrape(parameters: dict | None = None, player=None, session_memory=None) -> str:
     from core import privacy as _privacy
     blocked = _privacy.gate("scrape")
     if blocked:
@@ -198,7 +198,7 @@ def _structured_extract(html: str, url: str, max_chars: int = 8000) -> str:
     ld_objects: list[dict] = []
 
     class _HeadParser(HTMLParser):
-        def __init__(self):
+        def __init__(self) -> None:
             super().__init__(convert_charrefs=True)
             self._in_ld = False
             self._ld_buf: list[str] = []

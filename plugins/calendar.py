@@ -167,7 +167,9 @@ def _expand(event: dict, window_start: datetime, window_end: datetime) -> list[d
 
 def parse_ics(raw: str, window_start: datetime, window_end: datetime) -> list[dict]:
     """Events in [window_start, window_end), sorted by start."""
-    events, cur, in_event = [], None, False
+    events: list[dict] = []
+    cur: dict | None = None
+    in_event = False
     for line in _unfold(raw):
         if line.startswith("BEGIN:VEVENT"):
             cur, in_event = {}, True

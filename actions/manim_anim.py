@@ -94,7 +94,7 @@ def _render(file_path: Path, scene: str, quality: str,
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def manim_anim(parameters: dict = None, player=None,
+def manim_anim(parameters: dict | None = None, player=None,
                session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "render")).lower().strip()

@@ -17,6 +17,7 @@ Install deps:  pip install fastapi "uvicorn[standard]" cryptography
 import asyncio
 import base64
 import hashlib
+import math
 import re
 import json
 import secrets
@@ -59,6 +60,9 @@ def _make_uploads_dir() -> Path:
             candidate.mkdir(parents=True, exist_ok=True)
             return candidate
         except Exception:
+            # Try the next location. A read-only home directory or a missing
+            # Documents folder is normal on some setups, and the fallback below
+            # is the answer — there is nothing to report until every one fails.
             pass
     return BASE_DIR / "uploads"
 
@@ -377,6 +381,10 @@ def _local_ip() -> str:
             if not ip.startswith("127.") and not ip.startswith("169.254."):
                 return ip
     except Exception:
+        # No usable LAN address (offline, VPN-only, restricted DNS). The URL
+        # printed for the phone then shows 127.0.0.1, which is wrong but
+        # harmless, and the alternative — raising — would stop the dashboard
+        # from starting at all.
         pass
 
     return "127.0.0.1"
@@ -460,6 +468,8 @@ def _ensure_certs() -> bool:
             import os as _os
             _os.chmod(key_p, 0o600)   # best effort — largely a no-op on Windows
         except Exception:
+            # NTFS ignores POSIX modes. The key is still only in config/certs/,
+            # which is git-ignored and never served.
             pass
 
         print(f"[Dashboard] Generated a self-signed certificate for this machine: {certs}")
@@ -480,6 +490,29 @@ def _read(name: str) -> str:
 ACTIVE: "DashboardServer | None" = None
 
 
+class _TokenSet(set):
+    """The live-token set, with the rule that a token always has a lifetime.
+
+    Membership and expiry used to live in two unrelated containers (`_tokens`
+    and a side dict), which drifted the moment anything added a token without
+    also recording when it should die — the result being a token that never
+    expired and whose state was never swept. Recording a default lifetime on
+    `add()` makes that impossible to get wrong: an explicit expiry set by
+    `_mint_token` wins, and anything added by hand still gets a real deadline
+    instead of silently becoming immortal.
+    """
+
+    def __init__(self, expiries: dict[str, float], default_ttl: float) -> None:
+        super().__init__()
+        self._expiries = expiries
+        self._default_ttl = default_ttl
+
+    def add(self, tok: str) -> None:            # noqa: D102 - set.add
+        # setdefault, so the explicit expiry `_mint_token` already wrote stands.
+        self._expiries.setdefault(tok, time.time() + self._default_ttl)
+        super().add(tok)
+
+
 class DashboardServer:
 
     def __init__(self):
@@ -487,8 +520,12 @@ class DashboardServer:
         ACTIVE = self
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ip                          = _local_ip()
-        self._tokens: set[str]            = set()
+        # `_token_expiry` is declared first — `_TokenSet` writes into it.
+        self._token_expiry: dict[str, float] = {}  # auth_token → epoch it dies
+        self._tokens: set[str]            = _TokenSet(self._token_expiry,
+                                                      self._TOKEN_TTL)
         self._token_keys: dict[str, str]  = {}   # auth_token → session_key
+        self._last_sweep: float           = 0.0  # when _sweep_tokens last ran
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
         self._history: list[dict]         = []
@@ -526,6 +563,22 @@ class DashboardServer:
     _LOGIN_WINDOW     = 300.0    # failures older than this stop counting
     _LOGIN_LOCKOUT    = 600.0    # seconds a locked-out address stays locked
 
+    # ── session lifetime ──────────────────────────────────────────────────
+    # A phone bearer token used to live forever: minted on login, added to a
+    # set, never removed. Two problems with that — the state grew without
+    # bound across a long-running app, and a phone that was paired once (its
+    # device token sits in localStorage) kept re-minting tokens forever with
+    # no way to take the access back short of restarting JARVIS.
+    #
+    # Phone tokens now expire, and the sweep below actually deletes the state
+    # behind a dead token instead of just ignoring it. The HUD token is the
+    # exception: it never leaves this machine (loopback, minted once by
+    # `ui_session`), so it is given no expiry or the desktop workspaces would
+    # break mid-session.
+    _TOKEN_TTL        = 12 * 3600.0   # a paired phone session lasts 12 hours
+    _DEVICE_TTL       = 30 * 86400.0  # a paired device may re-login for 30 days
+    _TOKEN_SWEEP      = 60.0          # prune at most this often (never per-request)
+
     def _rate_limited(self, ip: str) -> bool:
         """True when `ip` has failed too often and is still inside its lockout."""
         now  = time.time()
@@ -549,6 +602,69 @@ class DashboardServer:
         self._aes_key(enc)                 # pre-derive & cache
         return enc
 
+    # ── token lifecycle ───────────────────────────────────────────────────
+
+    def _mint_token(self, session_key: str, ttl: float | None) -> str:
+        """Create a bearer token. `ttl=None` means it never expires.
+
+        The expiry is written before `_tokens.add`, whose own default then
+        defers to it — see `_TokenSet`.
+        """
+        tok = secrets.token_urlsafe(32)
+        self._token_expiry[tok] = math.inf if ttl is None else time.time() + ttl
+        self._tokens.add(tok)
+        self._token_keys[tok] = session_key
+        return tok
+
+    def _forget_token(self, tok: str) -> None:
+        """Drop every trace of one token, so nothing can authenticate with it."""
+        self._tokens.discard(tok)
+        self._token_keys.pop(tok, None)
+        self._token_enckey.pop(tok, None)
+        self._token_expiry.pop(tok, None)
+
+    def _prune_aes_cache(self) -> None:
+        """Keep only AES keys a live token still needs.
+
+        `_aes_cache` is keyed by the per-token random `enc`, so once its token
+        is gone the derived key is unreachable and is pure leak.
+        """
+        live = set(self._token_enckey.values())
+        for stale in [k for k in self._aes_cache if k not in live]:
+            self._aes_cache.pop(stale, None)
+
+    def _sweep_tokens(self, force: bool = False) -> None:
+        """Expire timed-out tokens and free their state.
+
+        Throttled by `_TOKEN_SWEEP` because it walks the token dict — it runs
+        on the auth path, and auth is on every request.
+        """
+        now = time.time()
+        if not force and now - self._last_sweep < self._TOKEN_SWEEP:
+            return
+        self._last_sweep = now
+        for tok in [t for t, exp in self._token_expiry.items() if now > exp]:
+            self._forget_token(tok)
+        # Device tokens age out too, so a phone paired once is not permanent.
+        for dev in [d for d, s in self._device_sessions.items()
+                    if now > (s.get("expires") or 0)]:
+            self._device_sessions.pop(dev, None)
+        self._prune_aes_cache()
+
+    def revoke_phone_sessions(self) -> int:
+        """Kill every phone session. Returns how many tokens actually died.
+
+        This is what the UI's "revoke" action must call. The HUD token is
+        deliberately spared: it is loopback-only and belongs to this desktop,
+        so revoking a phone must not blank the local workspace panels.
+        """
+        phones = [t for t, key in self._token_keys.items() if key != "hud"]
+        for tok in phones:
+            self._forget_token(tok)
+        self._device_sessions.clear()          # no auto re-login either
+        self._prune_aes_cache()
+        return len(phones)
+
     def new_key(self, expiry_secs: int = 600) -> str:
         now = time.time()
         self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
@@ -559,11 +675,13 @@ class DashboardServer:
     def ui_session(self) -> str:
         """Mint a long-lived bearer token for the desktop HUD's workspace
         panels (Spaces/Agents/Computers/Calls/Agenda). Same process, loopback
-        only — the token dies with the server, never written to disk."""
-        tok = secrets.token_urlsafe(32)
-        self._tokens.add(tok)
-        self._token_keys[tok] = "hud"
-        return tok
+        only — the token dies with the server, never written to disk.
+
+        No expiry on purpose: this token never leaves the machine, and letting
+        it time out mid-session would break the workspace panels until the app
+        restarted. `revoke_phone_sessions` also leaves it alone.
+        """
+        return self._mint_token("hud", None)
 
     @staticmethod
     def _ssl_enabled() -> bool:
@@ -703,7 +821,15 @@ class DashboardServer:
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
             if not tok:
                 tok = str(req.query_params.get("token") or "").strip()
-            return bool(tok) and tok in self._tokens
+            if not tok or tok not in self._tokens:
+                return False
+            # Expiry is checked here, not just at sweep time — otherwise a
+            # timed-out token would keep working until the next sweep.
+            if time.time() > self._token_expiry.get(tok, 0.0):
+                self._forget_token(tok)
+                return False
+            self._sweep_tokens()          # throttled; also frees dead state
+            return True
 
         # serve CryptoJS from local cache, fallback to CDN redirect
         @app.get("/static/crypto.js")
@@ -744,9 +870,7 @@ class DashboardServer:
             if entered in self._pending_keys and self._pending_keys[entered] > now:
                 del self._pending_keys[entered]          # one-time use
                 self._login_fails.pop(ip, None)          # clean slate on success
-                tok = secrets.token_urlsafe(32)
-                self._tokens.add(tok)
-                self._token_keys[tok] = entered          # kept for bookkeeping
+                tok = self._mint_token(entered, self._TOKEN_TTL)
                 enc = self._new_enc_key(tok)             # real key material
                 if self._connect_callback:
                     self._connect_callback()
@@ -778,12 +902,15 @@ class DashboardServer:
 </div></body></html>""")
 
             del self._pending_keys[key]
-            tok     = secrets.token_urlsafe(32)
+            tok     = self._mint_token(key, self._TOKEN_TTL)
             dev_tok = secrets.token_urlsafe(32)
-            self._tokens.add(tok)
-            self._token_keys[tok] = key          # bookkeeping only
             enc = self._new_enc_key(tok)         # 256 random bits = real key material
-            self._device_sessions[dev_tok] = {"session_key": key}
+            # Device tokens carry their own clock: a phone paired once must not
+            # be able to re-login forever (see revoke_phone_sessions).
+            self._device_sessions[dev_tok] = {
+                "session_key": key,
+                "expires":     time.time() + self._DEVICE_TTL,
+            }
             enc_js = json.dumps(enc)          # safe to embed: hex, no quotes
 
             if self._connect_callback:
@@ -819,10 +946,13 @@ class DashboardServer:
             dev_tok = (body.get("device_token") or "").strip()
             if not dev_tok or dev_tok not in self._device_sessions:
                 return JSONResponse({"ok": False}, status_code=401)
+            # Fail closed on an aged-out device: `.get` so a record written by
+            # an older build (no "expires") is treated as expired, not trusted.
+            if time.time() > (self._device_sessions[dev_tok].get("expires") or 0):
+                self._device_sessions.pop(dev_tok, None)
+                return JSONResponse({"ok": False}, status_code=401)
             session_key = self._device_sessions[dev_tok]["session_key"]
-            tok = secrets.token_urlsafe(32)
-            self._tokens.add(tok)
-            self._token_keys[tok] = session_key
+            tok = self._mint_token(session_key, self._TOKEN_TTL)
             enc = self._new_enc_key(tok)
             if self._connect_callback:
                 self._connect_callback()
@@ -835,12 +965,22 @@ class DashboardServer:
 
         @app.post("/api/revoke-devices")
         async def revoke_devices(req: Request):
-            """Invalidate all persistent device tokens (admin action)."""
+            """Invalidate every paired phone — its live tokens AND its ability
+            to re-login automatically.
+
+            This used to clear only `_device_sessions`, so the caller was told
+            "revoked: N" while the already-issued bearer tokens kept
+            authenticating. Revoking has to kill the live sessions too, or the
+            button reports a security action it did not perform.
+            """
             if not _auth(req):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
-            count = len(self._device_sessions)
-            self._device_sessions.clear()
-            return JSONResponse({"ok": True, "revoked": count})
+            devices = len(self._device_sessions)
+            tokens  = self.revoke_phone_sessions()
+            print(f"[Dashboard] Revoked {tokens} session(s) and "
+                  f"{devices} paired device(s).")
+            return JSONResponse({"ok": True, "revoked": tokens,
+                                 "devices": devices})
 
         @app.post("/api/command")
         async def command(req: Request):
@@ -991,6 +1131,9 @@ class DashboardServer:
                     try:
                         dest.unlink(missing_ok=True)
                     except Exception:
+                        # The half-written upload could not be removed on this
+                        # filesystem; the error below is what the client needs,
+                        # and a failed cleanup must not replace it.
                         pass
                     return JSONResponse({"error": str(exc)}, status_code=500)
 

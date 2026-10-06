@@ -26,10 +26,6 @@ from pathlib import Path
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
 
-def _get_api_key() -> str:
-    config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
 
 
 def _gemini_client(tier: str = gemini.SMART):
@@ -104,7 +100,7 @@ def _default_action(file_type: str) -> str:
     return "analyze"
 
 
-def _output_path(src: Path, suffix: str, new_ext: str = None) -> Path:
+def _output_path(src: Path, suffix: str, new_ext: str | None = None) -> Path:
     ext  = new_ext or src.suffix
     name = f"{src.stem}_{suffix}{ext}"
     return src.parent / name

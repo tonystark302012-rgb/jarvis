@@ -177,11 +177,12 @@ def _resolve_path(raw: str) -> Path:
     return Path(raw).expanduser()
 
 def _format_size(b: int) -> str:
+    size = float(b)
     for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if b < 1024:
-            return f"{b:.1f} {unit}"
-        b /= 1024
-    return f"{b:.1f} TB"
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 def _safe_trash(target: Path) -> str:
 
@@ -286,8 +287,9 @@ def delete_file(path: str, name: str = "") -> str:
         original = target.resolve()
         result   = _safe_trash(target)
         if result.startswith("Moved to Trash"):
-            push_undo(f"deleted {original.name}",
-                      lambda p=original: _restore_from_trash(p))
+            def _undo_restore(path: Path = original) -> str:
+                return _restore_from_trash(path)
+            push_undo(f"deleted {original.name}", _undo_restore)
         return result
 
     except PermissionError:
@@ -646,7 +648,7 @@ def get_file_info(path: str, name: str = "") -> str:
         return f"Could not get file info: {e}"
 
 def file_controller(
-    parameters: dict = None,
+    parameters: dict | None = None,
     response=None,
     player=None,
     session_memory=None,

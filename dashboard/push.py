@@ -52,6 +52,10 @@ def _vapid_pair() -> tuple[ec.EllipticCurvePrivateKey, Path, Path]:
     if priv_pem.is_file() and pub_pem.is_file():
         priv = serialization.load_pem_private_key(
             priv_pem.read_bytes(), password=None)
+        if not isinstance(priv, ec.EllipticCurvePrivateKey):
+            # The file is ours, so this only happens if it was replaced by hand.
+            # Regenerate rather than hand a wrong key type to the signer.
+            raise ValueError(f"{priv_pem} is not an EC private key")
         return priv, pub_pem, priv_pem
     priv = ec.generate_private_key(ec.SECP256R1())
     priv_pem.write_bytes(priv.private_bytes(

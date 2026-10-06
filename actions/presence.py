@@ -52,6 +52,8 @@ def presence(parameters: dict, ctx: dict | None = None) -> str:
 
     if action in {"set_away_after", "set"}:
         secs = parameters.get("seconds") or parameters.get("value")
+        if secs is None:
+            return "Need a number of seconds, e.g. seconds=300."
         try:
             new = tr.set_away_after(float(secs))
         except (TypeError, ValueError):

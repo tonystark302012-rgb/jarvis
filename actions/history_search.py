@@ -188,7 +188,7 @@ def stats() -> str:
     return f"History: {n} turns from {span} to {end}."
 
 
-def history(parameters: dict = None, player=None, session_memory=None) -> str:
+def history(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "search").lower().strip()
     if action == "recent":

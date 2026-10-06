@@ -31,7 +31,7 @@ def _fmt_row(label: str, st: dict | None, unit: str = "%") -> str:
             f"(min {st['min']}, max {st['max']}, n={st['n']})")
 
 
-def system_history(parameters: dict = None, player=None,
+def system_history(parameters: dict | None = None, player=None,
                    session_memory=None) -> str:
     from core import metrics_store as ms
     params = parameters or {}

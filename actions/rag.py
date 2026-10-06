@@ -547,7 +547,7 @@ def _extract_brief(rows, topic: str = "") -> str:
     return head + ":\n" + "\n".join(f"• {ln}" for ln in lines)
 
 
-def rag(parameters: dict = None, player=None, session_memory=None) -> str:
+def rag(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "").lower().strip()
 

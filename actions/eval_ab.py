@@ -105,7 +105,7 @@ def _judge(prompt: str, a: str, b: str, criteria: str) -> dict:
 
 # ── handler ─────────────────────────────────────────────────────────────────
 
-def eval_ab(parameters: dict = None, player=None,
+def eval_ab(parameters: dict | None = None, player=None,
             session_memory=None) -> str:
     from core import privacy as _privacy
     blocked = _privacy.gate("eval_ab")
