@@ -70,6 +70,15 @@ jobs:
       - name: Types (mypy — curated module list)
         run: python -m mypy
 
+      # A silent handler is not automatically a bug — a teardown path must not
+      # raise a second exception while handling the first — so this reports
+      # rather than gates. It counts the ones with no log and no comment on a
+      # feature-shaped path: the number that should go down.
+      - name: Silent-exception report (warn only)
+        continue-on-error: true
+        run: |
+          python tools/silent_except_audit.py | head -30
+
       - name: Syntax-check every module (catches what tests don't import)
         run: python -m compileall -q actions core dashboard memory dots ui config main.py bootstrap.py
 

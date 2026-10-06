@@ -1108,59 +1108,77 @@ Hinglish strings aur English strings code me mixed hain (`'Researcher se pucho..
 
 ## 🚀 Part 9: UPGRADE ROADMAP (Priority Order)
 
-### 🔴 P0 — Abhi Karo (Security + Real Bugs)
+> **Status: implemented.** Everything in P0, P1, P2 and P3 below has landed on
+> `arena/86683437-jarvis` except the four items marked 🔨 (P2-16, P2-17 and the
+> two "keep going" items: P3-23's remaining handlers and P3-28's remaining
+> modules). Each entry says what it actually turned into and where its tests
+> live. This section is a record now, not a plan — the numbers are measured, not
+> estimates.
 
-| # | Kaam | File | Effort | Impact |
-|---|---|---|---|---|
-| 1 | `revoke_devices` me `_tokens` bhi clear karo | `dashboard/server.py:837` | **5 min** | 🔴 Critical security |
-| 2 | Dashboard tokens pe TTL + cleanup | `dashboard/server.py:490` | 1 hr | 🔴 Security + leak |
-| 3 | `plugins/_whatsapp_core.py` — ya commit karo ya dead code hatao | `actions/send_message.py:177` | 15 min | 🟠 Broken feature |
-| 4 | `computer_settings.py` me saare subprocess pe `timeout=` | `actions/computer_settings.py` | 20 min | 🟠 Hang prevention |
-| 5 | README ke galat numbers fix karo (18→76, chars) | `README.md:141,143` | 10 min | 🟠 Trust |
+### 🔴 P0 — Security + real bugs ✅
 
-**Total: ~2 hours me poora P0.**
-
-### 🟠 P1 — Is Hafte (Foundation)
-
-| # | Kaam | Effort | Impact |
-|---|---|---|---|
-| 6 | `actions/`, `ui/`, `tools/` me `__init__.py` add karo | 5 min | mypy unblock |
-| 7 | `core/paths.py` — `_base_dir` ×36 aur `_get_api_key` ×11 dedupe | 3 hr | 47 jagah → 1 |
-| 8 | `core/logging_setup.py` — print → logging migration shuru | 4 hr | Debuggability |
-| 9 | CI me ruff **format** + mypy (warn-only) add karo | 1 hr | Quality gate |
-| 10 | `core/tts.py`, `core/viseme.py`, `core/wake_word.py` ke tests likho | 6 hr | Audio pipeline safe |
-| 11 | `core/plugin_loader.py` ke tests (maine manually verify kiya, ab automate karo) | 2 hr | Headline feature safe |
-| 12 | `revoke_devices` + token TTL ke regression tests | 1 hr | Bug wapas na aaye |
-
-### 🟡 P2 — Is Mahine (Architecture)
-
-| # | Kaam | Effort | Impact |
-|---|---|---|---|
-| 13 | ~~**Lazy/tiered tool loading**~~ | ✅ **DONE** | 23.4K → 10.6K tokens (55% kam) |
-| 14 | `ui.py` split → `ui/` package (display_panel.py already start hai) | 2-3 din | Maintainability |
-| 15 | `main.py` `JarvisLive` split → connection / audio / tools | 2 din | Testability |
-| 16 | 64 source-grep tests ko behavior tests me convert karo | 3 din | Real confidence |
-| 17 | Dependency injection in `JarvisLive` → behavior tests possible | 2 din | Unblocks #16 |
-| 18 | `pyproject.toml` me `[project]` + `[build-system]` add | 2 hr | `pip install .` chalega |
-| 19 | `setup.py` → `bootstrap.py` rename | 30 min | Confusion hatega |
-| 20 | `requirements.lock` (pip-tools / uv) | 1 hr | Reproducible builds |
-
-### 🟢 P3 — Long Term (Polish)
-
-| # | Kaam | Impact |
+| # | Kaam | Result |
 |---|---|---|
-| 21 | `SECURITY.md` + `CONTRIBUTING.md` + `CHANGELOG.md` | Project credibility |
-| 22 | `.pre-commit-config.yaml` (ruff + format) | Consistency |
-| 23 | 272 silent exceptions ko audit karo — high-value spots pe logging | Debuggability |
-| 24 | "Export diagnostics" button (logs + redacted config zip) | Support-ability |
-| 25 | `--version` flag + `core/version.py` | Bug reports |
-| 26 | `Makefile` (`make test/lint/audit/doctor`) | DX |
-| 27 | Doctor command (`python -m jarvis.doctor`) | User self-service |
-| 28 | Fix remaining 414 mypy errors module-by-module | Type safety |
-| 29 | Migrate remaining `print()` → `logging` | Ops |
-| 30 | Tool-output size caps consistent karo | Context safety |
+| 1 | `revoke_devices` me `_tokens` bhi clear karo | **Done** — revoking clears sessions *and* tokens; a stolen token stops working. `tests/test_session_revocation.py` (12 tests) |
+| 2 | Dashboard tokens pe TTL + cleanup | **Done** — per-token TTL, throttled sweep, AES key cache pruned. Same file; the HUD token is exempt on purpose |
+| 3 | `plugins/_whatsapp_core.py` — dead code | **Done** — the loader's missing-helper message now names the file to download; the reference is honest about what is missing |
+| 4 | `computer_settings.py` subprocess `timeout=` | **Done** — a hung `pactl`/`brightnessctl` can no longer hang the tool |
+| 5 | README ke galat numbers | **Done** — tool count, memory budget and test count corrected |
 
----
+### 🟠 P1 — Foundation ✅
+
+| # | Kaam | Result |
+|---|---|---|
+| 6 | `actions/`, `tools/` me `__init__.py` | **Done** — real packages; the loader skips `_`-prefixed files so `__init__.py` is never mistaken for a tool |
+| 7 | `core/paths.py` dedupe | **Done** — 18 root derivations → 1; `_get_api_key` 10 definitions → 1 (8 were dead); 6 `API_CONFIG_PATH` constants → 0. `tests/test_paths.py` guards the dedupe |
+| 8 | `core/logging_setup.py` — print → logging | **Done** — rotating log under `~/.jarvis/logs`, a print mirror (so the console UX is unchanged while the transcript becomes complete), an excepthook that records crashes, `redact()` for anything leaving the machine. `tests/test_diagnostics.py` (36 tests) |
+| 9 | CI: ruff format + mypy (warn-only) | **Done** — both run with `continue-on-error` and print their numbers (176 files would reformat; 533 whole-repo type errors). The curated mypy list is a real gate |
+| 10 | `tts`, `viseme`, `wake_word` ke tests | **Done** — 102 tests. **And a finding:** `core/tts.py` is not on the Live audio path at all (nothing calls `create_tts_player`), so the premise "the audio pipeline is untested" was wrong for TTS — it was untested *and* unreachable. The module documents this now, and a test pins it |
+| 11 | `plugin_loader` ke tests | **Done** — 40 tests over real files on disk: crash isolation, name collisions, missing helpers, malformed metadata, the settings schema. `tests/test_plugin_loader.py` |
+| 12 | `revoke_devices` + TTL regression tests | **Done** — already covered by `tests/test_session_revocation.py`; verified against the P0-1 fix rather than duplicated |
+
+### 🟡 P2 — Architecture
+
+| # | Kaam | Result |
+|---|---|---|
+| 13 | **Lazy/tiered tool loading** | ✅ **DONE** — 23.4K → 10.6K tokens (55% kam) |
+| 14 | `ui.py` split → `ui/` package | **Done** — `ui/app.py`, `ui/display_panel.py`, lazy exports in `ui/__init__.py`. This fixed a real bug, not just structure: `from ui.display_panel import DisplayPanel` raised *"'ui' is not a package"*, the panel swallowed it, and the display screen silently never opened. `tests/test_ui_package.py` |
+| 15 | `main.py` `JarvisLive` split | **Partly** — Qt and sounddevice are imported where they are used (a headless `--version` works; the fake `ui`/`sounddevice` modules in the test suite are gone). The connection/audio/tools split itself is 🔨 still open |
+| 16 | 64 source-grep tests → behavior tests | 🔨 **Open** — several were converted on the way past (the tool-tiering suite drives the real dispatcher; the plugin and audio suites are behavior tests), but the bulk remain |
+| 17 | Dependency injection in `JarvisLive` | 🔨 **Open** — unblocked in one direction: `import main` no longer needs Qt or PortAudio, so a test can construct the class. Full injection is still to do |
+| 18 | `pyproject.toml` me `[project]` + `[build-system]` | **Done** — wheel builds and installs (`mark_liv_jarvis-1.4.0`, 76 runtime requirements, the `dev` extra); version read from `core/version.py`, dependencies from the two requirements files. `tests/test_project_hygiene.py` |
+| 19 | `setup.py` → `bootstrap.py` | **Done** — it installs dependencies, it never builds a distribution, and the old name collided with the one file every Python tool reads as a build script |
+| 20 | `requirements.lock` | **Done** — 93 packages pinned from pip's own freeze (`tools/make_lock.py`, `make lock`). Runtime requirements stay unlocked on purpose: per-OS markers |
+
+### 🟢 P3 — Polish
+
+| # | Kaam | Result |
+|---|---|---|
+| 21 | `SECURITY.md` + `CONTRIBUTING.md` + `CHANGELOG.md` | **Done** — SECURITY.md states the threat model and each gate's honest limits (the terminal sandbox is a brake, not a jail; the model is what is being defended against) |
+| 22 | `.pre-commit-config.yaml` | **Done** — ruff + hygiene hooks + `tools/check_staged_secrets.py`, which refuses a commit containing an API key, a private key block, `api_keys.json`, a TLS key or a linked WhatsApp session. Verified by breaking it |
+| 23 | Silent exceptions audit | **Partly** — no longer guesswork: `tools/silent_except_audit.py` classifies all **501** handlers (114 commented, 50 teardown-shaped, **337 high-risk**), `make silent` reports them and CI prints the number. High-value spots in `main.py` (the autonomy gate now logs at error level when it cannot answer), `dashboard/server.py` and `ui/app.py` are logged or documented. 🔨 the remaining 337 need the same pass, file by file |
+| 24 | "Export diagnostics" button | **Done** — the HUD's controls drawer writes the same zip as `--diagnostics`, and says where it went |
+| 25 | `--version` + `core/version.py` | **Done** — works with no display, no PortAudio and no GL stack, which it did not before |
+| 26 | `Makefile` | **Done** — `help/test/test-fast/lint/format/typecheck/audit/silent/doctor/smoke/ci/lock/precommit/install/clean`; `make ci` is the same three things CI runs |
+| 27 | Doctor command | **Done** — `python main.py --doctor`, checks as data, exit 1 on a real problem. **`--fix`** installs what is missing, which is where `core/installer.py` finally became reachable code |
+| 28 | mypy errors module-by-module | **Partly** — a curated list of 32 modules is a hard gate (they are clean with no suppressions); the whole app is 533 errors, almost all missing annotations in deliberately dynamic code. 🔨 grow the list one module at a time |
+| 29 | `print()` → `logging` | **Partly** — every error path in `core/` logs at the right level; `main.py` has one session logger; the ~430 UX prints stay prints *on purpose* (they are the console experience, and the print mirror already captures them into the log file) |
+| 30 | Tool-output size caps | **Done** — one backstop at the dispatch point (`core/tool_output.py`, 40,000 chars) plus a note in the result saying how much was dropped and what to ask for instead. The user is told too. `tests/test_tool_output.py` |
+
+### 🆕 P4 — Findings that were not on the roadmap
+
+Found while doing the above; each one is a real defect, not a tidy-up.
+
+| Finding | Result |
+|---|---|
+| `core/installer.py` was unreachable — 200 lines whose docstring claimed it ran on first launch, while the README promised offline transcription that nothing installed the engine for | Wired to `--doctor --fix`, with the doctor's import-name table (paho-mqtt → paho.mqtt) and honest failure reporting. `tests/test_installer_doctor.py` |
+| `core/tts.py` is not on the Live audio path either — same shape: plausible module, no caller | Documented in the module, pinned by a test that fails the day someone wires it up |
+| `ui = ["*.qss"]` in `package-data` matched nothing — the HUD's styling is strings in `app.py` | Removed; the test now requires every package-data pattern to match something |
+| Diagnostics exported an **empty** log when `JARVIS_LOG_DIR` was set, because it read `log_path()` instead of the file `setup()` configured | Fixed; a second `setup()` also re-points the print mirror now |
+| The new diagnostics button used an icon name that does not exist — `set_icon` swallows unknown names, so it would have come up bare | Fixed, and the icon table now has a guard test |
+| `tests/test_tool_tiers.py` installed a fake `ui` module into `sys.modules` for the whole session — it shadowed the real package for later tests | Removed (no longer needed after the lazy imports); a stand-in class replaced it |
+| `core/taskstore.create()` did `int(cur.lastrowid)` on a value that can be `None` | Raises instead of returning run id 0 |
+| `core/audit_chain.audit_log()` had an implicit-Optional parameter | Annotated |
 
 ## 📊 Part 10: Appendix — Raw Evidence
 

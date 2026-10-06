@@ -58,7 +58,8 @@ class TestReadmeTreeMatchesTheRepo:
 
     # Created by the app on first run, and git-ignored — the README says so
     # right there in the comment on the line.
-    RUNTIME_CREATED = {"memory/long_term.json", "config/certs"}
+    RUNTIME_CREATED = {"memory/long_term.json", "config/certs",
+                       "config/api_keys.json"}
 
     def _entries(self) -> list[str]:
         md = (ROOT / "README.md").read_text(encoding="utf-8")

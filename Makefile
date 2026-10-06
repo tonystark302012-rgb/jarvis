@@ -15,7 +15,7 @@ PYTEST  := $(PY) -m pytest
 
 .DEFAULT_GOAL := help
 .PHONY: help test test-fast lint format format-check audit doctor typecheck \
-        smoke ci lock clean install precommit check
+        smoke ci lock clean install precommit check silent silent-count
 
 help:                                    ## show this list
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) \
@@ -41,6 +41,12 @@ typecheck:                               ## mypy on the modules that are clean
 
 audit:                                   ## feature audit — 19 user-facing checks
 	$(PY) tools/feature_audit.py
+
+silent:                                  ## silent-exception report (the number to bring down)
+	$(PY) tools/silent_except_audit.py
+
+silent-count:                            ## just the high-risk handler count
+	@$(PY) tools/silent_except_audit.py --count
 
 doctor:                                  ## dependency/display/audio/key report
 	$(PY) main.py --doctor

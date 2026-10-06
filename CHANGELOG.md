@@ -10,7 +10,35 @@ entries are written as changes land.
 
 ## Unreleased
 
-Nothing yet.
+**One cap on tool results.** The caps inside the tools ranged from 2,500 to
+40,000 characters and a number of tools had none at all — `file_processor` on a
+large document, `data_query` over a wide table. One such call could spend most
+of a session's context, and the symptom was not an error: the assistant simply
+started forgetting what had been said a minute earlier. There is now a single
+backstop where every result passes (`core/tool_output.py`, 40,000 characters,
+about 10k tokens), and it is applied at the dispatch point so a tool added
+tomorrow cannot forget it. When a result is trimmed, the model is told how much
+was dropped and what to ask for instead, and so is the user — a model handed a
+silently shortened document summarises the part it got and says nothing about
+the rest.
+
+**A report for the silent `except: pass` handlers.** There are 501 of them, and
+most are correct: a teardown path must not raise a second exception while
+handling the first. `tools/silent_except_audit.py` sorts them into 114 with a
+comment explaining the silence, 50 on teardown/probe-shaped paths, and 337 with
+no log and no comment on a feature-shaped path — the number that should come
+down (`make silent`, and CI prints it). High-value spots were fixed first: if
+the autonomy gate cannot answer, the call still proceeds (a corrupt config must
+not brick every tool) but it now logs at error level and lands in the audit
+chain, because "the gate let something through" should be a fact you can look up.
+
+**`python main.py --doctor --fix`.** `core/installer.py` was 200 lines of
+unreachable code whose docstring claimed it ran "automatically on first launch" —
+nothing called it, so the packages offline transcription needs were installed by
+nothing while the README promised a Meeting Recorder that transcribes with
+faster-whisper. The doctor already reports exactly what is missing, so installing
+happens there now, when the user asks for it, with their own dependency table
+(`paho-mqtt` installs `paho.mqtt`, not `paho_mqtt`) and honest failure output.
 
 ## 1.4.0 — the audit release
 
