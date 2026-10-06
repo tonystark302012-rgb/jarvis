@@ -996,3 +996,55 @@ class TestConfigNameIsNotShadowed:
         # Only for the real launch — importing main must not mutate the
         # caller's sys.path.
         assert '__name__ == "__main__"' in src
+
+
+# ── the test step must actually be able to fail the build ────────────────────
+# This is the one guard in the suite that reads a file instead of exercising
+# behaviour, and it earns the exception because the failure it prevents is
+# SILENT. The step used to be
+#
+#     python -m pytest tests/ -q --junitxml=junit.xml | tee pytest.log
+#
+# Bash takes the exit status of the last command in a pipeline, and `tee` only
+# fails when it cannot write its file — so a red suite produced a green job,
+# and the "if: failure()" step below it was dead too. Nothing can catch that at
+# runtime; only the config can be checked.
+
+class TestCIStepCanActuallyFail:
+    def _workflow(self) -> str:
+        return (Path(__file__).resolve().parent.parent
+                / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    def test_pytest_step_sets_pipefail(self):
+        """Look at the pytest COMMAND line, not the step text: YAML's own
+        `run: |` block marker is a pipe character too, and matching it would
+        make this test pass for the wrong reason."""
+        lines = self._workflow().splitlines()
+        cmds = [i for i, ln in enumerate(lines)
+                if "python -m pytest" in ln or "pytest tests/" in ln]
+        assert cmds, "no pytest command found in the workflow"
+        for i in cmds:
+            if " | " not in lines[i]:         # not piped, nothing masked
+                continue
+            # Walk back to the enclosing `run:` and collect its real commands.
+            # Comments are skipped: the comment explaining this fix quotes the
+            # directive, and matching that would pass for the wrong reason.
+            start = i
+            while start > 0 and not lines[start].lstrip().startswith("run:"):
+                start -= 1
+            block = [ln.strip() for ln in lines[start:i]
+                     if not ln.strip().startswith("#")]
+            assert "set -o pipefail" in block, (
+                f"line {i + 1} pipes pytest into another command without "
+                "`set -o pipefail` — a failing suite reports success:\n"
+                f"    {lines[i].strip()}")
+
+    def test_ci_installs_everything_the_suite_imports(self):
+        """The masked failure was hiding this: tests/test_tool_tiers.py imports
+        main.py, which imports google.genai at module level, and CI installs
+        only requirements-dev.txt."""
+        root = Path(__file__).resolve().parent.parent
+        dev = (root / "requirements-dev.txt").read_text(encoding="utf-8")
+        assert "google-genai" in dev, (
+            "tests import main.py (google.genai) — the dev requirements CI "
+            "installs must provide it, or the file cannot even collect")

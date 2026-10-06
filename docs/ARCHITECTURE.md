@@ -35,17 +35,21 @@
 │ TOOL PLANE                                                            │
 │   ActionRegistry (core/action_loader) — 76 bundled tools (TOOL dicts) │
 │   PluginRegistry (core/plugin_loader) — gmail, calendar              │
-│   ToolTiers (core/tool_tiers) — 14 declared + `toolbox` router,      │
-│     ~62 deferred; measured 23.4k → 7.8k tokens per connection        │
+│   ToolTiers (core/tool_tiers) — 21 declared + `toolbox` router,      │
+│     ~55 deferred; measured 23.4k → 10.6k tokens per connection       │
+│     (`tools/count_tools.py` regenerates those numbers)               │
 │   confirm (unforgeable UI token) · undo journal · privacy gate       │
 ├──────────────────────────────────────────────────────────────────────┤
 │ AGENT PLANE (today: three bespoke loops)                              │
-│   task_agent  → planner LLM → core/orchestrator (sequential steps)   │
+│   task_agent  → episode_memory.lessons_for(goal) → planner LLM        │
+│              → core/orchestrator (sequential steps)                   │
 │   browser agent → snapshot→reason→act→verify (browser_control)       │
 │   multi_agent → planner→coder→tester (dry-run diffs)                 │
 ├──────────────────────────────────────────────────────────────────────┤
 │ PERSISTENCE & SIGNALS                                                 │
 │   taskstore (sqlite runs) · history_search (sqlite FTS) · memory     │
+│   episode_memory (reads taskstore runs → planner lessons; no store   │
+│     of its own — delete a run and its lesson goes with it)           │
 │   activity (Mission Control timeline) · events bus · rules JSON      │
 └──────────────────────────────────────────────────────────────────────┘
 ```

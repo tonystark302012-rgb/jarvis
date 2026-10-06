@@ -213,13 +213,20 @@ def run_task(
     return report
 
 
-def planner_prompt(goal: str, tool_names: list[str]) -> str:
-    """Prompt handed to the LLM planner. Instructs a strict JSON reply."""
+def planner_prompt(goal: str, tool_names: list[str], lessons: str = "") -> str:
+    """Prompt handed to the LLM planner. Instructs a strict JSON reply.
+
+    `lessons` is an optional note about comparable past runs (see
+    core.episode_memory). Empty by default, so a caller that has no history —
+    or that should not read any — builds exactly the prompt it always did.
+    """
+    past = f"{lessons}\n\n" if lessons else ""
     return (
         "You are the planning stage of a desktop automation agent. "
         "Break the goal into a short sequence of steps. Each step MUST be one "
         "of the available tools with simple JSON arguments.\n\n"
         f"Available tools: {', '.join(sorted(tool_names))}\n\n"
+        f"{past}"
         f"Goal: {goal}\n\n"
         "Reply with ONLY a JSON array, no prose, max 8 steps, ordered:\n"
         '[{"tool": "name", "args": {"param": "value"}, "why": "one short reason"}]\n'

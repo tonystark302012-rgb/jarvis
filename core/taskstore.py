@@ -37,6 +37,19 @@ def _db_path() -> Path:
     return d / "tasks.db"
 
 
+def reset_for_tests() -> None:
+    """Drop the cached connection (tests re-point _db_path first).
+    Same seam as core.audit_chain.reset_for_tests."""
+    global _CONN
+    with _LOCK:
+        if _CONN is not None:
+            try:
+                _CONN.close()
+            except Exception:
+                pass
+            _CONN = None
+
+
 def _conn() -> sqlite3.Connection:
     global _CONN
     if _CONN is None:
@@ -111,6 +124,23 @@ def list_runs(limit: int = 10) -> list[dict]:
             "SELECT id, goal, status, plan_json, results_json,"
             " created, updated FROM runs ORDER BY updated DESC LIMIT ?",
             (max(1, min(50, limit)),)).fetchall()
+    return [_row_to_run(r) for r in rows]
+
+
+def recent_episodes(limit: int = 150) -> list[dict]:
+    """Runs to mine for lessons — same rows as list_runs, deeper pool.
+
+    `list_runs` caps at 50 because it feeds the history view, which is for
+    reading. Lesson matching wants to reach further back: a goal the user
+    repeats every few weeks should still find its own history. Only the four
+    fields the distillation reads are selected, so a deep pool stays cheap.
+    """
+    with _LOCK:
+        rows = _conn().execute(
+            "SELECT id, goal, status, plan_json, results_json,"
+            " created, updated FROM runs"
+            " WHERE status != 'running' ORDER BY updated DESC LIMIT ?",
+            (max(1, min(1000, limit)),)).fetchall()
     return [_row_to_run(r) for r in rows]
 
 

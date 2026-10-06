@@ -74,9 +74,13 @@ def _plan_with_llm(goal: str, tool_names: list[str]
     empty when no key/model — the caller reports that cleanly rather than
     guessing a plan itself."""
     from core import gemini
+    from core import episode_memory
+    # Comparable past runs, so the planner does not walk back into the same
+    # dead end. Empty string when there is no history or privacy mode is on.
+    lessons = episode_memory.lessons_for(goal)
     try:
         reply = gemini.call(
-            [orchestrator.planner_prompt(goal, tool_names)],
+            [orchestrator.planner_prompt(goal, tool_names, lessons=lessons)],
             tier=gemini.FAST, timeout_ms=20_000,
         )
     except Exception:

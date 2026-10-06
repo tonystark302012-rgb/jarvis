@@ -27,11 +27,14 @@ Neeche jo analysis hai wo **audit record** hai — kya mila, kaise mila, evidenc
 | 7 | **~23,400 tokens har connection pe** | ✅ **FIXED** | Core tier (21 tools) + `toolbox` router; **~12,860 tokens saved, 55% chhota** |
 | 8 | `config` naam opencv se shadow ho sakta tha | ✅ **FIXED** | `main.py` app root ko `sys.path[0]` pe pin karta hai |
 | 9 | **Automation jhooth bolti thi — fail hone pe "healthy"** | ✅ **FIXED** | Ek `classify_result()`; rules ab `ok/empty/blocked/failed` sach batate hain |
+| 10 | **CI kabhi gate hi nahi kar raha tha** | ✅ **FIXED** | `\| tee` bina `pipefail` — red suite bhi green job. Ab `set -o pipefail` |
+| 11 | **Task agent ke steps hamesha ✓ (replan dead code)** | ✅ **FIXED** | Wahi classifier; ab report sach bolta hai aur replan chalta hai |
+| 12 | **Agent har run bhool jaata tha** | ✅ **ADDED** | `core/episode_memory.py` — pichhle run ka lesson agle plan ke prompt me |
 
 **Verification:**
 ```
 ruff check .                    → All checks passed!
-pytest tests/                   → 1172 passed  (start me 1084 the — +88 naye tests)
+pytest tests/                   → 1209 passed  (start me 1084 the — +125 naye tests)
 feature_audit.py                → 19/19 green
 tools/count_tools.py            → before/after numbers generate karta hai
 ```
@@ -174,6 +177,95 @@ Aur wahi predicate **teesri baar** `core/action_loader.py:116` (audit chain) me 
 | Observe mode | "fired" • healthy | `was BLOCKED: Autonomy mode is OBSERVE…` + health incident |
 
 **Tier isi goal se derive kiya:** `rules`, `dots`, `pages`, `obsidian`, `task_agent` core me aa gaye (16 → 21 tools). Wajah: tier ka line ye hai — **entry points aur safety levers core, leaf utilities deferred.** Ek leaf ko router hop afford kar sakta hai; jo tool 10-step ka kaam *shuru* karta hai wo nahi kar sakta, kyunki wo hop bole hue vaakya ke beech me padta hai. `"open Chrome"` ko hop nahi chahiye, `"roz subah 8 baje research karo"` ko chahiye. Isse saving 66% → **55%** hui (~12,860 tokens/connection) — aur conversation se har workflow ka entry point seedha pahunch me hai.
+
+### 🆕 FIX #10 — CI kabhi gate hi nahi kar raha tha (sabse khatarnak finding)
+
+Ye episode memory pe kaam karte waqt mila, aur ye poore session ka **sabse bada** finding hai — kyunki isne baaki sab findings ka safety net hi invalid kar diya tha.
+
+```yaml
+- name: Tests
+  run: python -m pytest tests/ -q --junitxml=junit.xml | tee pytest.log
+```
+
+Bash pipeline ka exit code **aakhri command** ka leta hai, aur `tee` sirf tab fail hota hai jab wo file na likh paaye. Yaani **pytest red ho ke bhi step success**. Aur neeche wala `if: failure()` annotation step bhi isi wajah se dead tha.
+
+Aur ye masking **ek asli toota hua test chhupa rahi thi**:
+
+```
+tests/test_tool_tiers.py  →  import main  →  main.py: from google import genai
+                             ↑ google-genai requirements.txt me hai,
+                               requirements-dev.txt me NAHI — aur CI sirf
+                               wahi install karta hai
+ModuleNotFoundError: No module named 'google'
+```
+
+Yaani wo file CI pe **collect hi nahi hoti thi**, aur job green dikhta rehta tha. Maine CI ka apna install command saaf venv me chalaya: `google` absent, aur `pytest tests/test_tool_tiers.py` exit 1 deta hai. Matlab is PR ke saare "CI green ✅" claims — including tiering wala — **kabhi verification the hi nahi**.
+
+**Fix:**
+* `set -o pipefail` test step pe, saath me comment ki ye decoration nahi hai.
+* `google-genai` `requirements-dev.txt` me — us file ke apne niyam se ("Tests exercise these runtime modules directly"), kyunki test `main.py` import karta hai jo use import karta hai.
+
+```
+pipefail ke bina:  python -c "exit(2)" | tee LOG  →  step exit 0   ← purana
+pipefail ke saath: python -c "exit(2)" | tee LOG  →  step exit 2   ✅
+```
+
+Aur kyunki is failure ka poora point **silence** hai, ek guard test bhi hai (`TestCIStepCanActuallyFail`) jo workflow config padhta hai — runtime pe pakadna impossible hai. Guard ko verify bhi kiya: `set -o pipefail` line hata kar chalaya to **fail** hua.
+
+---
+
+### 🆕 FIX #11 — Task agent ke saare steps hamesha ✓ the (replan dead code)
+
+Ye FIX #9 wala **bilkul wahi bug** hai, ek layer neeche. `core/orchestrator.py`:
+
+```python
+result = runner(step.tool, step.args)
+# A runner returns its outcome as text; empty is still success
+# unless it raised. Trust the exception channel, not wording.
+activity.finish(ev, True, result)                       # ← hamesha True
+report.steps.append(StepResult(step, True, ...))        # ← hamesha ok
+```
+
+**Wahi comment hi bug hai.** Exception channel jaan-boojhkar khali hai: `main.py` ka runner `ActionRegistry.run` hai, jo handler ka exception **pakad ke honest string** lautata hai — kabhi raise nahi karta. To:
+
+| Cheez | Anjaam |
+|---|---|
+| `report.ok` | hamesha `True` |
+| `stop_on_error=True` | kabhi rukta hi nahi |
+| `task_agent` | plan ke liye "done" bolta hai jisme kuch hua hi nahi |
+| **bounded replan** | **production me unreachable** — upar wale success check pe hi return |
+
+Observe mode ne step refuse kiya, aur report me aata tha: `1. ✓ terminal` · `1/1 steps completed`.
+
+**Fix:** `run_task` ab wahi `classify_result()` use karta hai. Ek string failure ab plan rokti hai, jaisa ek exception pehle karta tha. `empty` **jaan-boojhkar success** hai — jis tool ne chala kar kuch nahi paya, usne apna kaam kiya; warna "search karo, phir summary save karo" har sookhe din pe ruk jaata.
+
+Verdict theek hone se replan path **reachable** hua — aur wahan jaake doosra half mila: observe-mode refusals replan hone jaa rahe the. Policy ko dobara plan karke un-refuse nahi kiya ja sakta, to ab "na" bolne pe ruk kar report hota hai, aur replan budget asli failures ke liye bachta hai.
+
+Poore purane orchestrator tests bhi pass hote the — kyunki **unme se har ek apne runner ko raise karata tha**. Production runner nahi karta.
+
+---
+
+### 🆕 FIX #12 — Agent har run bhool jaata tha (naya feature)
+
+Planner ko sirf tool list aur goal milta tha, aur kuch nahi. To har run zero se shuru hota, aur usi dead end me dobara chalta. `core/episode_memory.py` har khatam run se ek line ka lesson banata hai aur agli shaadi wale goal ke prompt me **max 2** inject karta hai:
+
+```
+Runs you have performed before that resemble this goal — learn from them,
+do not repeat a failure the same way:
+- "aaj ke arxiv AI papers scan karo" — failed at terminal
+  (error: no such command: curl arxiv)
+```
+
+**Ye "learning" nahi hai, aur main ise wo nahi bolunga.** Yahan koi weight, koi prompt, koi rule nahi badalta. Ye **retrieval + ek paragraph** hai — deterministic, auditable, aur delete karne pe bhool jaata hai (run history hata do, lesson bhi gaya). Isko "self-improving loop" kehna theek wahi overclaim hai jise ye codebase saaf kar raha hai.
+
+* **Alag store nahi** — episode `core.taskstore` ke run rows se derive hota hai (`distill()` pure function hai), to do jagah sync karne ka sawaal hi nahi.
+* **Ranking:** warnings pehle, successes baad me — success ka raasta planner khud dhoondh lega, jo **already dead hai** wo usse pata nahi chalega.
+* **Privacy:** injected text cloud planner ko jaata hai, to `privacy on` ise **poora band** kar deta hai. Off ka matlab off.
+* **Bounded:** 150 runs ka pool, 2 lessons, 700 chars — ye har planned goal pe chalta hai.
+
+Loop bandh hona **end-to-end test** se prove kiya (`TestTheLoopCloses`): pehla run fail hota hai, doosre run ke **asli planner prompt** me wahi failure padha jaata hai.
+
+---
 
 > **Note:** Neeche ke bug sections jaan-boojhkar **original form me** chhode hain (line numbers aur before-state ke saath), kyunki ye woh evidence hai jisse fix justify hua. Fixes ka exact code upar table me aur git diff me hai.
 

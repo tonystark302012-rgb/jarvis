@@ -47,8 +47,9 @@ TURNING IT OFF
 from __future__ import annotations
 
 import json
-import re
 from typing import Iterable
+
+from core.text_search import tokens as _tokens
 
 # ── the router ────────────────────────────────────────────────────────────────
 ROUTER_NAME = "toolbox"
@@ -113,16 +114,6 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
 # ── how many tools a single search returns ────────────────────────────────────
 _SEARCH_LIMIT = 4
 
-_WORD = re.compile(r"[a-z0-9]+")
-
-# Words that appear in almost every description and so carry no signal.
-_STOP = frozenset({
-    "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "is", "it",
-    "this", "that", "with", "use", "used", "using", "you", "your", "user",
-    "tool", "action", "actions", "when", "from", "by", "as", "at", "be", "can",
-    "will", "any", "all", "if", "not", "no", "do", "does", "into", "out",
-})
-
 
 def router_declaration() -> dict:
     """The one always-declared gateway to everything deferred."""
@@ -177,25 +168,6 @@ def split_declarations(
         name = d.get("name") if isinstance(d, dict) else getattr(d, "name", "")
         (kept if name in core_names else deferred).append(d)
     return kept, deferred
-
-
-def _stem(word: str) -> str:
-    """Crude singulariser, enough to stop "documents" missing "document".
-
-    Deliberately not a real stemmer: the corpus is 60 short tool descriptions,
-    and the failure being fixed is a plural (or a trailing 'e') keeping two
-    obviously-related words apart. Anything cleverer would need a dependency
-    and would risk merging words that should stay distinct.
-    """
-    for suffix in ("ies", "es", "s"):
-        if len(word) > 4 and word.endswith(suffix):
-            return word[: -len(suffix)] + ("y" if suffix == "ies" else "")
-    return word
-
-
-def _tokens(text: str) -> list[str]:
-    return [_stem(w) for w in _WORD.findall(str(text or "").lower())
-            if w not in _STOP]
 
 
 def search(deferred: list[dict], query: str, limit: int = _SEARCH_LIMIT) -> list[dict]:
