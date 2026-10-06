@@ -3,7 +3,7 @@
 # Run locally:   ruff check .   ·   python -m pytest tests/ -q
 
 [tool.ruff]
-target-version = "py311"          # setup.py hard floor; also silences the
+target-version = "py311"          # bootstrap.py hard floor; also silences the
 line-length = 100                 # BaseExceptionGroup false positive (3.11+ builtin)
 
 [tool.ruff.lint]

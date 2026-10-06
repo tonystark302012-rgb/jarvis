@@ -408,11 +408,11 @@ Duplicate rule held throughout: barge-in was found already shipped (EchoGuard) a
 ```bash
 git clone https://github.com/tonystark302012-rgb/jarvis.git
 cd jarvis
-python setup.py        # installs deps for YOUR OS + the browser automation engine
+python bootstrap.py    # installs deps for YOUR OS + the browser automation engine
 python main.py
 ```
 
-`setup.py` only ever installs what your operating system needs — the Windows-only libraries are skipped automatically on macOS and Linux, and vice-versa. It also checks your Python version up front, so a wrong interpreter fails with a sentence instead of a wall of pip output. Prefer to do it by hand? `pip install -r requirements.txt` works too.
+`bootstrap.py` only ever installs what your operating system needs — the Windows-only libraries are skipped automatically on macOS and Linux, and vice-versa. It also checks your Python version up front, so a wrong interpreter fails with a sentence instead of a wall of pip output. Prefer to do it by hand? `pip install -r requirements.txt` works too.
 
 > ⚠️ **Installation Note:** If you hit a `ModuleNotFoundError` for an OS-specific package, install it with `pip install <module_name>`. The optional **wake word** engine is *not* installed here — grab it in one click from **⚙ → WAKE WORD** inside the app.
 
@@ -441,7 +441,7 @@ CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13**
 | **Speakers** | Required for voice replies |
 | **API Key** | Free Gemini API key (entered on first launch → `config/api_keys.json`) |
 | **GPU** | **Not required.** The avatar is rendered in software, and so is HUD video |
-| **YouTube on the HUD** | `yt-dlp`, installed by `setup.py`. Without it, local files and direct URLs still play and YouTube links open in the browser with an explanation |
+| **YouTube on the HUD** | `yt-dlp`, installed by `bootstrap.py`. Without it, local files and direct URLs still play and YouTube links open in the browser with an explanation |
 | **Wake word** *(optional)* | One-click download from ⚙ → WAKE WORD (`openwakeword`, a few MB, fully local) |
 
 ---
@@ -452,7 +452,7 @@ CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13**
 jarvis/
 ├── main.py                   # Core loop — Gemini Live session, audio I/O, viseme extraction, tool dispatch
 ├── ui/                       # PyQt6 HUD v2 — app.py is the window, display_panel.py the screen
-├── setup.py                  # OS-aware installer (skips wrong-OS dependencies, checks your Python)
+├── bootstrap.py              # OS-aware installer (skips wrong-OS dependencies, checks your Python)
 ├── pyproject.toml            # ruff + pytest configuration (lint must stay clean in CI)
 ├── requirements.txt          # Runtime dependencies (OS markers filter per platform)
 ├── requirements-dev.txt      # Test/lint dependencies — pip install -r requirements-dev.txt
