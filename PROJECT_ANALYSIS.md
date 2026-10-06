@@ -1108,12 +1108,12 @@ Hinglish strings aur English strings code me mixed hain (`'Researcher se pucho..
 
 ## 🚀 Part 9: UPGRADE ROADMAP (Priority Order)
 
-> **Status: implemented.** Everything in P0, P1, P2 and P3 below has landed on
-> `arena/86683437-jarvis` except the four items marked 🔨 (P2-16, P2-17 and the
-> two "keep going" items: P3-23's remaining handlers and P3-28's remaining
-> modules). Each entry says what it actually turned into and where its tests
-> live. This section is a record now, not a plan — the numbers are measured, not
-> estimates.
+> **Status: P0–P3 are implemented** on `arena/86683437-jarvis` — every row below
+> is **Done** except two that are still open (P2-16, P2-17) and two that are
+> partial *by design* and stay open as ongoing work (P3-23's remaining silent
+> handlers, P3-29's remaining prints, which are the console UX). Each entry says
+> what it actually turned into and where its tests live. This section is a
+> record now, not a plan — the numbers are measured, not estimates.
 
 ### 🔴 P0 — Security + real bugs ✅
 
@@ -1144,8 +1144,8 @@ Hinglish strings aur English strings code me mixed hain (`'Researcher se pucho..
 | 13 | **Lazy/tiered tool loading** | ✅ **DONE** — 23.4K → 10.6K tokens (55% kam) |
 | 14 | `ui.py` split → `ui/` package | **Done** — `ui/app.py`, `ui/display_panel.py`, lazy exports in `ui/__init__.py`. This fixed a real bug, not just structure: `from ui.display_panel import DisplayPanel` raised *"'ui' is not a package"*, the panel swallowed it, and the display screen silently never opened. `tests/test_ui_package.py` |
 | 15 | `main.py` `JarvisLive` split | **Done** — the session class is now three mixins over a run loop: `core/tool_dispatch.py` (415 lines), `core/audio_loop.py` (577), `core/wake_and_relay.py` (193). `main.py` is 2,824 → 1,896 lines. Each mixin declares the host attributes it is given and type-checks standalone; the audio format constants and the PCM helpers moved to `core/audio_pcm.py`. Behaviour tests run all three against a fake window, a fake Live session and a fake sounddevice (`tests/test_main_behavior.py`, `tests/test_audio_loop.py`), which is also how two real defects surfaced: the assistant's own name defaulted to `"JARVI    S"` before the first session set it, and `_pcm_level(None)` returned **maximum** loudness (NaN compares false against the floor) instead of the silence its docstring promised |
-| 16 | 64 source-grep tests → behavior tests | 🔨 **Open** — several were converted on the way past (the tool-tiering suite drives the real dispatcher; the plugin and audio suites are behavior tests), but the bulk remain |
-| 17 | Dependency injection in `JarvisLive` | 🔨 **Open** — unblocked in one direction: `import main` no longer needs Qt or PortAudio, so a test can construct the class. Full injection is still to do |
+| 16 | 64 source-grep tests → behavior tests | 🔨 **Open** — measured, not guessed: **25** tests still grep an on-disk `.py` file (was 64; the P0/P2 work converted 39 as it went past). They sit in `tests/test_roadmap.py` (11), `test_upgrades.py` (5), `test_new_features.py` (3), `test_dots.py` (2), and one each in `test_installer_doctor.py`, `test_paths.py`, `test_tool_tiers.py`, `test_ui_package.py`. The other 75 tests that read a file are legitimate — they assert packaging data (`pyproject.toml`, requirements, CI YAML) or read fixtures they just wrote |
+| 17 | Dependency injection in `JarvisLive` | 🔨 **Open**, now unblocked: `import main` needs neither Qt nor PortAudio, and the three mixins state their host contract in one place each, so the session can be constructed for real in a test (`tests/test_main_behavior.py`, `tests/test_audio_loop.py` do exactly that). What is left is routing the collaborators that are still built inside `__init__` — the action registry, the plugins, the UI — through the constructor instead of module globals |
 | 18 | `pyproject.toml` me `[project]` + `[build-system]` | **Done** — wheel builds and installs (`mark_liv_jarvis-1.4.0`, 76 runtime requirements, the `dev` extra); version read from `core/version.py`, dependencies from the two requirements files. `tests/test_project_hygiene.py` |
 | 19 | `setup.py` → `bootstrap.py` | **Done** — it installs dependencies, it never builds a distribution, and the old name collided with the one file every Python tool reads as a build script |
 | 20 | `requirements.lock` | **Done** — 93 packages pinned from pip's own freeze (`tools/make_lock.py`, `make lock`). Runtime requirements stay unlocked on purpose: per-OS markers |
