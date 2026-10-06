@@ -10,6 +10,17 @@ entries are written as changes land.
 
 ## Unreleased
 
+**The device picker has tests now.** `core/audio_devices.py` reduces
+`sounddevice`'s raw list — one entry per (device × host API), 41 rows on a
+normal Windows machine for what the OS shows as 8 — down to the list the sound
+settings would show, and refuses devices that open but do not move audio. That
+logic had never been executed in a test: the module imports `sounddevice` inside
+each function and CI has no PortAudio. `tests/test_audio_devices.py` runs it
+against a fake device tree (19 tests): aliases filtered, one host API per
+direction chosen by measurement, a sink that swallows audio passed over, a
+device that cannot open left out, a truncated name still resolving to its
+endpoint, and enumeration never raising when the driver does.
+
 **`main.py` shrank by 500 lines.** `JarvisLive` was one class holding the
 session's connection, audio and tools; two of those thirds are now mixins —
 `core/tool_dispatch.py` (the batch scheduler, the toolbox router, the single
