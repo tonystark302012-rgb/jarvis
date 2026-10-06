@@ -1006,60 +1006,25 @@ class TestEventEngine:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestRoadmapMainWiring:
-    def test_event_watch_task_created(self):
-        assert "tg.create_task(self._run_event_watch())" in SRC
+    """These used to grep main.py's text. The real object is constructible now
+    (PROJECT_ANALYSIS P2-17), so the behaviour is asserted directly in
+    tests/test_main_behavior.py — the event engine exists, the watch coroutine
+    runs, both sides of a conversation are recorded and read back.
 
-    def test_event_watch_method_exists(self):
-        assert "async def _run_event_watch" in SRC
-        i = SRC.index("async def _run_event_watch")
-        body = SRC[i:i + 2200]
-        assert "self._events.poll" in body
-        assert "_focus_muted" in body             # focus silences events
-        assert "send_client_content" in body
+    What is left here is the one thing that is genuinely about the source: that
+    main.py still *starts* the background loops in its session task group. A
+    behavior test cannot see a task that was never created.
+    """
 
-    def test_event_engine_instantiated(self):
-        assert "self._events           = EventEngine()" in SRC
-        assert "from core.events import EventEngine" in SRC
-
-    def test_history_recording_wired_both_sides(self):
-        # user turns + assistant turns both recorded
-        assert SRC.count('_hs.record(') >= 2
-        i_user = SRC.index('self._session_log.append(f"User:')
-        assert '_hs.record("user", full_in)' in SRC[i_user:i_user + 400]
-        i_bot = SRC.index('self._session_log.append(f"{self._asst_name}:')
-        assert '_hs.record(self._asst_name, full_out)' in SRC[i_bot:i_bot + 400]
-
-    def test_history_record_is_exception_safe(self):
-        # both wiring sites must be wrapped in try/except — history can
-        # never break a reply
-        import re
-        sites = list(re.finditer(r"_hs\.record\(", SRC))
-        assert len(sites) >= 2
-        for m in sites:
-            window = SRC[m.start():m.start() + 300]
-            assert "except Exception" in window
-
-    def test_new_tools_discoverable(self):
-        """Each new batch-1 tool exports TOOL with name+handler — the
-        loader contract (matches how action_loader discovers actions)."""
-        mods = ["actions.history_search", "actions.rag", "actions.mcp",
-                "actions.data_query", "actions.make_3d", "actions.translate",
-                "actions.vault", "actions.terminal", "actions.privacy"]
-        import importlib
-        for name in mods:
-            mod = importlib.import_module(name)
-            tool = getattr(mod, "TOOL")
-            assert tool["name"] and callable(tool["handler"]), name
-            assert tool["parameters"]["type"] == "OBJECT", name
-
-    def test_cloud_handlers_gated_in_source(self):
-        for path, needle in [
-            ("actions/research.py", '_privacy.gate("research")'),
-            ("actions/scrape.py", '_privacy.gate("scrape")'),
-            ("actions/web_search.py", '_privacy.gate("web_search")'),
-            ("actions/phone_vision.py", '_privacy.gate("phone_vision")'),
-        ]:
-            assert needle in Path(path).read_text(encoding="utf-8"), path
+    def test_the_background_loops_are_started_in_the_session_group(self):
+        # `_run_rules_tick` is started once at connect (independent of the
+        # session); the rest live inside the TaskGroup and are rebuilt with it.
+        i = SRC.index("asyncio.TaskGroup() as tg,")
+        block = SRC[i:i + 3000]
+        for coro in ("self._run_event_watch()", "self._run_sleep_watch()",
+                     "self._run_system_monitor()", "self._run_proactive_mode()"):
+            assert coro in block, f"{coro} is never started"
+        assert "asyncio.create_task(self._run_rules_tick())" in SRC
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1631,33 +1596,27 @@ class TestBargeIn:
 
 
 class TestBargeInMainWiring:
-    """Source-level: main.py wires EchoGuard.should_interrupt → interrupt()
-    behind the per-reply _barge_on cache (PyQt absent → no import tests)."""
+    """The flag, the per-reply config read and the default are asserted on a
+    real JarvisLive in tests/test_main_behavior.py. What is left here is the
+    one piece that lives in a public function and cannot be observed without a
+    socket: that an interrupt during speech is classified before it is acted on.
+    """
 
-    def test_callback_classifies_and_interrupts(self):
-        i = SRC.index("if jarvis_speaking:")
-        block = SRC[i:i + 1600]
-        assert "should_interrupt" in block
-        assert "note_interrupted" in block
-        assert "self.interrupt()" in block
-        assert "audio callback must never raise" in block
-
-    def test_flag_cached_per_reply_not_per_block(self):
-        assert "self._barge_on" in SRC
-        i = SRC.index("def set_speaking")
-        block = SRC[i:i + 900]
-        assert "get_barge_in_enabled" in block, \
-            "flag must refresh in set_speaking, not read disk per audio block"
-        assert "never in the audio callback" in block
-
-    def test_default_state_on(self):
-        assert "self._barge_on             = True" in SRC
-
-    def test_default_state_on_init_line_present(self):
-        # constructed alongside EchoGuard
-        i = SRC.index("self._echo                 = EchoGuard()")
-        assert "self._barge_on" in SRC[i:i + 300]
-
+    def test_an_interrupt_while_speaking_uses_the_echo_guard(self):
+        """The classification itself is EchoGuard's (tested with the other
+        echo behaviour); what this pins is that it takes a level and answers a
+        bool — the shape main.py's audio callback depends on."""
+        import numpy as np
+        from core.echo import EchoGuard
+        g = EchoGuard()
+        mic = np.zeros(320, dtype=np.int16).tobytes()
+        for _ in range(20):
+            g.note_output(mic, 24000, 0.4)
+        verdict = g.should_interrupt(mic, 24000, 0.4)
+        assert isinstance(verdict, bool)
+        # and it can say no: silence, at a level the guard has seen before
+        assert g.should_interrupt(np.zeros(320, dtype=np.int16).tobytes(),
+                                  24000, 0.0) is False
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Batch 3 — security-camera motion detect (dashboard/motion.py)

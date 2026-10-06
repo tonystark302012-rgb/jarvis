@@ -576,7 +576,20 @@ def _keep_context_of(exc: BaseException) -> bool:
 
 
 class JarvisLive:
-    def __init__(self, ui: "JarvisUI"):
+    def __init__(self, ui: "JarvisUI", *, action_registry=None,
+                 plugin_registry=None, base_dir: Path | None = None):
+        """`ui` is the window; everything else is discovered or injected.
+
+        The three keyword arguments exist for tests (PROJECT_ANALYSIS P2-17).
+        Until now a test could only reach the dispatch path by building the
+        object with `object.__new__` and hand-assembling its attributes, which
+        meant the object under test was never the object the app runs. With the
+        registries injectable, a test can construct the real `JarvisLive` over a
+        fake window and a temp actions/plugins directory — the same constructor,
+        the same wiring, no Qt and no audio hardware.
+
+        Production passes none of them and gets exactly what it got before.
+        """
         self.ui             = ui
         # Universal render surface: every show_content() from any tool is
         # mirrored to the dashboard's DISPLAY|SCAN|3D|WEB tabs. Set early
@@ -662,13 +675,13 @@ class JarvisLive:
         self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
         self._tuned_live    = True  # turn-taking / media / thinking knobs; same fallback
 
-        _base_dir = Path(__file__).resolve().parent
+        _base_dir = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parent
         _inline_names = {t["name"] for t in TOOL_DECLARATIONS}
 
         # File-backed tools: every actions/*.py with a TOOL dict, discovered the
         # same way plugins are. Reserved names = the inline tools above, so an
         # action can never shadow one.
-        self._action_registry = discover_actions(
+        self._action_registry = action_registry if action_registry is not None else discover_actions(
             actions_dir=_base_dir / "actions",
             reserved_names=_inline_names,
             logger=lambda msg: print(f"[Actions] {msg}"),
@@ -676,7 +689,7 @@ class JarvisLive:
 
         # Plugins must not collide with either an inline tool or a discovered action.
         _core_names = _inline_names | self._action_registry.names()
-        self._plugin_registry = discover_plugins(
+        self._plugin_registry = plugin_registry if plugin_registry is not None else discover_plugins(
             plugins_dir=_base_dir / "plugins",
             core_tool_names=_core_names,
             # Console gets the full boot transcript; the activity log gets only
