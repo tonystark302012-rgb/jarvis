@@ -317,12 +317,17 @@ class _Types:
 
 
 def _dispatcher():
-    """Load the real _run_tool_calls out of main.py without importing Qt."""
-    src = Path("main.py").read_text(encoding="utf-8")
+    """Load the real _run_tool_calls without importing Qt.
+
+    The method lives in core/tool_dispatch.py now (P2-15 split it out of
+    main.py, where the whole class used to be). It is extracted as source
+    rather than imported because importing it pulls in the actions and the
+    genai client, and the point here is to time the scheduler itself."""
+    src = Path("core/tool_dispatch.py").read_text(encoding="utf-8")
     start = src.index("    _READ_ONLY_TOOLS = frozenset(")
     end = src.index("    async def _execute_tool(self, fc)", start)
-    # main.py imports `traceback` at module level (line 43); the extracted
-    # method relies on it, so it has to be in the namespace here too.
+    # the method relies on module-level `traceback`, so it has to be in the
+    # namespace here too.
     ns = {"types": _Types()}
     exec("import asyncio\nimport traceback\nclass _S:\n" + src[start:end], ns)
     return ns["_S"]

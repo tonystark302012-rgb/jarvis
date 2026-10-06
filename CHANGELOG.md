@@ -10,6 +10,22 @@ entries are written as changes land.
 
 ## Unreleased
 
+**`main.py` shrank by 500 lines.** `JarvisLive` was one class holding the
+session's connection, audio and tools; two of those thirds are now mixins —
+`core/tool_dispatch.py` (the batch scheduler, the toolbox router, the single
+tool entry point) and `core/wake_and_relay.py` (the wake state machine, the
+sleep watcher, the phone audio and remote command relays). This is a move, not
+a rewrite: the methods keep their exact `self.` contract, and each mixin
+declares the host attributes it is given so it type-checks on its own.
+
+The tests moved with them, which is the point: the autonomy gate ordering, the
+`mcp__*` dispatch branch, the phone-audio arbitration (`_phone_active`: a phone
+chunk that arrives while a reply is playing must not be queued) and the
+remote-command wake are now asserted by running them on the real object instead
+of by grepping `main.py` for the line that should do it. The audio third is
+still inside `main.py`: moving it needs a fake-`sounddevice` harness to run the
+loop, and this repository's CI has no PortAudio.
+
 **Types as a bug hunt: the curated mypy list went from 32 modules to 127.** The
 list exists so `mypy` can be a gate without a 2,600-error red build, and growing
 it turned out to find real defects rather than annotations that needed adding:

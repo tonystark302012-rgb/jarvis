@@ -51,9 +51,12 @@ class FakeWindow:
     def __init__(self):
         self.logs: list[str] = []
         self.states: list[str] = []
+        self.phone_connected = False
         self.content: list[tuple] = []
         self.emotions: list[str] = []
         self.audio_levels: list[float] = []
+
+    def notify_phone_connected(self): self.phone_connected = True
 
     def set_state(self, s): self.states.append(s)
     def write_log(self, m, *_a, **_k): self.logs.append(str(m))
@@ -284,6 +287,107 @@ class TestFocusMuteGate:
         assert spoken == []          # muted while a focus session is running
 
 
+class TestTheSplitOutMixinMethods:
+    """P2-15 moved the tools, wake and relay methods into mixins. A move is the
+    easiest way to break something silently — the methods are found by name at
+    call time — so these call the ones that need no hardware or network."""
+
+    def test_the_wake_state_reads_the_session(self, live):
+        lv, _ui, _r = live
+        state = lv._wake_state()
+        assert set(state) == {"enabled", "awake", "ready"}
+        assert isinstance(state["enabled"], bool)
+
+    def test_disabling_the_wake_word_writes_through(self, live, monkeypatch):
+        from core import wake_and_relay
+        lv, _ui, _r = live
+        written: list[bool] = []
+        monkeypatch.setattr(wake_and_relay, "save_wake_word_enabled",
+                            lambda on: written.append(on))
+        assert lv._ui_wake_toggle(False) == "disabled"
+        assert lv._wake_enabled is False
+        assert written == [False]
+
+    def test_enabling_says_so_when_the_model_is_missing(self, live, monkeypatch):
+        """The HUD turns 'need_download' into an offer to install — without it
+        the toggle would look like it worked while nothing listens."""
+        from core import wake_and_relay
+        lv, ui, _r = live
+        monkeypatch.setattr(wake_and_relay, "wake_is_ready", lambda: False)
+        assert lv._ui_wake_toggle(True) == "need_download"
+        assert lv._wake_enabled is False
+
+    def test_a_phone_connection_is_announced(self, live):
+        lv, ui, _r = live
+        lv._on_phone_connected()
+        assert ui.phone_connected is True
+        assert any("Phone connected" in m for m in ui.logs)
+
+    def test_a_remote_command_wakes_a_sleeping_jarvis(self, live, monkeypatch):
+        """There is no WAKE button on the phone: a command typed on the remote
+        dashboard that did not wake the assistant would be dropped while it
+        slept, with nothing on screen to say so."""
+        import asyncio as aio
+        lv, ui, _r = live
+        woken: list[str] = []
+        fired: list[str] = []
+        monkeypatch.setattr(lv, "wake", lambda reason="": woken.append(reason))
+        monkeypatch.setattr(lv, "_fire_phrase_rules",
+                            lambda text: (fired.append(text), [])[1])
+
+        class FakeSession:
+            def __init__(self): self.sent: list[dict] = []
+            async def send_client_content(self, **kw): self.sent.append(kw)
+
+        session = FakeSession()
+
+        async def scenario():
+            q = aio.Queue()
+            lv._dashboard = type("D", (), {"_command_queue": q,
+                                           "_phone_audio_queue": aio.Queue()})()
+            lv.session = session
+            lv._wake_enabled, lv._awake = True, False
+            task = aio.create_task(lv._process_dashboard_commands())
+            q.put_nowait("open the door")
+            await aio.sleep(0.4)
+            task.cancel()
+
+        aio.run(scenario())
+        assert woken == ["remote command"]
+        assert fired == ["open the door"]          # phrase rules still apply
+        assert session.sent[0]["turns"]["parts"][0]["text"] == "open the door"
+        assert any("open the door" in m for m in ui.logs)
+
+    def test_the_relay_hands_phone_audio_over_only_when_not_speaking(self, live):
+        """The relay is the phone's mic. While a reply is playing the PC mic is
+        gated by `_phone_active`, and a phone chunk that arrives then must not
+        be queued — the session would hear itself."""
+        import asyncio as aio
+        lv, _ui, _r = live
+
+        async def scenario():
+            q = aio.Queue()
+            lv._dashboard = type("D", (), {"_phone_audio_queue": q,
+                                           "_command_queue": aio.Queue()})()
+            lv.out_queue = aio.Queue(maxsize=200)
+            task = aio.create_task(lv._relay_phone_audio())
+            q.put_nowait(b"chunk-1")
+            await aio.sleep(0.05)
+            assert lv._phone_active is True
+            assert lv.out_queue.qsize() == 1
+            lv._is_speaking = True
+            q.put_nowait(b"chunk-2")
+            await aio.sleep(0.05)
+            assert lv.out_queue.qsize() == 1, "phone audio queued during a reply"
+            lv._is_speaking = False
+            q.put_nowait(b"chunk-3")
+            await aio.sleep(0.05)
+            assert lv.out_queue.qsize() == 2
+            task.cancel()
+
+        aio.run(scenario())
+
+
 class TestExecuteTool:
     """Drive the real dispatcher. The generic version of what the tiering and
     tool-output suites do for their own concerns."""
@@ -327,13 +431,46 @@ class TestExecuteTool:
         and a routed call must not pretend they are."""
         lv, _ui, registry = live
         saved = {}
-        monkeypatch.setattr(M, "update_memory",
+        from core import tool_dispatch
+        monkeypatch.setattr(tool_dispatch, "update_memory",
                             lambda payload: saved.update(payload))
         resp = self._call(lv, "save_memory",
                           {"category": "notes", "key": "k", "value": "v"})
         assert resp.response["result"] == "ok"
         assert registry.calls == []
         assert saved == {"notes": {"k": {"value": "v"}}}
+
+    def test_the_autonomy_gate_runs_before_the_registry(self, live, monkeypatch):
+        """P2-15 moved this method to core/tool_dispatch.py; the grep that used
+        to check the order read main.py's text and could only ever see that both
+        lines existed. This checks which one ran first."""
+        from core import autonomy as au
+        lv, _ui, registry = live
+        order: list[str] = []
+
+        # `gate()` returns a sentence for the model when it blocks, and
+        # something false-y when it allows — not a bool.
+        monkeypatch.setattr(au, "gate",
+                            lambda name, args, **kw: (order.append("gate"), None)[1])
+        registry._records["echo_tool"] = action(
+            "echo_tool", lambda p, **k: (order.append("run"), "echo:ok")[1])
+        resp = self._call(lv, "echo_tool", {})
+        assert order == ["gate", "run"], order
+        assert resp.response["result"] == "echo:ok"
+
+    def test_the_mcp_native_branch_beats_the_registry(self, live, monkeypatch):
+        """`mcp__*` tools are answered by the MCP client, never by the action
+        registry — an action that happens to share the name must not win."""
+        from actions import mcp as mcp_mod
+        lv, _ui, registry = live
+        seen: list[tuple] = []
+        monkeypatch.setattr(mcp_mod, "call_native",
+                            lambda name, args: (seen.append((name, args)),
+                                                "from-mcp")[1])
+        resp = self._call(lv, "mcp__srv__create_issue", {"title": "x"})
+        assert resp.response["result"] == "from-mcp"
+        assert seen == [("mcp__srv__create_issue", {"title": "x"})]
+        assert registry.calls == []
 
     def test_an_unknown_tool_says_so_instead_of_crashing(self, live):
         lv, _ui, _r = live

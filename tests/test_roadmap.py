@@ -3558,12 +3558,9 @@ class TestAgentWiring:
         self.src = Path("main.py").read_text(encoding="utf-8")
         yield
 
-    def test_execute_tool_gates_before_dispatch(self):
-        seg = self.src.split("async def _execute_tool", 1)[1][:4000]
-        assert "_autonomy.gate(name, args)" in seg
-        assert "_autonomy.enhancing(name, args)" in seg
-        assert seg.index("_autonomy.gate(name, args)") < \
-            seg.index('if name == "save_memory"')
+    # The gate-before-dispatch order used to be grepped here. `_execute_tool`
+    # moved to core/tool_dispatch.py (P2-15) and the order is now asserted by
+    # running it: tests/test_main_behavior.py::test_the_autonomy_gate_runs_before_the_registry.
 
     def test_agent_runner_gates_steps(self):
         seg = self.src.split("def _agent_runner", 1)[1][:1400]
@@ -3690,12 +3687,9 @@ class TestMCPNative:
         seg = src.split("def _build_config", 1)[1][:4000]
         assert "native_declarations()" in seg
         assert "+ _mcp_decls" in seg
-        dseg = src.split("async def _execute_tool", 1)[1]
-        assert 'elif name.startswith("mcp__"):' in dseg
-        assert "call_native(name, args)" in dseg
-        # dispatch branch must come BEFORE the registry check
-        assert dseg.index('name.startswith("mcp__")') < dseg.index(
-            "self._action_registry.has(name)")
+        # The mcp__ dispatch branch moved to core/tool_dispatch.py (P2-15); that
+        # it beats the registry is asserted on the real dispatcher in
+        # tests/test_main_behavior.py::test_the_mcp_native_branch_beats_the_registry.
 
     def test_mcp_native_is_mutating_for_observe(self):
         import core.autonomy as au

@@ -1694,11 +1694,9 @@ class TestMainWiring:
     def test_the_rules_tick_is_started_at_connect(self):
         assert "asyncio.create_task(self._run_rules_tick())" in self.SRC
 
-    def test_a_remote_command_wakes_a_sleeping_jarvis(self):
-        # There is no WAKE button on the phone, so a remote command that did not
-        # wake the assistant would be silently ignored while it slept.
-        drain = self.SRC[self.SRC.index("async def _process_dashboard_commands"):]
-        assert 'wake(reason="remote command")' in drain[:4000]
+    # The two greps that used to sit here — the event watch wiring and the
+    # remote-command wake — are behaviour tests now, over the real object and
+    # the real relay: tests/test_main_behavior.py.
 # ────────────────────────────────────────────────────────────────────────────
 # Batch 1 — free keyless actions: image_gen, feed, backup, sky (+ wtype)
 # ────────────────────────────────────────────────────────────────────────────

@@ -476,10 +476,17 @@ class TestBuildConfigWiring:
 
     def test_main_declares_the_router_when_deferring(self):
         """If the router is not in the declaration list the model cannot call
-        it, and every deferred tool becomes invisible with no error raised."""
-        src = (ROOT / "main.py").read_text(encoding="utf-8")
-        assert "_tool_tiers.router_declaration()" in src
-        assert "_tool_tiers.ROUTER_NAME" in src
+        it, and every deferred tool becomes invisible with no error raised.
+
+        Two halves, two files since P2-15: main.py builds the declaration list,
+        core/tool_dispatch.py recognises the router name when the call comes
+        back. Either one missing makes deferred tools unreachable, silently.
+        """
+        main_src = (ROOT / "main.py").read_text(encoding="utf-8")
+        dispatch_src = (ROOT / "core/tool_dispatch.py").read_text(encoding="utf-8")
+        assert "_tool_tiers.router_declaration()" in main_src
+        assert "_tool_tiers.ROUTER_NAME" in main_src or \
+            "_tool_tiers.ROUTER_NAME" in dispatch_src
 
     def test_toolbox_is_not_batched_as_read_only(self):
         """It can run anything, including something that mutates — so it must
