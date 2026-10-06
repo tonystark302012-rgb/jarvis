@@ -384,7 +384,7 @@ def _setup(params: dict) -> str:
 
 # ── tool entry ──────────────────────────────────────────────────────────────
 
-def code_intel(parameters: dict = None, player=None,
+def code_intel(parameters: dict | None = None, player=None,
                session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "hover")).lower().strip()

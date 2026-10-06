@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Generator
+from typing import Any, Callable, Generator
 
 import requests
 
@@ -121,6 +121,19 @@ def _load_config() -> dict:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _http_error_parts(e: requests.exceptions.HTTPError) -> tuple[int | str, str]:
+    """Status and body of a failed response.
+
+    `e.response` is Optional — a connection error that never got a reply
+    carries no response at all — and reading `.status_code` straight off it
+    meant that *logging* a failure could raise in place of the failure.
+    """
+    resp = e.response
+    if resp is None:
+        return "no response", str(e)
+    return resp.status_code, resp.text
 
 
 def ensure_ollama_running(timeout: int = 15) -> bool:
@@ -214,7 +227,7 @@ def warmup_model(system_prompt: str | None = None) -> bool:
     if provider == "openai":
         # OpenAI-compatible: just fire a minimal request to ensure the model is loaded.
         # No keep_alive or KV-cache priming available — server manages this internally.
-        payload = {
+        payload: dict[str, Any] = {
             "model":      model,
             "messages":   messages,
             "stream":     False,
@@ -323,7 +336,7 @@ def call_llm(
 
     if provider == "openai":
         endpoint = f"{url}/v1/chat/completions"
-        payload: dict = {
+        payload: dict[str, Any] = {
             "model":      model,
             "messages":   messages,
             "stream":     False,
@@ -403,8 +416,9 @@ def call_llm(
     except requests.exceptions.Timeout:
         raise RuntimeError("Ollama request timed out after 120 s.")
     except requests.exceptions.HTTPError as e:
-        log.warning(f"HTTPError: {e.response.status_code} — {e.response.text[:200]}")
-        raise RuntimeError(f"Ollama HTTP error: {e.response.status_code}")
+        status, body = _http_error_parts(e)
+        log.warning(f"HTTPError: {status} — {body[:200]}")
+        raise RuntimeError(f"Ollama HTTP error: {status}")
     except Exception as e:
         log.warning(f"Unexpected error: {type(e).__name__}: {e}")
         raise RuntimeError(f"LLM call failed: {e}")
@@ -433,7 +447,7 @@ def call_llm_text(
     # on every preset server.
     if get_llm_provider() == "openai":
         endpoint = f"{url}/v1/chat/completions"
-        payload = {"model": m, "messages": messages, "stream": False,
+        payload: dict[str, Any] = {"model": m, "messages": messages, "stream": False,
                    "max_tokens": 600}
         try:
             resp = requests.post(endpoint, json=payload, timeout=timeout,
@@ -481,7 +495,7 @@ def _stream_openai(
     url, model = get_llm_settings()
     endpoint   = f"{url}/v1/chat/completions"
 
-    payload: dict = {
+    payload: dict[str, Any] = {
         "model":      model,
         "messages":   messages,
         "stream":     True,
@@ -579,7 +593,8 @@ def _stream_openai(
     except requests.exceptions.Timeout:
         raise RuntimeError("OpenAI-compatible stream timed out.")
     except requests.exceptions.HTTPError as e:
-        raise RuntimeError(f"OpenAI-compatible HTTP error: {e.response.status_code}")
+        raise RuntimeError(
+            f"OpenAI-compatible HTTP error: {_http_error_parts(e)[0]}")
     except Exception as e:
         raise RuntimeError(f"OpenAI-compatible stream failed: {e}")
 
@@ -607,7 +622,7 @@ def call_llm_stream(
     url, model = get_llm_settings()
     endpoint   = f"{url}/api/chat"
 
-    payload: dict = {
+    payload: dict[str, Any] = {
         "model":      model,
         "messages":   messages,
         "stream":     True,
@@ -680,7 +695,7 @@ def call_llm_stream(
     except requests.exceptions.Timeout:
         raise RuntimeError("Ollama stream timed out.")
     except requests.exceptions.HTTPError as e:
-        raise RuntimeError(f"Ollama HTTP error: {e.response.status_code}")
+        raise RuntimeError(f"Ollama HTTP error: {_http_error_parts(e)[0]}")
     except Exception as e:
         log.warning(f"Stream error: {type(e).__name__}: {e}")
         raise RuntimeError(f"LLM stream failed: {e}")

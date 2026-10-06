@@ -174,7 +174,7 @@ class HoloAvatar:
         self.SPAN = mesh["span"][0] - mesh["span"][1]
 
         self._lut_cache: list = []
-        self._lut_key = None
+        self._lut_key: tuple[int, int] | None = None
 
         n = self._v0.shape[0]
         self._v = np.empty((n, 3), dtype=np.float32)
@@ -214,7 +214,7 @@ class HoloAvatar:
         self._bias_at = 0.0
         self._lids = 1.0           # 1 = wide, 0 = shut; low while asleep
         self._brow_bias = 0.0      # concentration pulls the brows down
-        self._glance = None        # (dx, dy, until_t) — a deliberate look
+        self._glance: tuple[float, float, float] | None = None  # (dx, dy, until_t)
         self._emo = ("", 0.0)      # (name, until_t) — content-driven acting
 
         # ── viseme ──────────────────────────────────────────────────────────
@@ -672,7 +672,9 @@ class HoloAvatar:
                 p.setPen(QPen(_blend(skin, primary, a * 0.75), 1.0))
             else:
                 p.setPen(QPen(_blend(bg, primary, a), 1.0))
-            p.drawLines(seg)
+            # A sequence of QLineF is accepted here; the stub only declares
+            # PyQt6.sip.array.
+            p.drawLines(seg)  # type: ignore[call-overload]
 
     # ── face ────────────────────────────────────────────────────────────────
 

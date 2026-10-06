@@ -157,7 +157,7 @@ def _keyword_window(question: str, transcript: str,
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def video_qa(parameters: dict = None, player=None,
+def video_qa(parameters: dict | None = None, player=None,
              session_memory=None) -> str:
     from core import privacy as _privacy
     blocked = _privacy.gate("video_qa")

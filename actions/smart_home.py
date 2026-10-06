@@ -23,7 +23,7 @@ import time
 try:                                     # optional — CI and minimal installs
     import paho.mqtt.client as _mqtt
 except Exception:                        # pragma: no cover
-    _mqtt = None
+    _mqtt = None                         # type: ignore[assignment]
 
 from core import privacy as _privacy
 

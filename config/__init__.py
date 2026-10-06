@@ -1,6 +1,7 @@
 # config/__init__.py
 import json
 import platform
+import subprocess as _subprocess
 from pathlib import Path
 
 _CONFIG_PATH = Path(__file__).parent / "api_keys.json"
@@ -41,3 +42,18 @@ def get_os() -> str:
 def is_windows() -> bool: return get_os() == "windows"
 def is_mac()     -> bool: return get_os() == "mac"
 def is_linux()   -> bool: return get_os() == "linux"
+
+# ── subprocess flags that exist only on Windows ──────────────────────────────
+# CREATE_NO_WINDOW / DETACHED_PROCESS are not attributes of the subprocess
+# module anywhere else, so read them defensively: 0 is the documented default
+# and means "no flags", which is exactly right off Windows. This used to be
+# copy-pasted into five files as `if platform.system() == "Windows" else {}`,
+# which is how one of them kept crashing on Linux.
+CREATE_NO_WINDOW: int = getattr(_subprocess, "CREATE_NO_WINDOW", 0)
+DETACHED_PROCESS: int = getattr(_subprocess, "DETACHED_PROCESS", 0)
+
+def _win_hide() -> dict:
+    """Keyword arguments that stop a subprocess from flashing a console."""
+    return {"creationflags": CREATE_NO_WINDOW} if is_windows() else {}
+
+WIN_HIDE: dict = _win_hide()

@@ -271,7 +271,7 @@ def _latest_transcript() -> Path | None:
     return files[0] if files else None
 
 
-def meeting(parameters: dict = None, player=None, session_memory=None) -> str:
+def meeting(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "status").lower().strip()
 

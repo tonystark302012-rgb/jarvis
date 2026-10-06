@@ -439,7 +439,7 @@ python tools/ui_smoke.py              # offscreen HUD E2E (needs PyQt6)
 python tools/ui_preview.py            # dashboard preview on :8712 with a PREVIEW token
 ```
 
-CI runs on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`): ruff, a curated mypy gate, `compileall` over every module, then the suite. Two additional checks run **warn-only** and print their numbers — `ruff format` (176 files would change; the tree is deliberately not format-clean) and mypy over the whole app (533 errors today, nearly all missing annotations in deliberately dynamic code). Turning either into a gate is a roadmap item, not a decision to make by accident (`PROJECT_ANALYSIS.md` P1-9, P3-28).
+CI runs on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`): ruff, a curated mypy gate, `compileall` over every module, then the suite. Two additional checks run **warn-only** and print their numbers — `ruff format` (185 files would change; the tree is deliberately not format-clean) and mypy over the whole app (374 errors today, nearly all missing annotations in deliberately dynamic code). Formatting is still a roadmap item; the type count is not gated but it is not unmanaged either — 127 of 160 modules are held clean by the curated list, and the number above is what is left.
 
 The suite covers the security invariants: no `shell=True` in `open_app`/`dev_agent`, the run-command allowlist, project-path containment, pip-flag injection, the dashboard AES round-trip and token TTL, brute-force lockout, memory recall and parallel tool dispatch.
 

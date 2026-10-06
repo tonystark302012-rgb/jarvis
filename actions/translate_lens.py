@@ -56,7 +56,7 @@ def _read_lines(region: str) -> list[str]:
     return lines[:_MAX_LINES]
 
 
-def translate_lens(parameters: dict = None, player=None,
+def translate_lens(parameters: dict | None = None, player=None,
                    session_memory=None) -> str:
     params = parameters or {}
     region = str(params.get("region", "center") or "center")

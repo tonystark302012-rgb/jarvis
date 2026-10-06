@@ -150,7 +150,7 @@ def _git_check(cwd: Path) -> str | None:
     return None
 
 
-def terminal(parameters: dict = None, player=None, session_memory=None) -> str:
+def terminal(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "").lower().strip()
     cwd = _workspace()

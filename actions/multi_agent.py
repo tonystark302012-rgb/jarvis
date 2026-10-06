@@ -295,7 +295,7 @@ def _default_llm(prompt: str, system: str | None = None) -> str:
     return call_llm_text(prompt, system=system, timeout=120)
 
 
-def multi_agent(parameters: dict = None, response=None, player=None,
+def multi_agent(parameters: dict | None = None, response=None, player=None,
                 session_memory=None, speak=None) -> str:
     """Handler — parameters:
         task    : what to build/change (required)

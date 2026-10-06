@@ -3,6 +3,7 @@ import re
 import time
 import subprocess
 import platform
+from collections.abc import Callable
 from pathlib import Path
 
 try:
@@ -26,10 +27,7 @@ from core.undo import push_undo
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
-if _OS == "Windows":
-    _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
-else:
-    _WIN_HIDE: dict = {}
+from config import WIN_HIDE as _WIN_HIDE      # no console flash on Windows
 
 # ── every external command in this module goes through one wrapper ────────────
 # The Windows branches carried `timeout=5` but the macOS and Linux ones did
@@ -605,6 +603,26 @@ def toggle_wifi():
         except Exception as e:
             print(f"[Settings] toggle_wifi Linux failed: {e}")
 
+def _announce(run: Callable[[], object], text: str) -> Callable[[], str]:
+    """The confirmation gate's callback: run it, then say what happened."""
+    def _do() -> str:
+        run()
+        return text
+    return _do
+
+
+def _revert(setter: Callable[..., object], value, text: str) -> Callable[[], str]:
+    """A push_undo callback: put the old value back, then say so.
+
+    Used to be `lambda b=value: (setter(b), text)[1]` at every call site —
+    the default argument is there to freeze the loop variable, which a named
+    closure does by itself and a reader can follow."""
+    def _do() -> str:
+        setter(value)
+        return text
+    return _do
+
+
 def restart_computer():
     if _OS == "Windows":
         _run(["shutdown", "/r", "/t", "10"], capture_output=True, **_WIN_HIDE)
@@ -625,7 +643,7 @@ def shutdown_computer():
     else:
         _run(["systemctl", "poweroff"], capture_output=True)
 
-ACTION_MAP: dict[str, callable] = {
+ACTION_MAP: dict[str, Callable[..., str]] = {
     "volume_up":           volume_up,
     "volume_down":         volume_down,
     "mute":                volume_mute,
@@ -815,7 +833,7 @@ def _suggest(description: str) -> str:
             f"Call computer_settings again with an exact `action` from: {hint}.")
 
 def computer_settings(
-    parameters: dict = None,
+    parameters: dict | None = None,
     response=None,
     player=None,
     session_memory=None,
@@ -856,10 +874,8 @@ def computer_settings(
         if confirm.pending_title():
             return ("There is already a confirmation waiting on screen. "
                     "Ask the user to answer that one first.")
-        return confirm.request(
-            key=action, title=title, detail=detail,
-            run=lambda f=func, a=action: (f(), f"{a} done.")[1],
-        )
+        return confirm.request(key=action, title=title, detail=detail,
+                               run=_announce(func, f"{action} done."))
 
     if action == "volume_set":
         try:
@@ -867,8 +883,10 @@ def computer_settings(
             before = volume_get()
             volume_set(target)
             if before is not None:
-                push_undo(f"volume {before}% → {target}%",
-                          lambda b=before: (volume_set(b), f"Back to {b}%.")[1])
+                def _undo_volume(level: int = before) -> str:
+                    volume_set(level)
+                    return f"Back to {level}%."
+                push_undo(f"volume {before}% → {target}%", _undo_volume)
             return f"Volume set to {target}%."
         except Exception as e:
             return f"Could not set volume: {e}"
@@ -929,14 +947,13 @@ def computer_settings(
         if old is not None:
             if kind == "volume":
                 push_undo(f"volume ({action})",
-                          lambda b=old: (volume_set(b), f"Volume back to {b}%.")[1])
+                          _revert(volume_set, old, f"Volume back to {old}%."))
             elif kind == "brightness":
                 push_undo(f"brightness ({action})",
-                          lambda b=old: (brightness_set(b), f"Brightness back to {b}%.")[1])
+                          _revert(brightness_set, old, f"Brightness back to {old}%."))
     elif action == "dark_mode":
         # A pure toggle: calling it again is the undo.
-        push_undo("dark mode toggled",
-                  lambda: (dark_mode(), "Theme switched back.")[1])
+        push_undo("dark mode toggled", _revert(dark_mode, None, "Theme switched back."))
 
     return f"Done: {action}."
 

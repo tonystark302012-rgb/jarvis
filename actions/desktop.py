@@ -352,7 +352,7 @@ def _run_named(action: str, task: str = "", player=None) -> str:
 
 
 def desktop_control(
-    parameters: dict = None,
+    parameters: dict | None = None,
     response=None,
     player=None,
     session_memory=None,

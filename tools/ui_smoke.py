@@ -70,7 +70,7 @@ BASE = info.get("base", "http://127.0.0.1:8712")
 TOKEN = info.get("token", "")
 if BASE.startswith("https"):
     import ssl as _ssl
-    _CTX = _ssl._create_unverified_context()
+    _CTX: _ssl.SSLContext | None = _ssl._create_unverified_context()
 else:
     _CTX = None
 
@@ -96,7 +96,7 @@ for _b in [BASE, BASE.replace("http://", "https://", 1)]:
         import ssl as _ssl
         _CTX = _ssl._create_unverified_context()
     else:
-        _CTX = None
+        _CTX = None           # `requests` wants None, not a false-y context
     try:
         api("GET", "/api/health")
         live = True

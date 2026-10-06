@@ -47,7 +47,7 @@ def _int(value, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, n))
 
 
-def image_gen(parameters: dict = None, player=None,
+def image_gen(parameters: dict | None = None, player=None,
               session_memory=None) -> str:
     p = parameters or {}
     prompt = str(p.get("prompt") or "").strip()

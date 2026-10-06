@@ -131,7 +131,7 @@ class PushToTalk:
     def _can_poll(self) -> bool:
         try:
             import ctypes
-            ctypes.windll.user32.GetAsyncKeyState  # noqa: B018 — presence check
+            ctypes.windll.user32  # type: ignore[attr-defined]  # noqa: B018 — presence check
             return all(k in _VK for k in self._chord)
         except Exception:
             return False
@@ -147,7 +147,7 @@ class PushToTalk:
 
     def _poll_loop(self) -> None:
         import ctypes
-        user32 = ctypes.windll.user32
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
         codes = [_VK[k] for k in self._chord]
         period = 1.0 / _POLL_HZ
         down_since = 0.0

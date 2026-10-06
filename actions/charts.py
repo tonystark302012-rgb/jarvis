@@ -169,7 +169,7 @@ def _frame(w, h, title, body):
 _KINDS = {"bar": _bar_svg, "line": _line_svg, "pie": _pie_svg}
 
 
-def chart(parameters: dict = None, player=None, session_memory=None) -> str:
+def chart(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     kind = str(params.get("kind", "bar")).lower().strip()
     title = str(params.get("title", "")).strip() or "Chart"

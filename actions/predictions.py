@@ -93,7 +93,7 @@ def _find(rows: list[dict], token: str) -> dict | None:
     return None
 
 
-def predictions(parameters: dict = None, player=None,
+def predictions(parameters: dict | None = None, player=None,
                 session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "list")).lower().strip()

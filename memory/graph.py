@@ -105,6 +105,17 @@ def _guess_kind(name: str) -> str:
 
 # ── core ops ────────────────────────────────────────────────────────────────
 
+def _rowid(cur) -> int:
+    """The rowid of the row this cursor just inserted.
+
+    sqlite3 types `lastrowid` as Optional because it is None for statements
+    that do not insert; both callers here have just run an INSERT."""
+    rid = cur.lastrowid
+    if rid is None:                       # pragma: no cover — not reachable
+        raise RuntimeError("INSERT returned no rowid")
+    return int(rid)
+
+
 def upsert_entity(name: str, kind: str = "") -> int:
     name = str(name or "").strip().strip(".,;:")
     if not name:
@@ -120,7 +131,7 @@ def upsert_entity(name: str, kind: str = "") -> int:
             "INSERT INTO entities (name, kind, created_at) VALUES (?,?,?)",
             (name, kind or _guess_kind(name), _now()))
         c.commit()
-        return int(cur.lastrowid)
+        return _rowid(cur)
     finally:
         c.close()
 
@@ -154,7 +165,7 @@ def link(a: str, b: str, rel: str, note: str = "",
                 " note, created_at) VALUES (?,?,?,1.0,?,?,?)",
                 (src, dst, rel, ts, str(note) or "", ts))
             c.commit()
-            eid = int(cur.lastrowid)
+            eid = _rowid(cur)
             mode = "linked"
         return {"id": eid, "mode": mode, "a": str(a).strip(),
                 "b": str(b).strip(), "rel": rel, "at": ts}
@@ -300,7 +311,7 @@ def timeline(name: str) -> str:
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def graph(parameters: dict = None, player=None,
+def graph(parameters: dict | None = None, player=None,
           session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "search")).lower().strip()

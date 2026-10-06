@@ -46,10 +46,9 @@ from pathlib import Path
 
 import psutil
 
-if platform.system() == "Windows":
-    _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
-else:
-    _WIN_HIDE: dict = {}
+# Windows-only subprocess flags (0 elsewhere) — defined once in config
+from config import CREATE_NO_WINDOW as _NO_WINDOW
+from config import DETACHED_PROCESS as _DETACHED
 
 # Qt's video backend prints the ffmpeg stream banner — codec, bitrate, the
 # whole signed googlevideo URL — to the console for every stream it opens. That
@@ -6349,7 +6348,7 @@ class MainWindow(QMainWindow):
                 f.write(vbs)
             proc = subprocess.Popen(
                 ["wscript.exe", "/nologo", tmp],
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+                creationflags=_DETACHED | _NO_WINDOW,
             )
             proc.wait(timeout=10)
         finally:

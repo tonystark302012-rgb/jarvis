@@ -173,6 +173,9 @@ class ActionRegistry:
             _audit(name, parameters, "unavailable",
                    rec.error if rec else "unknown action")
             return f"Action '{name}' is not available."
+        if rec.handler is None:            # never True for a valid record
+            _audit(name, parameters, "unavailable", "no handler")
+            return f"Action '{name}' has no handler."
         try:
             out = _call_handler(rec.handler, parameters, ctx or {}) or "Done."
         except Exception as e:

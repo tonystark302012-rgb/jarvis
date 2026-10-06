@@ -34,7 +34,8 @@ def files_declaring_tool(actions_dir: Path) -> tuple[list[str], list[str]]:
     the file count and the registry count disagree by one, which is the kind
     of off-by-one that makes people distrust the whole table.
     """
-    with_tool, without = [], []
+    with_tool: list[str] = []
+    without: list[str] = []
     for f in sorted(actions_dir.glob("*.py")):
         if f.name.startswith("_"):
             continue

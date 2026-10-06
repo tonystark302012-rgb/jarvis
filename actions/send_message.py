@@ -172,7 +172,8 @@ def _send_whatsapp(receiver: str, message: str) -> str:
     is worse than not sending it.
     """
     try:
-        from plugins import _whatsapp_core as wa
+        # Not shipped with the project — a user can drop a driver in here.
+        from plugins import _whatsapp_core as wa  # type: ignore[attr-defined]
     except ImportError:
         # The expected case — no driver installed. Not an error, so it does
         # not print: a scary line on every send trains people to ignore logs.

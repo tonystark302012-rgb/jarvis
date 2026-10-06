@@ -23,6 +23,7 @@ import numpy as np
 import sounddevice as sd
 
 from core.logging_setup import get_logger
+from typing import Any
 
 log = get_logger(__name__)
 
@@ -309,9 +310,12 @@ class KokoroTTSEngine:
                 raise
 
         print("[TTS] Kokoro compiling (first-time only)…")
+        pipeline = self._pipeline
+        if pipeline is None:            # the loader above either set it or raised
+            raise RuntimeError("Kokoro pipeline failed to load")
         # Warmup: compiles PyTorch JIT graph so first real speak() call is instant.
         try:
-            for _ in self._pipeline("hello", voice=self.voice, speed=self.speed):
+            for _ in pipeline("hello", voice=self.voice, speed=self.speed):
                 pass
             print("[TTS] Kokoro ready.")
         except Exception as e:
@@ -373,7 +377,9 @@ class ElevenLabsTTSEngine:
             "xi-api-key":   self.api_key,
             "Content-Type": "application/json",
         }
-        payload = {
+        # `Any`, not `object`: requests' JsonType is recursive, and the nested
+        # voice_settings dict is what an object-typed dict cannot express.
+        payload: dict[str, Any] = {
             "text":     text,
             "model_id": "eleven_multilingual_v2",
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
@@ -438,6 +444,7 @@ class TTSPlayer:
 
 def create_tts_player(config: dict) -> TTSPlayer:
     engine_name = config.get("tts_engine", "edgetts").lower()
+    engine: KokoroTTSEngine | ElevenLabsTTSEngine | EdgeTTSEngine
     if engine_name == "kokoro":
         voice  = config.get("tts_voice", "af_heart")
         speed  = float(config.get("tts_speed", 1.0))

@@ -69,9 +69,13 @@ def _screen_size() -> tuple[int, int]:
     except Exception:
         pass
     try:
+        from PyQt6.QtGui import QGuiApplication
         from PyQt6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication([])
-        g = app.primaryScreen().geometry()
+        QApplication.instance() or QApplication([])
+        screen = QGuiApplication.primaryScreen()   # off-screen: None
+        if screen is None:
+            return 1920, 1080
+        g = screen.geometry()
         return int(g.width()), int(g.height())
     except Exception:
         return 1920, 1080
@@ -149,7 +153,7 @@ _PRESETS = {
 }
 
 
-def window_layout(parameters: dict = None, player=None, session_memory=None) -> str:
+def window_layout(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "list")).lower().strip()
     backend = _focus_windows_backend()
@@ -216,9 +220,14 @@ def window_layout(parameters: dict = None, player=None, session_memory=None) -> 
                   'every process whose visible is true')
         r = subprocess.run(["osascript", "-e", script],
                            capture_output=True, text=True, timeout=6)
+        # The script asks for {name, unix id} per process, so the output is a
+        # flat "name, id, name, id…" list. This used to append (name, name),
+        # which made the id a string and left _place() below moving window 0.
         wins = []
-        for chunk in r.stdout.split(","):
-            wins.append((chunk.strip(), chunk.strip()))
+        parts = [c.strip() for c in r.stdout.split(",")]
+        for i in range(0, len(parts) - 1, 2):
+            name, pid = parts[i], parts[i + 1]
+            wins.append((int(pid) if pid.lstrip("-").isdigit() else 0, name))
     else:
         wins = []
 

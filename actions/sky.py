@@ -30,8 +30,11 @@ def _json(url: str, timeout: float = 20.0):
 
 
 def _coord(parameters: dict, key: str) -> float | None:
+    raw = (parameters or {}).get(key)
+    if raw is None or raw == "":
+        return None
     try:
-        return float((parameters or {}).get(key))
+        return float(raw)
     except (TypeError, ValueError):
         return None
 
@@ -116,7 +119,7 @@ def _suntimes(parameters: dict) -> str:
             f"day length {r.get('day_length', '?')}s")
 
 
-def sky(parameters: dict = None, player=None, session_memory=None) -> str:
+def sky(parameters: dict | None = None, player=None, session_memory=None) -> str:
     p = parameters or {}
     action = str(p.get("action") or "iss").strip().lower() or "iss"
     handlers = {"iss": _iss, "quake": _quakes, "quakes": _quakes,

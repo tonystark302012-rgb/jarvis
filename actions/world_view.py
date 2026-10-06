@@ -143,7 +143,7 @@ def _num(params: dict, key: str, default=None):
         return None
 
 
-def world_view(parameters: dict = None, player=None,
+def world_view(parameters: dict | None = None, player=None,
                session_memory=None) -> str:
     # 1. privacy FIRST — coordinates are personal; refuse before parsing
     blocked = _privacy.gate("world_view")

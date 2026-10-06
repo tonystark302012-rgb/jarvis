@@ -448,7 +448,7 @@ def _final_text(run_id, goal: str, merged: dict, plan_rows: list[dict],
 
 # ── handler ─────────────────────────────────────────────────────────────
 
-def task_agent(parameters: dict = None, player=None, session_memory=None) -> str:
+def task_agent(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "").lower().strip()
     if action in ("history", "list", "runs"):

@@ -158,7 +158,7 @@ def autostart() -> str:
         return ""
 
 
-def telegram_rx(parameters: dict = None, player=None,
+def telegram_rx(parameters: dict | None = None, player=None,
                 session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "status")).lower().strip()

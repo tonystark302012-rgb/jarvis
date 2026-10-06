@@ -105,7 +105,7 @@ def _cache_path() -> Path:
     return d / f"brief-{time.strftime('%Y-%m-%d')}.txt"
 
 
-def spoken_brief(parameters: dict = None, player=None, speak=None,
+def spoken_brief(parameters: dict | None = None, player=None, speak=None,
                  session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "give")).lower().strip()

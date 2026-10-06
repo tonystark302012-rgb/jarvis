@@ -8,7 +8,7 @@ from pathlib import Path
 try:                                   # normal package import
     from . import semantic_recall
 except ImportError:                    # loaded as a top-level module
-    import semantic_recall
+    import semantic_recall            # type: ignore[no-redef]
 
 
 def get_base_dir() -> Path:

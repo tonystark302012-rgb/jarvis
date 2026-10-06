@@ -1132,7 +1132,7 @@ Hinglish strings aur English strings code me mixed hain (`'Researcher se pucho..
 | 6 | `actions/`, `tools/` me `__init__.py` | **Done** — real packages; the loader skips `_`-prefixed files so `__init__.py` is never mistaken for a tool |
 | 7 | `core/paths.py` dedupe | **Done** — 18 root derivations → 1; `_get_api_key` 10 definitions → 1 (8 were dead); 6 `API_CONFIG_PATH` constants → 0. `tests/test_paths.py` guards the dedupe |
 | 8 | `core/logging_setup.py` — print → logging | **Done** — rotating log under `~/.jarvis/logs`, a print mirror (so the console UX is unchanged while the transcript becomes complete), an excepthook that records crashes, `redact()` for anything leaving the machine. `tests/test_diagnostics.py` (36 tests) |
-| 9 | CI: ruff format + mypy (warn-only) | **Done** — both run with `continue-on-error` and print their numbers (176 files would reformat; 533 whole-repo type errors). The curated mypy list is a real gate |
+| 9 | CI: ruff format + mypy (warn-only) | **Done** — both run with `continue-on-error` and print their numbers (185 files would reformat; 374 whole-repo type errors, down from 533). The curated mypy list is a real gate |
 | 10 | `tts`, `viseme`, `wake_word` ke tests | **Done** — 102 tests. **And a finding:** `core/tts.py` is not on the Live audio path at all (nothing calls `create_tts_player`), so the premise "the audio pipeline is untested" was wrong for TTS — it was untested *and* unreachable. The module documents this now, and a test pins it |
 | 11 | `plugin_loader` ke tests | **Done** — 40 tests over real files on disk: crash isolation, name collisions, missing helpers, malformed metadata, the settings schema. `tests/test_plugin_loader.py` |
 | 12 | `revoke_devices` + TTL regression tests | **Done** — already covered by `tests/test_session_revocation.py`; verified against the P0-1 fix rather than duplicated |
@@ -1161,7 +1161,7 @@ Hinglish strings aur English strings code me mixed hain (`'Researcher se pucho..
 | 25 | `--version` + `core/version.py` | **Done** — works with no display, no PortAudio and no GL stack, which it did not before |
 | 26 | `Makefile` | **Done** — `help/test/test-fast/lint/format/typecheck/audit/silent/doctor/smoke/ci/lock/precommit/install/clean`; `make ci` is the same three things CI runs |
 | 27 | Doctor command | **Done** — `python main.py --doctor`, checks as data, exit 1 on a real problem. **`--fix`** installs what is missing, which is where `core/installer.py` finally became reachable code |
-| 28 | mypy errors module-by-module | **Partly** — a curated list of 32 modules is a hard gate (they are clean with no suppressions); the whole app is 533 errors, almost all missing annotations in deliberately dynamic code. 🔨 grow the list one module at a time |
+| 28 | mypy errors module-by-module | **Done** — the curated list is 127 of the app's 160 modules (was 32), clean under the full rule set with no suppressions; the remaining 374 errors live in 29 files (the Qt view, `main.py`, the DOTS servers, the biggest agents). Footer, tests and CI all describe the same policy |
 | 29 | `print()` → `logging` | **Partly** — every error path in `core/` logs at the right level; `main.py` has one session logger; the ~430 UX prints stay prints *on purpose* (they are the console experience, and the print mirror already captures them into the log file) |
 | 30 | Tool-output size caps | **Done** — one backstop at the dispatch point (`core/tool_output.py`, 40,000 chars) plus a note in the result saying how much was dropped and what to ask for instead. The user is told too. `tests/test_tool_output.py` |
 
@@ -1179,6 +1179,34 @@ Found while doing the above; each one is a real defect, not a tidy-up.
 | `tests/test_tool_tiers.py` installed a fake `ui` module into `sys.modules` for the whole session — it shadowed the real package for later tests | Removed (no longer needed after the lazy imports); a stand-in class replaced it |
 | `core/taskstore.create()` did `int(cur.lastrowid)` on a value that can be `None` | Raises instead of returning run id 0 |
 | `core/audit_chain.audit_log()` had an implicit-Optional parameter | Annotated |
+
+### What the type pass actually caught
+
+The curated list started as a way to make `mypy` useful without a 2,600-error red
+build. Growing it from 32 to 127 modules turned out to be a *bug hunt*: an
+annotation that does not add up is usually a value that does not add up. Every
+row below is a defect the checker found, not a style preference.
+
+| Defect | What it would have done |
+|---|---|
+| `core/llm_client.py` read `e.response.status_code` off a response that is `None` when the connection never got one (4 sites) | Logging a connection failure raised `AttributeError` **in place of** the failure — the log line was the crash |
+| `actions/window_layout.py` built macOS window ids as `(name, name)` | The id was a string, so `_place()` fell back to window 0 on every window: arrangement reported "could not move them" forever on macOS |
+| `actions/weather_report.py` did `abs(feels - temp)` where both come from optional API fields | `TypeError` on the one case the comparison exists for (a missing "feels like") |
+| `actions/procman.py` appended a bare pid and a formatted string to the same `refused` list | The reply read `refused: [12, '99 (Access denied)']` — the reader cannot tell which pid was which |
+| `actions/computer_settings.py` declared `ACTION_MAP: dict[str, callable]` | `callable` is the builtin function, not a type; the map was also the only record of which actions are reversible |
+| `actions/game_updater.py` had a local variable named `platform` inside the action handler | It shadowed the module import; the next `platform.system()` in that function would have been an `AttributeError` |
+| `os.startfile`, `subprocess.CREATE_NO_WINDOW`, `DETACHED_PROCESS` used unguarded in 5 files | Windows-only attributes. `ui/app.py` would raise off Windows if that path was reached; the other four had four copies of the same guard |
+| `memory/graph.py` did `int(cur.lastrowid)` | Optional in the stub; now `_rowid()` states the invariant instead |
+| `actions/atspi.py` typed the accessibility tree's `children` list as `str` | An incorrect model of the tree that a reader would have trusted |
+| `actions/weather_report.py` passed possibly-`None` coordinates into `_forecast(lat: float, lon: float)` | `TypeError` instead of "could not find coordinates for X" |
+| `wellbeing.py`/`scanner.py`/`viseme.py`/`dev_loop.py`/`mcp.py` each reused one name for two types in one function (`last`, `sz`, `v`, `stop`, `spec`) | Harmless today, a trap for the next edit — the type checker is what noticed |
+
+The one place this pass added a *policy* rather than a fix is
+`follow_imports = "silent"` (see `pyproject.toml`): it limits where mypy reports
+so that one error in `dots/store.py` cannot evict every listed module that
+imports it. Nothing is hidden by it — the warn-only CI job still runs mypy
+across the whole tree and prints the true count — and
+`tests/test_project_hygiene.py` asserts both halves of that sentence.
 
 ## 📊 Part 10: Appendix — Raw Evidence
 

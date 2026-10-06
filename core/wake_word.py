@@ -184,7 +184,10 @@ class WakeWordDetector:
                 frame = self._queue.get()
                 if frame is None or not self._running:
                     break
-                scores = self._model.predict(np.asarray(frame, dtype=np.int16))
+                model = self._model
+                if model is None:            # stop() while a frame was queued
+                    break
+                scores = model.predict(np.asarray(frame, dtype=np.int16))
                 score = 0.0
                 if isinstance(scores, dict):
                     # match the jarvis model regardless of exact key suffix

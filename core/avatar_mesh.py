@@ -85,7 +85,7 @@ def _load_obj(path: Path):
 
 def _boundary_loop(faces: np.ndarray) -> np.ndarray:
     """Ordered ring of vertices along the open border of a triangle mesh."""
-    seen = collections.Counter()
+    seen: collections.Counter[tuple[int, int]] = collections.Counter()
     for a, b, c in faces:
         for e in ((a, b), (b, c), (c, a)):
             seen[(min(e), max(e))] += 1

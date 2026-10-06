@@ -842,7 +842,7 @@ def _suggest(now: float | None = None) -> str:
 
 # ── tool entry ───────────────────────────────────────────────────────────────
 
-def manage_rules(parameters: dict = None, player=None, session_memory=None) -> str:
+def manage_rules(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "list")).lower().strip()
 

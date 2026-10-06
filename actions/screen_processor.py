@@ -68,13 +68,19 @@ _IMG_MAX_H = 720
 _JPEG_Q    = 82
 
 
+def _resample():
+    """PIL's resampling enum moved to Image.Resampling in Pillow 9.1; the
+    module-level aliases still exist but are no longer declared in the stub."""
+    return getattr(PIL.Image, "Resampling", PIL.Image).BILINEAR
+
+
 def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]:
     if not _PIL:
         return img_bytes, f"image/{source_format.lower()}"
 
     try:
         img = PIL.Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        img.thumbnail((_IMG_MAX_W, _IMG_MAX_H), PIL.Image.BILINEAR)
+        img.thumbnail((_IMG_MAX_W, _IMG_MAX_H), _resample())
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=_JPEG_Q, optimize=False)
         return buf.getvalue(), "image/jpeg"
@@ -172,7 +178,7 @@ def _capture_camera() -> tuple[bytes, str]:
     if _PIL:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = PIL.Image.fromarray(rgb)
-        img.thumbnail((_IMG_MAX_W, _IMG_MAX_H), PIL.Image.BILINEAR)
+        img.thumbnail((_IMG_MAX_W, _IMG_MAX_H), _resample())
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=_JPEG_Q)
         return buf.getvalue(), "image/jpeg"

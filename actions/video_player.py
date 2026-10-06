@@ -167,7 +167,7 @@ def _search_page(query: str) -> str:
     return f"https://www.youtube.com/results?search_query={quote_plus(query)}"
 
 
-def video_player(parameters: dict = None, response=None, player=None,
+def video_player(parameters: dict | None = None, response=None, player=None,
                  session_memory=None) -> str:
     params = parameters or {}
     action = (params.get("action") or "play").strip().lower()

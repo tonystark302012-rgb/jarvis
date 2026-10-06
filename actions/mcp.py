@@ -129,9 +129,12 @@ class _StdioClient:
 
     # -- plumbing -------------------------------------------------------
     def _send(self, payload: dict) -> None:
+        stdin = self._proc.stdin
+        if stdin is None:                    # we always pass stdin=PIPE
+            raise RuntimeError("MCP server has no stdin")
         with self._write_lock:
-            self._proc.stdin.write(json.dumps(payload) + "\n")
-            self._proc.stdin.flush()
+            stdin.write(json.dumps(payload) + "\n")
+            stdin.flush()
 
     def request(self, method: str, params: dict | None = None,
                 timeout: float | None = None) -> dict:
@@ -470,7 +473,7 @@ def _list_tools(name: str, force: bool = False) -> list[dict]:
 
 # ── handler ──────────────────────────────────────────────────────────────────
 
-def mcp(parameters: dict = None, player=None, session_memory=None) -> str:
+def mcp(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action") or "list").lower().strip()
     cfg = _load_cfg()
@@ -506,12 +509,12 @@ def mcp(parameters: dict = None, player=None, session_memory=None) -> str:
     if action == "add":
         preset = str(params.get("preset") or "").strip().lower()
         if preset:
-            spec = CATALOG.get(preset)
-            if spec is None:
+            entry = CATALOG.get(preset)
+            if entry is None:
                 return (f"No preset {preset!r} — see "
                         f"mcp action=presets ({', '.join(sorted(CATALOG))}).")
-            raw = spec["cmd"]
-            path_v = str(params.get("path") or spec.get("path") or "")
+            raw = entry["cmd"]
+            path_v = str(params.get("path") or entry.get("path") or "")
             if "{path}" in raw:
                 if not path_v:
                     return (f"Preset {preset} needs a path: "
@@ -534,12 +537,12 @@ def mcp(parameters: dict = None, player=None, session_memory=None) -> str:
             return ("Need a command or a url — e.g. "
                     "mcp action=add name=fs command='npx -y server-filesystem /tmp' "
                     "OR mcp action=add name=remote url=https://host/mcp.")
-        entry: dict
+        new_entry: dict
         if url:
             scheme = url.split("://", 1)[0].lower()
             if scheme not in ("http", "https"):
                 return "url must be http:// or https://."
-            entry = {"url": url}
+            new_entry = {"url": url}
             headers = params.get("headers")
             if isinstance(headers, str) and headers.strip():
                 try:
@@ -547,8 +550,8 @@ def mcp(parameters: dict = None, player=None, session_memory=None) -> str:
                 except ValueError:
                     return "headers must be a JSON object string."
             if isinstance(headers, dict) and headers:
-                entry["headers"] = {str(k): str(v)
-                                    for k, v in headers.items()}
+                new_entry["headers"] = {str(k): str(v)
+                                        for k, v in headers.items()}
         else:
             try:
                 argv = shlex.split(command)
@@ -556,8 +559,8 @@ def mcp(parameters: dict = None, player=None, session_memory=None) -> str:
                 return f"Couldn't parse the command: {e}"
             if not argv:
                 return "Empty command."
-            entry = {"command": argv}
-        cfg.setdefault("servers", {})[name] = entry
+            new_entry = {"command": argv}
+        cfg.setdefault("servers", {})[name] = new_entry
         _save_cfg(cfg)
         _TOOLS.pop(name, None)
         # verify it actually speaks MCP before claiming success

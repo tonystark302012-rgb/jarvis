@@ -13,7 +13,7 @@ from __future__ import annotations
 from core import activity
 
 
-def mission_control(parameters: dict = None, player=None, session_memory=None) -> str:
+def mission_control(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "timeline")).lower().strip()
 

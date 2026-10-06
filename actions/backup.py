@@ -62,7 +62,7 @@ def _snapshot_db(db: Path, dest_dir: Path) -> Path:
         return dest
 
 
-def create(parameters: dict = None) -> str:
+def create(parameters: dict | None = None) -> str:
     base = _base_dir()
     out_dir = _backup_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -96,7 +96,7 @@ def create(parameters: dict = None) -> str:
             "NOTE: contains API keys — store it like a password export.")
 
 
-def list_backups(parameters: dict = None) -> str:
+def list_backups(parameters: dict | None = None) -> str:
     out_dir = _backup_dir()
     rows = sorted(out_dir.glob("jarvis-backup-*.zip"),
                   key=lambda p: p.stat().st_mtime, reverse=True)
@@ -113,7 +113,7 @@ def list_backups(parameters: dict = None) -> str:
     return "\n".join(lines)
 
 
-def restore(parameters: dict = None) -> str:
+def restore(parameters: dict | None = None) -> str:
     p = parameters or {}
     which = str(p.get("which") or "").strip()
     if not which:
@@ -141,7 +141,7 @@ def restore(parameters: dict = None) -> str:
             "need over your live folders (nothing was overwritten).")
 
 
-def backup(parameters: dict = None, player=None, session_memory=None) -> str:
+def backup(parameters: dict | None = None, player=None, session_memory=None) -> str:
     action = str((parameters or {}).get("action") or "create").strip().lower()
     if action in ("create", "new", "run"):
         return create(parameters)

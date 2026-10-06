@@ -355,7 +355,10 @@ class TestMypyConfig:
 
     def test_the_list_is_worth_checking(self):
         files = self._files()
-        assert len(files) >= 25
+        # It is a growth story, not a trophy: 32 modules at the first commit,
+        # 127 after the P3-28 pass. The floor is here so it cannot quietly
+        # shrink back.
+        assert len(files) >= 120, f"the curated list shrank to {len(files)}"
         # the foundation modules must be on it
         for f in ("core/paths.py", "core/version.py", "core/logging_setup.py"):
             assert f in files
@@ -366,8 +369,25 @@ class TestMypyConfig:
         mypy = cfg["tool"]["mypy"]
         # ignoring missing third-party stubs is a policy, not a suppression
         assert mypy.get("ignore_missing_imports") is True
-        for key in ("disable_error_code", "follow_imports"):
+        for key in ("disable_error_code", "ignore_errors", "warn_no_return",
+                    "check_untyped_defs"):
             assert key not in mypy, f"{key} would weaken the gate"
+
+    def test_scope_is_narrowed_but_nothing_is_hidden(self):
+        """`follow_imports = "silent"` limits *where* mypy reports, not *what*
+        it allows: the listed modules are still checked under the full rule
+        set, and the whole tree is still measured by the warn-only CI job (see
+        TestWarnOnlyChecksAreLabelled). Allowing it is what lets the list grow —
+        with the default, one error in dots/store.py evicts every listed module
+        that imports it.
+        """
+        import tomllib
+        cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        assert cfg["tool"]["mypy"].get("follow_imports") == "silent"
+        whole = (ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8")
+        block = whole.split("- name: Types (mypy — whole repo", 1)[1]
+        assert "core actions dashboard" in block.split("- name:", 1)[0], \
+            "the repo-wide count is what keeps `silent` honest"
 
     def test_the_curated_list_is_actually_clean(self):
         if not (ROOT / ".venv" / "bin" / "mypy").exists():

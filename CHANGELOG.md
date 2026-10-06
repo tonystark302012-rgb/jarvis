@@ -10,6 +10,38 @@ entries are written as changes land.
 
 ## Unreleased
 
+**Types as a bug hunt: the curated mypy list went from 32 modules to 127.** The
+list exists so `mypy` can be a gate without a 2,600-error red build, and growing
+it turned out to find real defects rather than annotations that needed adding:
+
+* `core/llm_client.py` read `e.response.status_code` on a `None` response (4
+  sites) — logging a connection failure could raise in place of the failure;
+* `actions/window_layout.py` built macOS window ids as `(name, name)`, so the id
+  was a string and `_place()` fell back to window 0 on every window: arranging
+  windows on macOS never worked and reported that it could not move them;
+* `actions/weather_report.py` compared `feels - temp` where both come from
+  optional API fields, and passed possibly-`None` coordinates into a `float`
+  parameter;
+* `actions/procman.py` put a bare pid and a formatted string in the same
+  `refused` list, so the reply could read `refused: [12, '99 (Access denied)']`;
+* `actions/computer_settings.py` declared `ACTION_MAP: dict[str, callable]` —
+  the builtin function, not a type;
+* `actions/game_updater.py` shadowed the `platform` module with a local
+  variable inside the action handler;
+* `os.startfile`, `subprocess.CREATE_NO_WINDOW` and `DETACHED_PROCESS` are
+  Windows-only and were used in five files with four copies of the same
+  platform guard — now one definition in `config.py` (`WIN_HIDE`,
+  `CREATE_NO_WINDOW`, `DETACHED_PROCESS`), with `getattr` on the flag;
+* `actions/atspi.py` typed the accessibility tree's `children` list as `str`;
+* `memory/graph.py` did `int(cur.lastrowid)` on an Optional — now a `_rowid()`
+  helper that says why it cannot be `None` there.
+
+The remaining 374 errors are in 29 files (the Qt view, `main.py`, the DOTS
+servers, the biggest agents) and are measured, not hidden: CI still prints that
+number on every run. One policy came out of this — `follow_imports = "silent"`,
+which limits where mypy *reports* without relaxing any rule, so that a single
+error in `dots/store.py` cannot evict every listed module that imports it.
+
 **One cap on tool results.** The caps inside the tools ranged from 2,500 to
 40,000 characters and a number of tools had none at all — `file_processor` on a
 large document, `data_query` over a wide table. One such call could spend most

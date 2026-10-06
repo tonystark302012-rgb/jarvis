@@ -203,7 +203,7 @@ def _fmt_msg(summary: dict) -> str:
 
 # ── actions ──────────────────────────────────────────────────────────────────
 
-def _list(kind: str, search: str, limit: int) -> str:
+def _list(kind: str, search: str, limit: int | None = None) -> str:
     need = _need_setup()
     if need:
         return need
@@ -304,7 +304,7 @@ def _send(to: str, subject: str, body: str) -> str:
         return f"Gmail send failed: {e}"
 
 
-def _search(query: str, limit: int) -> str:
+def _search(query: str, limit: int | None = None) -> str:
     need = _need_setup()
     if need:
         return need

@@ -152,7 +152,7 @@ def _show(player, region: str, body: str) -> None:
         pass
 
 
-def region_ocr(parameters: dict = None, player=None, session_memory=None) -> str:
+def region_ocr(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     region = str(params.get("region") or "center").strip()
     mode = "describe" if str(params.get("mode") or "text").lower() in (

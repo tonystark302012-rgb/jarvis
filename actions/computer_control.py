@@ -8,10 +8,7 @@ import shutil
 import string
 import subprocess
 
-if platform.system() == "Windows":
-    _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
-else:
-    _WIN_HIDE: dict = {}
+from config import WIN_HIDE as _WIN_HIDE      # no console flash on Windows
 import time
 import random
 from pathlib import Path

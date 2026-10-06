@@ -11,7 +11,7 @@
 > local-VLM provider (Ollama); MCP Streamable HTTP; world_view (NASA
 > GIBS + OSM); screen_mirror as a thin tool over the EXISTING dashboard
 > mirror (duplicate rejected — see §2.8). Gates at final: **693/693**,
-> ruff clean, mypy clean on the curated list, 50 actions discovered.
+> ruff clean, mypy clean on the curated module list (127 of 160 modules), 50 actions discovered.
 > §4 backlog below now holds only what is deliberately still open.
 > Everything here maps to real code paths (file:line cited where it matters).
 > Nothing in this document is a prototype: each subsystem ships implemented

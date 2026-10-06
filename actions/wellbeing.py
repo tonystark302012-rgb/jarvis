@@ -160,8 +160,8 @@ def _report(since_unix: float, label: str, limit: int = 10) -> str:
     lines = [f"Browser wellbeing ({label}) — {len(agg)} site(s), "
              f"{total} visit(s):"]
     for i, (dom, v) in enumerate(ranked[:limit], 1):
-        last = time.strftime("%H:%M", time.localtime(v["last"]))
-        lines.append(f"{i}. {dom} — {v['n']} visit(s), last seen {last}")
+        seen_at = time.strftime("%H:%M", time.localtime(v["last"]))
+        lines.append(f"{i}. {dom} — {v['n']} visit(s), last seen {seen_at}")
     lines.append("(Visit counts, not minutes: browsers don't store dwell "
                  "time.)")
     top = ranked[0][0]
@@ -173,7 +173,7 @@ def _report(since_unix: float, label: str, limit: int = 10) -> str:
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def wellbeing(parameters: dict = None, player=None,
+def wellbeing(parameters: dict | None = None, player=None,
               session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "today")).lower().strip()

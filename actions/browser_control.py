@@ -733,7 +733,7 @@ class _BrowserSession:
         base = _SEARCH_ENGINES.get(engine.lower(), _SEARCH_ENGINES["google"])
         return await self.go_to(base + query.replace(" ", "+"))
 
-    async def click(self, selector: str = None, text: str = None) -> str:
+    async def click(self, selector: str | None = None, text: str | None = None) -> str:
         """Click with SELF-HEALING locators: if the primary css/text
         misses, walk a fallback ladder (last css segment, id/class
         attribute selectors, visible-text contains, xpath) and report
@@ -771,7 +771,7 @@ class _BrowserSession:
                 + (f"; first error: {errors[0][:200]}" if errors else "."))
 
 
-    async def type_text(self, selector: str = None, text: str = "",
+    async def type_text(self, selector: str | None = None, text: str = "",
                         clear_first: bool = True) -> str:
         """Type into a field — same self-healing ladder as click(): a
         stale selector degrades through fallbacks instead of failing."""
@@ -953,7 +953,7 @@ class _BrowserSession:
             return "Tab closed."
         return "No active tab to close."
 
-    async def screenshot(self, path: str = None) -> str:
+    async def screenshot(self, path: str | None = None) -> str:
         page = await self._get_page()
         try:
             save_path = path or str(Path.home() / "Desktop" / "jarvis_screenshot.png")
@@ -1075,7 +1075,7 @@ class _SessionRegistry:
 _registry = _SessionRegistry()
 
 def browser_control(
-    parameters:    dict = None,
+    parameters:    dict | None = None,
     response=None,
     player=None,
     session_memory=None,

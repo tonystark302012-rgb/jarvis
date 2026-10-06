@@ -65,7 +65,7 @@ def _parse_perms(raw) -> dict:
     return out
 
 
-def pc(parameters: dict = None, player=None, session_memory=None) -> str:
+def pc(parameters: dict | None = None, player=None, session_memory=None) -> str:
     import json
     params = parameters or {}
     action = str(params.get("action") or "list").lower().strip()

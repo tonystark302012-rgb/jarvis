@@ -34,7 +34,7 @@ try:
     import duckdb as _duckdb
     _OK = True
 except ImportError:                                    # pragma: no cover
-    _duckdb = None
+    _duckdb = None                         # type: ignore[assignment]
     _OK = False
 
 _MAX_ROWS = 500
@@ -136,7 +136,7 @@ def _maybe_chart(cols: list[str], rows: list, title: str) -> str:
         return ""
 
 
-def data_query(parameters: dict = None, player=None, session_memory=None) -> str:
+def data_query(parameters: dict | None = None, player=None, session_memory=None) -> str:
     params = parameters or {}
     if not _OK:
         return ("DuckDB isn't installed — pip install duckdb (one MIT "
@@ -188,8 +188,9 @@ def data_query(parameters: dict = None, player=None, session_memory=None) -> str
             rows = con.execute(
                 f"SELECT column_name, column_type FROM "
                 f"(DESCRIBE SELECT * FROM {reader}('{qpath}'))").fetchall()
-            cnt = con.execute(
-                f"SELECT COUNT(*) FROM {reader}('{qpath}')").fetchone()[0]
+            row = con.execute(
+                f"SELECT COUNT(*) FROM {reader}('{qpath}')").fetchone()
+            cnt = row[0] if row else 0
             return (f"{Path(target).name}: {cnt} row(s)\n" +
                     _fmt_table(["column", "type"], rows))
 

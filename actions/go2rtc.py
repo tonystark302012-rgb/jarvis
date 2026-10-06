@@ -147,7 +147,7 @@ def _parse_streams(raw) -> list[str]:
 
 # ── tool ────────────────────────────────────────────────────────────────────
 
-def go2rtc(parameters: dict = None, player=None,
+def go2rtc(parameters: dict | None = None, player=None,
            session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "status")).lower().strip()
