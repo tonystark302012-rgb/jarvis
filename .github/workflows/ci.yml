@@ -43,7 +43,13 @@ jobs:
         run: python -m compileall -q actions core dashboard memory ui config main.py ui.py setup.py
 
       - name: Tests
-        run: python -m pytest tests/ -q --junitxml=junit.xml | tee pytest.log
+        # `set -o pipefail` is load-bearing, not decoration. Without it bash
+        # takes the exit status of the LAST command in the pipeline, and `tee`
+        # only ever fails if it cannot write its file — so a red suite produced
+        # a green job. This step must be the thing that fails the build.
+        run: |
+          set -o pipefail
+          python -m pytest tests/ -q --junitxml=junit.xml | tee pytest.log
 
       - name: Surface failing tests as annotations
         if: failure()
