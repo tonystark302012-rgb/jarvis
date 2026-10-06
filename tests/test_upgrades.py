@@ -818,3 +818,135 @@ class TestLLMFreeRungs:
         from core import llm_client as m
         assert m._DEFAULTS["llm_provider"] == "ollama"
         assert m.get_llm_preset() == "" or True   # reads live config
+
+
+# ── P0-2: every external command in computer_settings.py has a deadline ───────
+# The Windows branches set `timeout=5` but the macOS/Linux ones did not, and
+# these run inside a model turn — a wedged `pactl`/`osascript`/`xrandr` hung the
+# whole tool call. They now all route through one `_run` wrapper; these tests
+# keep it that way, because the failure mode is invisible until a user's
+# machine happens to wedge a helper binary.
+
+class TestComputerSettingsTimeouts:
+    def _mod(self):
+        from actions import computer_settings
+        return computer_settings
+
+    def test_no_call_site_bypasses_the_wrapper(self):
+        """A raw `subprocess.run` in this module means a command with no
+        deadline — exactly the bug this replaced."""
+        src = (Path(__file__).resolve().parent.parent
+               / "actions" / "computer_settings.py").read_text(encoding="utf-8")
+        lines = src.split("\n")
+        start = next(i for i, l in enumerate(lines) if l.startswith("def _run("))
+        stray = [i + 1 for i, l in enumerate(lines)
+                 if "subprocess.run(" in l
+                 and i > start
+                 and "subprocess.run(args" not in l]
+        assert stray == [], f"unbounded subprocess call at line(s) {stray}"
+
+    def test_wrapper_injects_a_default_deadline(self, monkeypatch):
+        m = self._mod()
+        seen = {}
+        import subprocess as sp
+
+        def fake_run(args, **kw):
+            seen.update(kw)
+            return sp.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        m._run(["echo", "hi"])
+        assert "timeout" in seen and seen["timeout"] == m._SUBPROCESS_TIMEOUT
+
+    def test_explicit_timeout_still_wins(self, monkeypatch):
+        m = self._mod()
+        seen = {}
+        import subprocess as sp
+
+        def fake_run(args, **kw):
+            seen.update(kw)
+            return sp.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        m._run(["echo", "hi"], timeout=0.5)
+        assert seen["timeout"] == 0.5
+
+    def test_timeout_returns_a_failed_result_not_an_exception(self, monkeypatch):
+        """Callers here all check `returncode` / read `stdout`, so a timeout
+        must look like any other failed command rather than a new crash."""
+        m = self._mod()
+
+        def fake_run(args, **kw):
+            raise m.subprocess.TimeoutExpired(args, kw.get("timeout"))
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        r = m._run(["sleep", "999"])
+        assert r.returncode != 0
+        assert r.stdout == ""
+        assert "timed out" in r.stderr
+
+    def test_a_real_hang_is_cut_short(self):
+        """End-to-end proof: a command that would run for five minutes comes
+        back in about the configured deadline."""
+        m = self._mod()
+        if m._SUBPROCESS_TIMEOUT > 15:
+            pytest.skip("deadline too long for a fast test")
+        t0 = time.time()
+        r = m._run([sys.executable, "-c", "import time; time.sleep(300)"])
+        elapsed = time.time() - t0
+        assert r.returncode != 0
+        assert elapsed < m._SUBPROCESS_TIMEOUT + 5
+
+    def test_a_normal_command_is_untouched(self):
+        m = self._mod()
+        r = m._run([sys.executable, "-c", "print('ok')"],
+                   capture_output=True, text=True)
+        assert r.returncode == 0
+        assert r.stdout.strip() == "ok"
+
+
+# ── P0-3: the README's skill count must match the tree ───────────────────────
+# The README claimed "eighteen self-describing skills — counted by CI" against
+# a tree with 76 declarations, because nothing could regenerate the number.
+# `tools/count_tools.py` is now the source of truth; this keeps the two from
+# drifting apart again.
+
+class TestSkillCountIsHonest:
+    def _counts(self):
+        import importlib.util
+        tool = (Path(__file__).resolve().parent.parent
+                / "tools" / "count_tools.py")
+        spec = importlib.util.spec_from_file_location("count_tools", tool)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)                       # noqa: SLF001
+        from core.action_loader import discover_actions
+        reg = discover_actions(Path("actions").resolve())
+        files, _without = mod.files_declaring_tool(Path("actions").resolve())
+        return files, reg.get_tool_declarations()
+
+    def test_file_count_matches_registry_count(self):
+        """Every file that declares or re-exports a TOOL must actually be
+        registered. A mismatch means a skill exists on disk but the model
+        never learns about it — a silent, invisible failure."""
+        files, decls = self._counts()
+        assert len(files) == len(decls), (
+            f"{len(files)} files declare a TOOL but {len(decls)} are "
+            "registered — one was dropped at discovery")
+
+    def test_names_are_unique(self):
+        _files, decls = self._counts()
+        names = [d.get("name") for d in decls]
+        dupes = {n for n in names if names.count(n) > 1}
+        assert not dupes, f"duplicate tool names reach the model: {dupes}"
+
+    def test_readme_quotes_the_real_number(self):
+        """If the README states a count, it has to be the measured one."""
+        import re
+        _files, decls = self._counts()
+        readme = (Path(__file__).resolve().parent.parent
+                  / "README.md").read_text(encoding="utf-8")
+        stated = re.search(r"ships \*\*(\d+)\*\* self-describing skills", readme)
+        if not stated:
+            pytest.skip("README no longer states a skill count")
+        assert int(stated.group(1)) == len(decls), (
+            f"README says {stated.group(1)} skills, the tree has {len(decls)}")
