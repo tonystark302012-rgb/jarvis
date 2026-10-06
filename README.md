@@ -462,7 +462,8 @@ The suite covers the security invariants: no `shell=True` in `open_app`/`dev_age
 
 ```
 jarvis/
-├── main.py                   # Core loop — Gemini Live session, audio I/O, viseme extraction, tool dispatch
+├── main.py                   # Core loop — the Live session, its state machines and the run loop
+│                             #   (audio I/O, tool dispatch and the relays live in core/, as mixins)
 ├── ui/                       # PyQt6 HUD v2 — app.py is the window, display_panel.py the screen
 ├── bootstrap.py              # OS-aware installer (skips wrong-OS dependencies, checks your Python)
 ├── pyproject.toml            # project metadata + ruff/mypy/pytest configuration
@@ -547,6 +548,10 @@ jarvis/
 │   ├── undo.py               # One shared undo stack — actions register how to reverse themselves
 │   ├── confirm.py            # Irreversible-action gate — the token is issued by the UI, not the model
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name
+│   ├── audio_pcm.py          # Audio format constants + PCM→level/viseme/transcript helpers
+│   ├── audio_loop.py         # Mic in, Live session, speakers out — the audio third of the session
+│   ├── tool_dispatch.py      # Batch scheduler, toolbox router, the single tool entry point
+│   ├── wake_and_relay.py     # Wake state machine + phone/dashboard relays
 │   ├── display.py            # Qt-free content panel renderer (unit-tested)
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader

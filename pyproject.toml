@@ -112,6 +112,8 @@ files = [
   "core/activity.py",
   "core/agent_runtime.py",
   "core/audio_devices.py",
+  "core/audio_loop.py",
+  "core/audio_pcm.py",
   "core/audit_chain.py",
   "core/autonomy.py",
   "core/avatar.py",

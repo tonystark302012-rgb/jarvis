@@ -3409,12 +3409,10 @@ class TestEmotionActing:
         assert "def _apply_emotion" in src
         assert "def set_emotion(self, emotion: str)" in src
 
-    def test_main_tags_before_logging(self):
-        src = Path("main.py").read_text(encoding="utf-8")
-        i_tag = src.index("tag_and_clean(")
-        i_log = src.index('self.ui.write_log(f"{self._asst_name}: {full_out}")')
-        assert i_tag < i_log               # clean first, then log
-        assert "self.ui.set_emotion(_e)" in src
+    # `test_main_tags_before_logging` lived here as a grep over main.py. The
+    # receive loop it was reading moved to core/audio_loop.py (P2-15) and the
+    # order it cared about is now asserted by running that loop over a fake
+    # session: tests/test_audio_loop.py::TestTheReceiveLoop.
 
 
 class TestEvalAB:

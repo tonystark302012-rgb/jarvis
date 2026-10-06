@@ -29,8 +29,11 @@
 │   ui/ (PyQt HUD)    ·  dashboard/ (phone: FastAPI + WS)  ·  voice    │
 ├──────────────────────────────────────────────────────────────────────┤
 │ SESSION                                                               │
-│   main.py — Gemini Live session, audio I/O, barge-in (EchoGuard),     │
-│   presence gate, proactive loop, event engine, rules tick (30s)       │
+│   main.py — Gemini Live session, run loop, presence gate, proactive   │
+│   loop, event engine, rules tick (30s). Its three mixes:              │
+│     core/tool_dispatch.py  — batch scheduler + tool entry point       │
+│     core/audio_loop.py     — mic/speakers, barge-in (EchoGuard)       │
+│     core/wake_and_relay.py — wake state machine + phone relays        │
 ├──────────────────────────────────────────────────────────────────────┤
 │ TOOL PLANE                                                            │
 │   ActionRegistry (core/action_loader) — 76 bundled tools (TOOL dicts) │
@@ -262,7 +265,8 @@ def call_native(full_name: str, args: dict) -> str
     # → tools/call → concatenate TextContent blocks → honest error strings
 ```
 
-main.py wiring (both source-indexed in tests, since main isn't importable
+main.py wiring (the session is constructed for real in tests now — see
+tests/test_main_behavior.py — so only the task-group starts are source-indexed
 without PyQt):
 
 * `_build_config`: `_all_decls = base + actions + plugins + native_declarations()`,
@@ -476,7 +480,7 @@ tests). What is honestly still open:
 1. Additive dataclass fields only (`cancelled: bool = False`) — old tests
    must pass untouched.
 2. Every new public function gets failure-path tests, not just happy path.
-3. main.py changes are paired with source-index tests (PyQt absent in CI).
+3. session changes are paired with tests that run the object (PyQt absent in CI).
 4. No new required dependencies. Optional imports degrade with instructions.
 5. LLM-shaped seams (`planner`, `replan`, `_decide`) are injectable callables —
    tests script exact JSON, never the network.

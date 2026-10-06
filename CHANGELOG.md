@@ -10,6 +10,31 @@ entries are written as changes land.
 
 ## Unreleased
 
+**The audio third of `JarvisLive` is out, and `main.py` is under 1,900 lines.**
+`core/audio_loop.py` now holds the microphone pump, the Live-session receive
+loop and the speaker pump — the last three methods that kept the class from
+being a plain coordinator. `core/audio_pcm.py` holds what they are built on:
+the format constants (16 kHz in, 24 kHz out, one byte per sample) and the pure
+helpers — loudness from a PCM block, a viseme schedule from the same samples,
+transcript cleanup, the repeat-chunk test that stops a tool-using turn from
+printing its answer twice.
+
+The piece that made this move possible is a fake `sounddevice`
+(`tests/test_audio_loop.py`, 21 tests): a stream that records every byte handed
+to it, a device that raises the moment it opens, a session that yields scripted
+messages. That is enough to assert the things a grep never could — that the
+reply reaches the speaker, that a turn brackets itself `SPEAKING` → `LISTENING`,
+that a chosen-but-broken device falls back with the right log line instead of
+eating the audio, and that a reply measured at 100 ms is sliced in half so a
+barge-in is heard at once rather than after the queue drains.
+
+Two defects fell out of writing those tests. The assistant's own name defaulted
+to `"JARVI    S"` before the first session had read the config, which is what
+early console lines said. And `_pcm_level(None)` — rubbish input — returned
+**maximum** loudness and full-size mouth shapes, because `np.asarray(None)` is
+NaN and every NaN comparison is false; it now returns silence, as its docstring
+already claimed.
+
 **The device picker has tests now.** `core/audio_devices.py` reduces
 `sounddevice`'s raw list — one entry per (device × host API), 41 rows on a
 normal Windows machine for what the OS shows as 8 — down to the list the sound
