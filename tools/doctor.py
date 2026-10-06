@@ -14,6 +14,9 @@ DESIGN
     fix)`. Nothing here raises, nothing imports the app (no Qt, no audio), and
     every optional component reports as optional. Required-vs-optional is the
     only thing that decides the exit code.
+
+    `--fix` acts on the report by installing the missing packages through
+    core/installer.py, which is otherwise unreachable code.
 """
 from __future__ import annotations
 
@@ -205,9 +208,62 @@ def format_report(checks: list[tuple[str, str, str, str]]) -> str:
     return "\n".join(lines)
 
 
+def _missing_pip_names(checks: list[tuple[str, str, str, str]]) -> list[str]:
+    """The pip names behind the missing imports, in report order.
+
+    The check tuple carries a pip install hint already; scissoring it back out
+    of prose is how advice and action drift apart. The mapping is from the one
+    place that knows it (the dependency tables above).
+    """
+    # tuples are (import name, pip name, why); the report shows the pip name,
+    # which is the one a user can act on
+    labels = {label: label for _, label, _ in CORE_DEPS + OPTIONAL_DEPS}
+    out: list[str] = []
+    for status, name, _detail, _fix in checks:
+        if status in (FAIL, WARN) and name in labels:
+            out.append(labels[name])
+    return out
+
+
+def fix(checks: list[tuple[str, str, str, str]]) -> int:
+    """Install the missing packages — the action behind the advice.
+
+    This is where core/installer.py is used from. It was written as "called
+    automatically on first launch", which stopped being true at some point and
+    left ~200 lines of unreachable code plus a promise the app did not keep
+    (offline transcription needs faster-whisper, which nothing installed).
+    Installing packages is not something to do behind the user's back: it
+    happens when they ask for `--fix`, and it says what it is doing.
+    """
+    missing = _missing_pip_names(checks)
+    if not missing:
+        print("Nothing to install — every dependency the doctor knows about is present.")
+        return 0
+    from core.installer import install_missing          # noqa: PLC0415
+    print(f"Installing {len(missing)} missing package(s): {', '.join(missing)}")
+    # the doctor's table is the one that knows which import each pip name
+    # provides (paho-mqtt → paho.mqtt, beautifulsoup4 → bs4)
+    names = {pip: imp for imp, pip, _why in CORE_DEPS + OPTIONAL_DEPS}
+    failures = install_missing(missing, log=lambda m: print("  " + m),
+                               import_names=names)
+    if failures:
+        print(f"\n{len(failures)} package(s) could not be installed: "
+              f"{', '.join(failures)}")
+        print("Everything else will work; the tools that need these will say so.")
+        return 1
+    print("\nDone. Run the doctor again to confirm.")
+    return 0
+
+
 def main(argv: "list[str] | None" = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
     checks = run_checks()
     print(format_report(checks))
+    if "--fix" in args:
+        print()
+        return fix(checks)
+    if any(c[0] == FAIL for c in checks):
+        print("\nRun with --fix to install what is missing.")
     return 1 if any(c[0] == FAIL for c in checks) else 0
 
 

@@ -4,6 +4,12 @@ Text-to-Speech engines for MARK XL.
 EdgeTTS     – free Microsoft TTS (internet required, no API key)
 Kokoro      – fully offline neural TTS (~330 MB model)
 ElevenLabs  – cloud API (API key required, best quality)
+
+NOT on the Live audio path. In a normal session JARVIS speaks with the audio
+frames Gemini Live sends back, so nothing calls create_tts_player() today — this
+is self-contained code with a tested contract waiting for the one thing it is
+for: offline/local voice, where there is no Live stream to speak for it. See
+PROJECT_ANALYSIS.md P1-10; the tests are in tests/test_tts.py.
 """
 from __future__ import annotations
 
