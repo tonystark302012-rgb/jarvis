@@ -20,18 +20,96 @@ Neeche jo analysis hai wo **audit record** hai — kya mila, kaise mila, evidenc
 | 5 | 39 subprocess calls bina timeout | ✅ **FIXED** | Ek `_run()` wrapper — deadline omit karna impossible |
 | 6 | README ke galat numbers (18 / 12,907) | ✅ **FIXED** | 76 skills + real 72,263 chars, aur `tools/count_tools.py` se regenerate hota hai |
 
+**Aur P1 ka sabse bada item bhi ho gaya — lazy tool loading:**
+
+| # | Kaam | Status | Kya badla |
+|---|---|---|---|
+| 7 | **~23,400 tokens har connection pe** | ✅ **FIXED** | Core tier (16 tools) + `toolbox` router; **~15,250 tokens saved, 66% chhota** |
+| 8 | `config` naam opencv se shadow ho sakta tha | ✅ **FIXED** | `main.py` app root ko `sys.path[0]` pe pin karta hai |
+
 **Verification:**
 ```
 ruff check .                    → All checks passed!
-pytest tests/                   → 1106 passed  (start me 1084 the — +22 naye tests)
+pytest tests/                   → 1140 passed  (start me 1084 the — +56 naye tests)
 feature_audit.py                → 19/19 green
+tools/count_tools.py            → before/after numbers generate karta hai
 ```
 Sirf **2 failures** bache hain aur wo **is sandbox ki kami** hai (`libGL.so.1` missing) — CI me green aate hain.
 
-**Naye regression tests (~22)** jo in bugs ko wapas aane se rokenge:
+**Naye regression tests (~56)** jo in bugs ko wapas aane se rokenge:
 - `tests/test_session_revocation.py` — 13 tests: revoke HTTP layer pe prove karta hai, TTL enforce hota hai, HUD token bachta hai, state free hoti hai
 - `tests/test_upgrades.py::TestComputerSettingsTimeouts` — 6 tests: koi call site wrapper bypass na kare
 - `tests/test_upgrades.py::TestSkillCountIsHonest` — 3 tests: README ka number aur tree ka count match karein
+- `tests/test_upgrades.py::TestConfigNameIsNotShadowed` — 3 tests: `config` naam pe opencv ka claim
+- `tests/test_tool_tiers.py` — **34 tests**: router, search, `plan_run` validation, aur **sabse important** — routed call autonomy gate/activity timeline se guzarta hai (tiering sandbox bypass na ban jaaye)
+
+---
+
+### 🆕 P1 FIX #7 — Lazy tool loading (sabse bada win)
+
+**Problem jo mila:** README kehta tha "declarations dropped to 12,907 characters". Maine poora payload measure kiya:
+
+```
+tool declarations (76 tools JSON)      : 72,263 chars
+capabilities list in system prompt     : 12,024 chars   ← ye duplicate koi count nahi karta tha!
+core/prompt.txt                        :  9,374 chars
+─────────────────────────────────────────────────────
+TOTAL                                  : 93,661 chars ≈ 23,415 tokens
+```
+
+Yani **~23,400 tokens** har connection pe — ek bhi shabd bolne se pehle. Aur `_describe_tools()` wahi 76 descriptions **prompt me doosri baar** bhej raha tha.
+
+**Kyun lazy loading hi karna pada:** Live API `AsyncSession` me sirf `send_client_content`, `send_realtime_input`, `send_tool_response` hain — **tools mid-session update karne ka koi tarika nahi**. Toh "baad me declare karo" possible hi nahi. Model us tool ko call hi nahi kar sakta jiske baare me use bataya nahi gaya.
+
+**Solution:** Core tier + ek router.
+- **Core (16 tools):** open_app, web_search, weather_report, reminder, send_message, terminal, file_processor, file_controller, browser_control, computer_settings, computer_control, youtube_video, video_player, clip_history, **privacy, autonomy** + inline session tools (memory, undo, vision, monitors, shutdown)
+  - `privacy` aur `autonomy` jaan-boojhkar core me hain: ye **user ke safety levers** hain, task nahi. Safety switch ke aage router hop lagana galat hai — jis ek baar wo zaroori ho, usi baar model ko dhoondhna padega. Dono milkar sirf ~1.3 KB hain.
+- **`toolbox` router:** `action=search` se schema milta hai, `action=run` se chalta hai
+- **Prompt me sirf naam** (~940 chars, 62 naam) — taaki model ko pata ho ki capability exist karti hai
+
+**Result:**
+
+| | Declarations | Prompt copy | **Total** |
+|---|---|---|---|
+| Pehle | 72,263 ch · 76 tools | 12,024 ch | **93,661 ch ≈ 23,415 tokens** |
+| Ab | 19,813 ch · 16 + router | 3,464 ch | **32,651 ch ≈ 8,162 tokens** |
+
+**~15,252 tokens bach gaye — 66% chhota — har connection pe.**
+
+**Aur safety:** Routed call **usi `_execute_tool` me wapas jaata hai**, toh autonomy gate, confirm gate, undo stack, Mission Control timeline aur audit chain — sab **real tool name** dekhte hain. Maine ye **prove kiya**:
+```
+routed  → autonomy.gate(['make_3d']),  activity.begin(['make_3d'])
+direct  → autonomy.gate(['make_3d']),  activity.begin(['make_3d'])   ← bilkul same
+```
+Ek performance change chupke se sandbox bypass ban jaaye — ye sabse bada risk tha, aur `tests/test_tool_tiers.py::TestRoutedCallsAreNotUnsandboxed` isko guard karta hai.
+
+**Off kaise karein:** ⚙ CONTROLS → TOOLS, ya `"tool_tiering": false` config me. Naya action likhte waqt "ALL DECLARED" chahiye hota hai.
+
+---
+
+### 🆕 P1 FIX #8 — `config` naam ka collision (bonus finding)
+
+Tool tiering test karte waqt ye mila, aur ye tiering se related nahi tha:
+
+`actions/make_3d.py` ka `from config import get_base_dir` **opencv ke `cv2/config.py`** pe resolve ho gaya. Wajah: `import cv2` apni package directory `sys.path` me **append** kar deta hai, aur usme `config.py` hai — toh do top-level `config` modules ban jaate hain.
+
+```
+paths cv2 ADDED: ['.../site-packages/cv2']
+top-level 'config' candidates:
+   DIRECTORY  /home/user/jarvis/config/          (repo package — get_base_dir deta hai)
+   MODULE     .../site-packages/cv2/config.py    (opencv — kuch nahi deta)
+```
+
+`python main.py` se chalane pe repo root `sys.path[0]` hota hai, toh **aaj ye bug live nahi hai** — lekin brittle hai. Jo bhi launch path repo root ko pehle na rakhe (`-m` se run, launcher script, frozen build), wahan failure aata hai aur message bilkul unrelated hota hai:
+
+```
+NameError: name 'LOADER_DIR' is not defined
+  File ".../site-packages/cv2/config.py", line 4
+```
+
+Ye 30 modules ko affect karta hai (`from config import get_base_dir`).
+
+**Fix:** `main.py` ab script-launch pe app root ko `sys.path[0]` pe pin karta hai (import karne pe nahi — caller ka `sys.path` mutate nahi hota).
 
 > **Note:** Neeche ke bug sections jaan-boojhkar **original form me** chhode hain (line numbers aur before-state ke saath), kyunki ye woh evidence hai jisse fix justify hua. Fixes ka exact code upar table me aur git diff me hai.
 
@@ -427,6 +505,11 @@ Aur isse **do** nuksaan hote hain:
 ```
 Sabse chhota: `open_app` (419 chars) → sabse bada `file_processor` (3,071) — **7.3x gap**.
 
+> ✅ **YE FIX HO CHUKA HAI** — dekho upar "P1 FIX #7". Actual numbers ne estimate ko beat kiya:
+> plan tha ~18K → ~4K, hua **23,415 → 8,162 tokens (66% kam)**, aur asli total plan se bada nikla
+> kyunki `_describe_tools()` wahi descriptions prompt me doosri baar bhej raha tha (12,024 chars extra).
+> Neeche ka text original recommendation hai, record ke liye.
+
 **Recommended fix (biggest single win):** Lazy/tiered tool loading —
 - **Tier 1 (~15 tools):** Hamesha loaded — `open_app`, `web_search`, `weather`, `send_message`, file ops, `terminal`
 - **Tier 2:** On-demand — model ek `find_tools("3d model banao")` call kare, phir wo declarations inject hon. Ye ~18K → ~4K tokens laa dega.
@@ -802,7 +885,8 @@ Ab test me fake audio backend inject karo, aur **asli behavior test** karo — g
 ## ⚡ Part 7: PERFORMANCE ISSUES
 
 ### 1. ~22,000 tokens static payload har connection pe
-(Part 4 me detail) — **sabse bada performance win**. Lazy tool loading se ~14,000 tokens bacha sakte ho.
+(Part 4 me detail) — **sabse bada performance win, aur ab ho chuka hai** (P1 FIX #7):
+~15,252 tokens per connection bache. Ye section original analysis hai.
 
 ### 2. `core/action_loader.py` — 76 modules import at startup
 Har launch pe 76 `actions/*.py` files import hote hain (maine output me `Action loaded: X` 76 baar dekha). Ye **startup time** aur **memory** dono cost karta hai.
@@ -894,7 +978,7 @@ Hinglish strings aur English strings code me mixed hain (`'Researcher se pucho..
 
 | # | Kaam | Effort | Impact |
 |---|---|---|---|
-| 13 | **Lazy/tiered tool loading** — 18K → ~4K tokens | 1-2 din | 🚀 Biggest perf+accuracy win |
+| 13 | ~~**Lazy/tiered tool loading**~~ | ✅ **DONE** | 23.4K → 8.2K tokens (66% kam) |
 | 14 | `ui.py` split → `ui/` package (display_panel.py already start hai) | 2-3 din | Maintainability |
 | 15 | `main.py` `JarvisLive` split → connection / audio / tools | 2 din | Testability |
 | 16 | 64 source-grep tests ko behavior tests me convert karo | 3 din | Real confidence |
@@ -1028,7 +1112,7 @@ Jon log ye banaya, unhone:
 | Priority | Kaam | Time | Kyun |
 |---|---|---|---|
 | 🥇 | `revoke_devices` fix + token TTL | 1 hr | Security jhooth abhi band karo |
-| 🥈 | Lazy tool loading | 1-2 din | 18K → 4K tokens, model bhi smart hoga |
+| ✅ | ~~Lazy tool loading~~ | **HO GAYA** | 23.4K → 8.2K tokens, 66% chhota |
 | 🥉 | Audio pipeline tests + mypy in CI | 1 hafta | Confidence real ho, dikhawa nahi |
 
 **P0 sab milaake ~2 ghante ka kaam hai.** Wo kar lo, phir ye project genuinely production-grade ho jaayega.

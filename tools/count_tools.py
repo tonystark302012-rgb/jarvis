@@ -70,23 +70,58 @@ def main() -> None:
     # The number the README quotes, measured the way the model receives it.
     try:
         from core.action_loader import discover_actions
+        from core import tool_tiers as tt
         reg = discover_actions(actions_dir)
         decls = reg.get_tool_declarations()
-        payload = json.dumps(decls)
+        prompt_len = 0
+        prompt_path = ROOT / "core" / "prompt.txt"
+        if prompt_path.exists():
+            prompt_len = len(prompt_path.read_text(encoding="utf-8"))
+
         print("\n── what is actually sent on every connection ─────────────────")
         print(f"  tool declarations      : {len(decls)}")
-        print(f"  declaration JSON       : {len(payload):,} characters "
-              f"(~{len(payload) // 4:,} tokens)")
-        prompt = (ROOT / "core" / "prompt.txt")
-        if prompt.exists():
-            p = len(prompt.read_text(encoding="utf-8"))
-            print(f"  core/prompt.txt        : {p:,} characters (~{p // 4:,} tokens)")
-            print(f"  static total           : ~{(len(payload) + p) // 4:,} tokens "
-                  f"before a word is spoken")
         biggest = sorted(((len(json.dumps(d)), d.get("name", "?")) for d in decls),
                          reverse=True)[:5]
         print("  largest declarations   : "
               + ", ".join(f"{n} ({s:,}ch)" for s, n in biggest))
+
+        # The system prompt repeats every tool as a one-line capability, which
+        # is the duplicate nobody counts. Measure it the way _describe_tools
+        # renders it, not as the raw declaration JSON.
+        def capabilities(ds: list[dict]) -> int:
+            return sum(len(f"- {d['name']}: {d['description'][:150]}") + 1
+                   for d in ds)
+
+        before = len(json.dumps(decls)) + capabilities(decls) + prompt_len
+
+        core, deferred = tt.split_declarations(decls)
+        after_decls = core + [tt.router_declaration()]
+        after = (len(json.dumps(after_decls))
+                 + capabilities(core)
+                 + len(tt.hint_for_prompt(deferred))
+                 + prompt_len)
+
+        print("\n  ┌─ WITHOUT tiering (what the model used to get)")
+        print(f"  │    declarations        : {len(decls)} tools, "
+              f"{len(json.dumps(decls)):,} chars")
+        print(f"  │    capabilities list   : {capabilities(decls):,} chars "
+              f"(duplicate of the same {len(decls)} descriptions)")
+        print(f"  └    TOTAL               : {before:,} chars ≈ {before // 4:,} tokens")
+
+        print("\n  ┌─ WITH tiering (current default)")
+        print(f"  │    declared now        : {len(core)} tools + router, "
+              f"{len(json.dumps(after_decls)):,} chars")
+        print(f"  │    deferred            : {len(deferred)} tools, reached via "
+              f"`toolbox`")
+        print(f"  │    capabilities list   : {capabilities(core):,} chars + "
+              f"{len(tt.hint_for_prompt(deferred)):,} for the names")
+        print(f"  └    TOTAL               : {after:,} chars ≈ {after // 4:,} tokens")
+
+        saved = before - after
+        print(f"\n  SAVED: {saved:,} characters ≈ {saved // 4:,} tokens "
+              f"({100 - after * 100 // before}% smaller), every connection.")
+        print("  A deferred tool costs one extra round trip — `toolbox "
+              "action=search` then `action=run`.")
     except Exception as e:                       # noqa: BLE001 - measurement tool
         print(f"\n  (live registry unavailable: {e})")
 

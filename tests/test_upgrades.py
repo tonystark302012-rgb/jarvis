@@ -950,3 +950,49 @@ class TestSkillCountIsHonest:
             pytest.skip("README no longer states a skill count")
         assert int(stated.group(1)) == len(decls), (
             f"README says {stated.group(1)} skills, the tree has {len(decls)}")
+
+
+# ── P1-1: the app root must win the name `config` ────────────────────────────
+# Found while testing tool tiering, unrelated to it. This project's own package
+# is `config/` and ~30 modules reach it with `from config import get_base_dir`.
+# OpenCV ships `cv2/config.py` AND appends its own package directory to
+# sys.path when it loads, which puts a second top-level `config` on the path.
+# Which one wins is decided by sys.path order, and losing that race raises
+# `NameError: name 'LOADER_DIR' is not defined` from inside the library — a
+# message that points nowhere near the cause.
+
+class TestConfigNameIsNotShadowed:
+    def test_opencv_really_does_expose_a_competing_config(self):
+        """The hazard is concrete, not hypothetical: if this ever stops being
+        true the guard in main.py becomes dead weight and should be removed."""
+        cv2_dir = (Path(__file__).resolve().parent.parent
+                   / ".venv" / "lib" / "python3.11" / "site-packages" / "cv2")
+        if not cv2_dir.exists():
+            pytest.skip("cv2 not installed in this environment")
+        # A `config.py` beside the opencv package is importable as `config`
+        # the moment that directory is on sys.path.
+        assert (cv2_dir / "config.py").exists()
+
+    def test_the_repo_package_is_the_one_that_defines_get_base_dir(self):
+        """The name is load-bearing: only the repo's config defines the
+        function every action imports."""
+        import config as repo_config
+        assert Path(repo_config.__file__).resolve().parent == \
+            Path(__file__).resolve().parent.parent / "config"
+        assert callable(repo_config.get_base_dir)
+
+    def test_main_pins_the_app_root_for_a_script_launch(self):
+        """main.py must put the app root at sys.path[0] before anything can
+        pull opencv in.
+
+        This one is a wiring assertion rather than a behaviour test: driving it
+        end to end means running main.py, which needs the PyQt6 GL stack and
+        PortAudio. The guard itself is three lines and its condition is stated
+        here so a change to it fails loudly.
+        """
+        src = (Path(__file__).resolve().parent.parent / "main.py").read_text(
+            encoding="utf-8")
+        assert "sys.path.insert(0, str(Path(__file__).resolve().parent))" in src
+        # Only for the real launch — importing main must not mutate the
+        # caller's sys.path.
+        assert '__name__ == "__main__"' in src

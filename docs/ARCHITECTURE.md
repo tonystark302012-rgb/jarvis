@@ -33,8 +33,10 @@
 │   presence gate, proactive loop, event engine, rules tick (30s)       │
 ├──────────────────────────────────────────────────────────────────────┤
 │ TOOL PLANE                                                            │
-│   ActionRegistry (core/action_loader) — 46 bundled tools (TOOL dicts) │
+│   ActionRegistry (core/action_loader) — 76 bundled tools (TOOL dicts) │
 │   PluginRegistry (core/plugin_loader) — gmail, calendar              │
+│   ToolTiers (core/tool_tiers) — 14 declared + `toolbox` router,      │
+│     ~62 deferred; measured 23.4k → 7.8k tokens per connection        │
 │   confirm (unforgeable UI token) · undo journal · privacy gate       │
 ├──────────────────────────────────────────────────────────────────────┤
 │ AGENT PLANE (today: three bespoke loops)                              │
@@ -259,9 +261,19 @@ def call_native(full_name: str, args: dict) -> str
 main.py wiring (both source-indexed in tests, since main isn't importable
 without PyQt):
 
-* `_build_config`: `_all_decls = base + actions + plugins + native_declarations()`
+* `_build_config`: `_all_decls = base + actions + plugins + native_declarations()`,
+  then `core/tool_tiers.split_declarations()` keeps the core tier and the
+  `toolbox` router and stores the rest on `self._deferred_decls` for the router
+  to search. The Live API fixes its tool list when the socket opens (no
+  `update_tools` on `AsyncSession`), so a tool that is not declared here can
+  only ever be reached through the router.
 * `_execute_tool`: new `elif name.startswith("mcp__"):` **before** the
   registry check → `await loop.run_in_executor(call_native, …)`.
+* `_execute_tool`: `toolbox` is intercepted at the top and, for `action=run`,
+  **re-enters `_execute_tool`** with the real tool name. Routing is therefore
+  not a second dispatch path — the autonomy gate, confirm gate, activity
+  timeline and audit chain see the real tool exactly as they do for a direct
+  call (`tests/test_tool_tiers.py::TestRoutedCallsAreNotUnsandboxed`).
 
 **Cross-questions**
 

@@ -7391,8 +7391,44 @@ class MainWindow(QMainWindow):
         self._hud_btn.clicked.connect(self._toggle_hud_style)
         self._refresh_hud_btn()
 
+        # Tool tiering changes the next connection, not this one — the Live API
+        # fixes its tool list when the socket opens, so the button says so
+        # rather than pretending the change is instant.
+        self._tier_btn = _row(QPushButton())
+        self._tier_btn.clicked.connect(self._toggle_tool_tiering)
+        self._refresh_tier_btn()
+
         w.adjustSize()
         return w
+
+    def _refresh_tier_btn(self) -> None:
+        from memory.config_manager import get_tool_tiering_enabled
+        on = get_tool_tiering_enabled()
+        self._tier_btn.setText("  TOOLS: CORE + SEARCH" if on
+                               else "  TOOLS: ALL DECLARED")
+        set_icon(self._tier_btn, "layers", C.PRI if on else C.TEXT_MED, 13)
+        self._tier_btn.setStyleSheet(self._BTN_PRI if on else self._BTN_DIM)
+
+    def _toggle_tool_tiering(self) -> None:
+        """Declare only the core tools, or every tool — takes effect on the
+        next session (the Live API cannot add declarations mid-socket).
+
+        The "all declared" side is not a debugging leftover: it is what you want
+        while writing a new action, so the model can see the tool without going
+        through a search first.
+        """
+        from memory.config_manager import (get_tool_tiering_enabled,
+                                           save_tool_tiering_enabled)
+        new_val = not get_tool_tiering_enabled()
+        save_tool_tiering_enabled(new_val)
+        self._refresh_tier_btn()
+        self.write_log(
+            "SYS: Tool tiering "
+            + ("ON — core tools declared, the rest found through toolbox. "
+               "Applies on the next connection."
+               if new_val else
+               "OFF — every tool declared up front, ~16k more tokens per "
+               "session. Applies on the next connection."))
 
     def _warm_wake_state(self) -> None:
         """Work out the wake-word state off the UI thread, once.

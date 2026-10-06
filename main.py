@@ -44,6 +44,22 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+# ── The app root must win the name "config" ──────────────────────────────────
+# This project's own package is `config/` and about thirty modules reach it with
+# `from config import get_base_dir`. OpenCV ships `cv2/config.py` AND appends its
+# own package directory to sys.path when it loads, which puts a SECOND top-level
+# module called `config` on the path — and which of the two wins is decided
+# purely by sys.path order.
+#
+# Launched as `python main.py` the app root is already sys.path[0], so nothing
+# goes wrong — which is exactly why this is worth pinning down. The failure only
+# appears on the launch paths nobody exercises (a `-m` run, a launcher script
+# that sets cwd elsewhere, a frozen build), and when it does it surfaces as
+# `NameError: name 'LOADER_DIR' is not defined` raised from inside a library
+# file, pointing nowhere near the actual cause.
+if __name__ == "__main__" or __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import sounddevice as sd
 import numpy as np
 from google import genai
@@ -70,7 +86,8 @@ from actions.background_monitor import (
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
-    get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
+    get_push_to_talk_enabled, get_thinking_enabled, get_tool_tiering_enabled,
+    get_turn_tuning, get_voice,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
 )
 from core                     import gemini as _gemini
@@ -79,6 +96,7 @@ from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
 from core.action_loader        import discover_actions
+from core                      import tool_tiers as _tool_tiers
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
 from core.wake_word            import (
@@ -646,6 +664,11 @@ class JarvisLive:
             notify=lambda msg: self.ui.write_log(f"SYS: {msg}"),
         )
         self.ui.get_plugins = self._plugin_registry.list_for_ui
+
+        # Tools held back from the initial declaration, reachable through the
+        # `toolbox` router. Filled in by _build_config; declared here so a
+        # router call arriving before any connect cannot raise AttributeError.
+        self._deferred_decls: list[dict] = []
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
 
@@ -1222,12 +1245,33 @@ class JarvisLive:
                       + self._action_registry.get_tool_declarations()
                       + self._plugin_registry.get_tool_declarations()
                       + _mcp_decls)
+
+        # ── Tool tiering ─────────────────────────────────────────────────────
+        # The Live API fixes its tool list when the socket opens — there is no
+        # way to declare more later (AsyncSession exposes only send_client_content
+        # / send_realtime_input / send_tool_response). So the choice is "send all
+        # ~76 declarations every session" or "send the core set plus one router
+        # the model can search". The second is ~75% smaller; core/tool_tiers.py
+        # has the measurement and the reasoning behind which tools stay core.
+        #
+        # Deferred is not the same as disabled: the router re-enters
+        # _execute_tool, so the autonomy gate, confirm gate, undo stack, activity
+        # timeline and audit chain all still apply to a routed call.
+        self._deferred_decls: list[dict] = []
+        if get_tool_tiering_enabled():
+            _core, self._deferred_decls = _tool_tiers.split_declarations(_all_decls)
+            if self._deferred_decls:
+                _all_decls = _core + [_tool_tiers.router_declaration()]
+
         _names = {(d.get("name") if isinstance(d, dict) else getattr(d, "name", ""))
                   for d in _all_decls}
         sys_prompt = _render_prompt(sys_prompt, {
             "assistant_name": self._asst_name,
             "platform": f"{_platform.system()} {_platform.release()}".strip(),
-            "capabilities": _describe_tools(_all_decls),
+            "capabilities": (_describe_tools(_all_decls)
+                             + "\n"
+                             + _tool_tiers.hint_for_prompt(self._deferred_decls)
+                             ).strip(),
             "limits": _describe_limits(
                 has_vision="screen_process" in _names,
                 has_mic=True,
@@ -1425,9 +1469,75 @@ class JarvisLive:
             except Exception:
                 return None
 
+    def _toolbox_reply(self, fc, text: str) -> types.FunctionResponse:
+        """A router answer, shaped like any other tool result.
+
+        Carries the router's own id and name so the model can match it to the
+        call it made — the *result* mentions the real tool, the envelope does
+        not impersonate it.
+        """
+        return types.FunctionResponse(
+            id=fc.id, name=_tool_tiers.ROUTER_NAME,
+            response={"result": text},
+        )
+
+    async def _run_toolbox(self, fc, args) -> types.FunctionResponse:
+        """The `toolbox` router — search the deferred tools, or run one.
+
+        This exists because the Live API freezes its tool list when the socket
+        opens, so a tool that is not declared is a tool the model cannot name.
+        `toolbox` is the single declaration that stands in front of the ~62
+        that are no longer sent (see core/tool_tiers.py).
+
+        A routed call re-enters `_execute_tool`, so it passes through the same
+        autonomy gate, confirm gate, undo stack, activity timeline and audit
+        chain as a direct call. Tiering changes what the model is told it can
+        do; it does not change what it is allowed to do.
+        """
+        action = str(args.get("action") or "search").strip().lower()
+
+        if action == "run":
+            # Validation lives in core/tool_tiers.plan_run — pure, so it is
+            # tested without a live session; this method is the thin part that
+            # actually re-enters the executor.
+            target, params, error = _tool_tiers.plan_run(args, self._deferred_decls)
+            if error:
+                return self._toolbox_reply(fc, error)
+
+            print(f"[JARVIS] 🧰 toolbox → {target}")
+            inner = types.FunctionCall(id=fc.id, name=target, args=params)
+            resp = await self._execute_tool(inner)
+            result = (resp.response or {}).get("result", "Done.")
+            if isinstance(result, str) and result.startswith("Unknown tool:"):
+                result += _tool_tiers.unknown_tool_hint(target, self._deferred_decls)
+            return self._toolbox_reply(fc, result)
+
+        if action not in ("search", "find", "list", "help"):
+            return self._toolbox_reply(
+                fc, f"Unknown action '{action}'. Use action=search or action=run.")
+
+        query = str(args.get("query") or "").strip()
+        matches = _tool_tiers.search(self._deferred_decls, query)
+        if not matches:
+            return self._toolbox_reply(
+                fc, f"No deferred tool matches {query!r}. Everything named in "
+                    f"your instructions is already available to you directly — "
+                    f"if none of them fit, tell the user plainly.")
+        return self._toolbox_reply(
+            fc, f"{len(matches)} tool(s) matching {query!r} — call one with "
+                f"action=run, tool=<name>, parameters_json=<its parameters as a "
+                f"JSON object>.\n\n{_tool_tiers.format_schemas(matches)}")
+
     async def _execute_tool(self, fc) -> types.FunctionResponse:
         name = fc.name
         args = dict(fc.args or {})
+
+        # The router sits in front of everything else: it is not a tool the
+        # user asked for, it is how the model reaches the tools that were not
+        # declared. Handled before the activity timeline so a routed call does
+        # not appear twice on it — the inner call opens its own event.
+        if name == _tool_tiers.ROUTER_NAME:
+            return await self._run_toolbox(fc, args)
 
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")

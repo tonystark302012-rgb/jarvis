@@ -249,6 +249,23 @@ def save_proactive_audio_enabled(enabled: bool) -> None:
     _save_flag("proactive_audio", enabled)
 
 
+def get_tool_tiering_enabled() -> bool:
+    """Whether only the core tools are declared up front, with the rest
+    reached through the `toolbox` router.
+
+    On by default: declaring all ~76 tools costs about 18,000 tokens on every
+    connection plus a second copy of their descriptions in the system prompt.
+    Set "tool_tiering": false in config/api_keys.json to declare everything
+    again — useful when adding a new action, because the new tool is then
+    visible to the model without going through a search first.
+    """
+    return bool(load_api_keys().get("tool_tiering", True))
+
+
+def save_tool_tiering_enabled(enabled: bool) -> None:
+    _save_flag("tool_tiering", bool(enabled))
+
+
 MEDIA_RESOLUTIONS = ("default", "low", "medium", "high")
 
 

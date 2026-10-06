@@ -140,15 +140,28 @@ The bundled skill list had grown to seventeen, and some of it was nobody's busin
 
 Mark LV ships **76** self-describing skills (every `actions/*.py` that declares — or re-exports — a `TOOL` dict), across 80 files in `actions/`; the other four are support modules the skills call into. They fall into two honest groups: driving this machine — applications, the browser, files, the desktop, the screen — and fetching for it — search, weather, flights, video. The rule is written into the project tree, so the next skill lands in the right folder without anyone having to ask.
 
-**Every one of those 76 declares itself to the model on every connection**, whether you ever use it or not. That is the cost of the plugin architecture, and it is not small: the declarations alone are **72,263 characters — roughly 18,000 tokens** — before a word is spoken, and 76 tools is a lot of surface for the model to pick the wrong one from.
+**Every one of those 76 can be reached — but they are no longer all announced.** Two of them matter here: the declaration cost, and the fact that 76 tools is a lot of surface to pick the wrong one from.
 
-> Measure it yourself rather than trusting this paragraph — the numbers above are generated, not remembered:
+JARVIS now declares a **core tier of 16 tools** — the ones asked for constantly (open an app, search, weather, a reminder, a file, the volume, play a video, remember this, undo that) plus **the user's own levers** (`privacy`, `autonomy`), because a safety switch is the last thing that should need a lookup — and **one router called `toolbox`**. Everything else waits behind it: the model searches (`toolbox action=search query="3d model"`), gets the matching tools with their full parameter schemas, and runs one (`toolbox action=run tool=make_3d parameters_json=...`). A deferred tool costs one extra round trip; "open Chrome" never pays it.
+
+The saving is large and measurable:
+
+| | Declarations | Prompt copy | **Total per connection** |
+|---|---|---|---|
+| All declared | 72,263 ch · 76 tools | 12,024 ch | **93,661 ch ≈ 23,400 tokens** |
+| Tiered (default) | 19,813 ch · 16 + router | 3,464 ch | **32,651 ch ≈ 8,200 tokens** |
+
+**~15,250 tokens off every session — 66% smaller — before a word is spoken.**
+
+> Both rows are generated, not remembered:
 >
 > ```bash
 > python tools/count_tools.py
 > ```
 >
-> **This is the next thing worth fixing in JARVIS.** Tiering the declarations — a small always-loaded core plus an on-demand `find_tools` lookup — would cut the per-connection payload by an estimated 70% and should also reduce wrong-tool selection. It is listed in `PROJECT_ANALYSIS.md` as the single highest-value change outstanding.
+> Flip it at runtime from **⚙ CONTROLS → TOOLS**. The "all declared" side is not a debug leftover: it is what you want while writing a new action, so the model can see the tool without searching first.
+
+**Deferred does not mean unsandboxed.** A routed call re-enters the same executor as a direct one, so the autonomy gate, the confirmation gate, the undo stack, the Mission Control timeline and the tamper-evident audit chain all see the *real* tool name — `tests/test_tool_tiers.py` asserts exactly that by driving the real dispatch path, because a performance change must never quietly become a sandbox bypass.
 
 ### 🩹 Fixes
 * An unanswering model was retried on **every call**, at 12–15 seconds a time, because only quota and 404 failures were ever cooled down. 503/504 now rest for 30 minutes — **11.2 seconds saved per call**.
@@ -570,7 +583,7 @@ Things worth knowing before you rely on them. Each one is a deliberate, document
 
 **Remote dashboard sessions expire.** A phone paired by QR gets a 12-hour session and can re-pair itself for 30 days, after which it must scan a new code. "Revoke devices" now kills the live bearer tokens *and* the pairing, so a revoked phone stops working immediately instead of at the next restart. (It did not, before this branch — it cleared the pairing only, so the phone in the room kept its access while the UI reported success.)
 
-**Every skill is declared on every connection.** 76 tool declarations (~18,000 tokens) travel with each session whether you use them or not. Run `python tools/count_tools.py` to see the current cost. Tiering these is the highest-value change still outstanding.
+**Most skills are found, not announced.** 16 core tools travel with every session; the other 60 are reached through `toolbox`, which costs one extra round trip. If the model seems to have forgotten an ability, ask it to search `toolbox` — or switch **⚙ CONTROLS → TOOLS** to "ALL DECLARED" and it sees everything up front for ~15,000 more tokens a session. Run `python tools/count_tools.py` to see the current cost.
 
 **The GUI and the audio path have no automated tests.** `tools/feature_audit.py` proves the tool registry and the platform integrations run in *this* environment, and CI proves the logic layer — but nothing exercises the PyQt HUD, the TTS/STT pipeline or the wake word end to end. Run `python tools/feature_audit.py` after an upgrade rather than assuming.
 
