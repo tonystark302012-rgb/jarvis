@@ -427,6 +427,8 @@ def set_icon(btn, name: str, color: str | None = None, size: int = 15) -> None:
         btn.setIcon(QIcon(icon_pm(name, color, size)))
         btn.setIconSize(QSize(size, size))
     except Exception:                                 # noqa: BLE001
+        # A pixmap that cannot be composed leaves the button bare — the label
+        # still reads, and the HUD stays up. Deliberate.
         pass
 
 
@@ -847,6 +849,9 @@ class HudCanvas(QWidget):
             if self._avatar is not None:
                 self._avatar.glance(dx, dy, hold)
         except Exception:
+            # Eyelid tracking is the least important thing on screen; it is
+            # also driven per frame from the audio path, so raising here would
+            # take the window down mid-sentence. Deliberate.
             pass
 
     def push_visemes(self, frames, hop: float, at: float) -> None:
@@ -900,6 +905,9 @@ class HudCanvas(QWidget):
             self._visemes = (new, at, hop)
             self._vis_i = None
         except Exception:
+            # A malformed frame schedule costs one mouth animation, not the
+            # call: the audio is already queued and the transcript still lands.
+            # This runs per chunk, so a log line here would be a flood.
             pass
 
     def set_audio_level(self, level: float) -> None:

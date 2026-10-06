@@ -113,6 +113,12 @@ from core                      import confirm as confirm_gate
 from core                      import audio_devices
 from core.action_loader        import discover_actions
 from core                      import tool_tiers as _tool_tiers
+from core                      import tool_output
+from core.logging_setup        import get_logger
+
+# One logger for the app loop. Per-module loggers exist in core/; this one
+# carries the session: dispatch, audio and the rules tick.
+log = get_logger("jarvis.main")
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
 from core.wake_word            import (
@@ -1581,8 +1587,13 @@ class JarvisLive:
                     id=fc.id, name=name, response={"result": _blocked}
                 )
             args = _autonomy.enhancing(name, args)
-        except Exception:
-            pass
+        except Exception as e:
+            # This is the one choke point the trust model rests on: if it
+            # cannot answer, the call proceeds — a corrupt config must not
+            # brick every tool — but it must NOT do so quietly. It is logged at
+            # error level and lands in the audit chain with the real tool name,
+            # so "the gate let something through" is a fact you can look up.
+            log.error(f"autonomy gate failed for {name} — proceeding unchecked: {e}")
 
         if name == "save_memory":
             category = args.get("category", "notes")
@@ -1738,6 +1749,17 @@ class JarvisLive:
             self.ui.set_state("LISTENING")
 
         print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
+
+        # One cap on how much a single result may put into the conversation.
+        # Applied here rather than in each tool because this is the only place
+        # every result passes through, and a tool added tomorrow cannot forget
+        # it. See core/tool_output.py for why the note is part of the result.
+        _full = result
+        result = tool_output.cap(result)
+        if result is not _full and not self.ui.muted:
+            self.ui.write_log(
+                f"SYS: {name} returned {len(str(_full)):,} characters — "
+                f"trimmed to {len(result):,} for the model.")
 
         # A tool that declared itself NON_BLOCKING also says when its answer may
         # re-enter the conversation. Without this the model finishes whatever it
@@ -2071,8 +2093,12 @@ class JarvisLive:
                                 try:
                                     from actions import history_search as _hs
                                     _hs.record(self._asst_name, full_out)
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    # Conversation history is a searchable
+                                    # feature, not a gate: a failure to record
+                                    # one turn must not break the session, but
+                                    # it does mean `history` will not find it.
+                                    log.warning(f"history record failed: {e}")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "jarvis",
@@ -2145,6 +2171,9 @@ class JarvisLive:
             print(f"[JARVIS] 🔊 Output latency {self._out_latency*1000:.0f} ms "
                   f"→ echo tail {(self._out_latency + _TAIL_MARGIN)*1000:.0f} ms")
         except Exception:
+            # A stream that does not report its latency is not a failure —
+            # the default tail is used and the line above simply does not
+            # print. Deliberate silence.
             pass
 
         try:
@@ -2224,6 +2253,9 @@ class JarvisLive:
                         self._out_level = lvl
                         self._echo.note_output(pcm, RECEIVE_SAMPLE_RATE, lvl)
                 except Exception:
+                    # Level metering and echo calibration only: the audio is
+                    # written on the very next line regardless, so a failure
+                    # here costs a moving mouth, not the voice. Deliberate.
                     pass
 
                 try:
@@ -2449,6 +2481,9 @@ class JarvisLive:
                     try:
                         self.ui.write_log(f"RULE: {str(out)[:160]}")
                     except Exception:
+                        # The rule already fired and the console line above is
+                        # printed either way; this only mirrors it into the
+                        # HUD. A closed window is not a failed rule.
                         pass
             except Exception as e:
                 print(f"[Rules] tick error: {e}")

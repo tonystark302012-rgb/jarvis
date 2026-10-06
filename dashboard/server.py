@@ -60,6 +60,9 @@ def _make_uploads_dir() -> Path:
             candidate.mkdir(parents=True, exist_ok=True)
             return candidate
         except Exception:
+            # Try the next location. A read-only home directory or a missing
+            # Documents folder is normal on some setups, and the fallback below
+            # is the answer — there is nothing to report until every one fails.
             pass
     return BASE_DIR / "uploads"
 
@@ -378,6 +381,10 @@ def _local_ip() -> str:
             if not ip.startswith("127.") and not ip.startswith("169.254."):
                 return ip
     except Exception:
+        # No usable LAN address (offline, VPN-only, restricted DNS). The URL
+        # printed for the phone then shows 127.0.0.1, which is wrong but
+        # harmless, and the alternative — raising — would stop the dashboard
+        # from starting at all.
         pass
 
     return "127.0.0.1"
@@ -461,6 +468,8 @@ def _ensure_certs() -> bool:
             import os as _os
             _os.chmod(key_p, 0o600)   # best effort — largely a no-op on Windows
         except Exception:
+            # NTFS ignores POSIX modes. The key is still only in config/certs/,
+            # which is git-ignored and never served.
             pass
 
         print(f"[Dashboard] Generated a self-signed certificate for this machine: {certs}")
@@ -1122,6 +1131,9 @@ class DashboardServer:
                     try:
                         dest.unlink(missing_ok=True)
                     except Exception:
+                        # The half-written upload could not be removed on this
+                        # filesystem; the error below is what the client needs,
+                        # and a failed cleanup must not replace it.
                         pass
                     return JSONResponse({"error": str(exc)}, status_code=500)
 
