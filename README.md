@@ -349,7 +349,7 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 
 ## 🖥️ The HUD v2 — the desktop app was rebuilt
 
-The PyQt HUD (`ui.py`) is a complete redesign on one design system — vector
+The PyQt HUD (the `ui/` package) is a complete redesign on one design system — vector
 icons everywhere (zero emoji in the chrome), a five-colour accent that themes
 the whole window, and every panel wired to the **same dashboard API the web UI
 uses**, so both front-ends show live data instead of mockups.
@@ -451,7 +451,7 @@ CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13**
 ```
 jarvis/
 ├── main.py                   # Core loop — Gemini Live session, audio I/O, viseme extraction, tool dispatch
-├── ui.py                     # PyQt6 HUD v2 — vector-icon design system, live dashboard panels, palette
+├── ui/                       # PyQt6 HUD v2 — app.py is the window, display_panel.py the screen
 ├── setup.py                  # OS-aware installer (skips wrong-OS dependencies, checks your Python)
 ├── pyproject.toml            # ruff + pytest configuration (lint must stay clean in CI)
 ├── requirements.txt          # Runtime dependencies (OS markers filter per platform)

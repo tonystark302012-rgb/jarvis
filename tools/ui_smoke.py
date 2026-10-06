@@ -1,4 +1,4 @@
-"""Offscreen E2E smoke for the redesigned JARVIS HUD (ui.py v2).
+"""Offscreen E2E smoke for the redesigned JARVIS HUD (the ui/ package).
 
 Covers: construction, content-hook contract, icon system (no emoji in the
 chrome), rail (13 keys / 3 groups / badges), every section switch, studio
@@ -111,7 +111,18 @@ ui.set_dashboard_api(BASE, TOKEN)
 pump(1.0)
 
 # ── contract: content hook (pinned by TestRenderSurfaceFunnel) ──────────────
-src = open("ui.py", encoding="utf-8").read()
+
+# ── HUD source reader ────────────────────────────────────────────────────────
+# The HUD is a package (ui/) now. This tool greps its source, so it reads every
+# module in it rather than one file — a panel that moves out of ui/app.py must
+# not make this smoke test go quiet.
+def _ui_source() -> str:
+    from pathlib import Path as _P
+    root = _P(__file__).resolve().parent.parent / "ui"
+    return "\n".join(p.read_text(encoding="utf-8")
+                     for p in sorted(root.glob("*.py")))
+
+src = _ui_source()
 check("self._content_hook = None" in src, "content hook declared")
 i = src.index("def show_content")
 block = src[i:i + 900]
@@ -123,7 +134,7 @@ check("hook = self._content_hook" in block
 pat = re.compile(r"[\U0001F000-\U0001FAFF☀-➿⬀-⯿️←-⇿✀-➿]")
 ALLOWED = set("✕✓✗✎⚠＋⛶⬇↑←→↻·◉")
 leftovers = sorted({c for c in pat.findall(src) if c not in ALLOWED})
-check(not leftovers, "no pictographic emoji in ui.py", leftovers)
+check(not leftovers, "no pictographic emoji in the HUD", leftovers)
 check(len(_ICONS) >= 40, f"icon registry ({len(_ICONS)} icons)")
 pm = icon_pm("chat", "#6366f1", 16)
 check(not pm.isNull(), "icon_pm renders")
@@ -482,7 +493,7 @@ miss_lazy = [m for m in lazy if not hasattr(ui, m)]
 check(not miss_lazy, "JarvisUI lazy members", miss_lazy)
 
 # ── A1–A5 / C7–C11 / dashboard-B regression guards ─────────────────────────────
-src2 = open("ui.py", encoding="utf-8").read()
+src2 = _ui_source()
 
 # A1 — Spaces editing (toolbar + save path + edit toggling)
 for needle, label in (

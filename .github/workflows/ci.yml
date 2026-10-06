@@ -40,7 +40,7 @@ jobs:
         run: ruff check .
 
       - name: Syntax-check every module (catches what tests don't import)
-        run: python -m compileall -q actions core dashboard memory ui config main.py ui.py setup.py
+        run: python -m compileall -q actions core dashboard memory ui config main.py bootstrap.py
 
       - name: Tests
         # `set -o pipefail` is load-bearing, not decoration. Without it bash

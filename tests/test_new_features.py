@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import pytest
+from tests._ui_source import ui_source
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -3450,7 +3451,7 @@ class TestEmotionActing:
         assert av.set_emotion("sad") == "neutral"      # unknown → neutral
 
     def test_ui_wires_emo_signal(self):
-        src = Path("ui.py").read_text(encoding="utf-8")
+        src = ui_source()
         assert "_emo_sig        = pyqtSignal(str)" in src
         assert "_emo_sig.connect(self._apply_emotion)" in src
         assert "def _apply_emotion" in src

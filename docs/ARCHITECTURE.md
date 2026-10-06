@@ -26,7 +26,7 @@
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ PRESENTATION                                                         │
-│   ui.py (PyQt HUD)  ·  dashboard/ (phone: FastAPI + WS)  ·  voice    │
+│   ui/ (PyQt HUD)    ·  dashboard/ (phone: FastAPI + WS)  ·  voice    │
 ├──────────────────────────────────────────────────────────────────────┤
 │ SESSION                                                               │
 │   main.py — Gemini Live session, audio I/O, barge-in (EchoGuard),     │

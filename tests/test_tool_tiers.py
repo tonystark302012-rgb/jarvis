@@ -20,17 +20,17 @@ The two things worth guarding are therefore not "does search return a list":
      declaration list, or a deferred name collides with a core one, the model
      loses the ability to find things with no error anywhere.
 
-`main.py` imports `ui`, which imports PyQt6.QtGui and needs libGL — absent in
-most CI containers. A stand-in `ui` module is installed before the import so
-these tests can exercise the real class; the alternative is asserting on source
-text, which is exactly the habit worth breaking.
+These tests drive the REAL `JarvisLive._execute_tool` rather than grepping the
+source for it, and that used to require a stand-in `ui` module in sys.modules
+because `main.py` imported PyQt6 (and PortAudio) at module load. Neither is
+imported at module load any more, so `import main` works on a bare runner — see
+`_StandInUI` below for what replaced it, and why the fake went.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -68,71 +68,27 @@ _force_repo_root_first()
 # harness
 # ────────────────────────────────────────────────────────────────────────────
 
-def _install_fake_ui() -> None:
-    """Let main.py import without PyQt6's GL stack (see module docstring)."""
-    if "ui" in sys.modules:
-        return
-    fake = types.ModuleType("ui")
+class _StandInUI:
+    """The few attributes `JarvisLive._execute_tool` touches on the window.
 
-    class _JarvisUI:
-        muted = False
-        current_file = None
+    This used to be a fake `ui` module installed into sys.modules, because
+    `import main` needed one: main.py imported Qt at module level. Both Qt and
+    sounddevice are imported where they are used now, so `import main` works on
+    a bare CI runner and the fakes are gone. A fake `ui` left in sys.modules is
+    not harmless — it shadows the real ui package for every later test in the
+    session, and a test that imports the real one passes for the wrong reason.
+    """
 
-        def __init__(self, *a, **k):
-            pass
+    muted = False
+    current_file = None
 
-        def set_state(self, *_a):
-            pass
-
-        def write_log(self, *_a):
-            pass
-
-        def show_content(self, *_a, **_k):
-            pass
-
-        def set_audio_level(self, *_a):
-            pass
-
-    fake.JarvisUI = _JarvisUI
-    sys.modules["ui"] = fake
-
-
-def _install_fake_sounddevice() -> None:
-    """`main.py` imports sounddevice at module level and it is NOT in
-    requirements-dev.txt, so on CI it is either missing or raises
-    `OSError: PortAudio library not found` at import — either way `import main`
-    dies before any test runs. The audio path is not what these tests are
-    about, so a stand-in is installed instead of adding a hard system-library
-    dependency to the dev requirements."""
-    try:
-        import sounddevice  # noqa: F401
-        return
-    except Exception:
+    def __init__(self, *a, **k):
         pass
-    stub = types.ModuleType("sounddevice")
 
-    class _Stream:
-        def __init__(self, *a, **k):
-            pass
-
-        def start(self): pass
-        def stop(self): pass
-        def close(self): pass
-        def abort(self): pass
-
-    stub.InputStream = stub.OutputStream = _Stream
-    stub.query_devices = lambda *a, **k: []
-    stub.query_hostapis = lambda *a, **k: []
-    stub.check_input_settings = lambda *a, **k: None
-    stub.check_output_settings = lambda *a, **k: None
-    stub.CallbackFlags = type("CallbackFlags", (), {})
-    stub.PortAudioError = type("PortAudioError", (Exception,), {})
-    stub.default = type("_Default", (), {"device": (None, None)})()
-    sys.modules["sounddevice"] = stub
-
-
-_install_fake_ui()
-_install_fake_sounddevice()
+    def set_state(self, *_a): pass
+    def write_log(self, *_a): pass
+    def show_content(self, *_a, **_k): pass
+    def set_audio_level(self, *_a): pass
 
 
 @pytest.fixture(scope="module")
@@ -154,7 +110,7 @@ def jarvis():
             lv, types.FunctionCall(id="call-1", name=name, args=args))
 
     lv = object.__new__(M.JarvisLive)                 # no socket, no audio
-    lv.ui = sys.modules["ui"].JarvisUI()
+    lv.ui = _StandInUI()
     lv._action_registry = discover_actions(
         ROOT / "actions",
         reserved_names={t["name"] for t in M.TOOL_DECLARATIONS},

@@ -16,6 +16,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from tests._ui_source import ui_source
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -295,7 +296,7 @@ class TestUIWiring:
     handler is invisible until someone opens it. These read the source."""
 
     def _ui(self) -> str:
-        return (ROOT / "ui.py").read_text(encoding="utf-8")
+        return ui_source()
 
     def test_every_icon_name_used_exists(self):
         """`set_icon(btn, "download", …)` silently does nothing when the name

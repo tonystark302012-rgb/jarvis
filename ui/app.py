@@ -95,8 +95,10 @@ except Exception:      # pragma: no cover — HUD must never die over cosmetics
     HoloAvatar = None
 
 
+from core.paths import base_dir
+
+
 def _base_dir() -> Path:
-    from core.paths import base_dir
     return base_dir()
 
 BASE_DIR   = _base_dir()
@@ -562,22 +564,17 @@ def install_global_qss(app: QApplication) -> None:
 
 
 def _load_display_panel(parent=None):
-    """
-    Load DisplayPanel from ui/display_panel.py BY PATH.
+    """The screen inside JARVIS — ui/display_panel.py.
 
-    `from ui.display_panel import …` can never work here: `ui` resolves to
-    THIS module (ui.py), which is not a package, so the submodule import
-    always raised `'ui' is not a package` and the display screen silently
-    never opened. Load the file directly instead — same widget, works.
+    This used to load the file by path, with a comment explaining why the
+    normal import could never work: `ui` resolved to this module (ui.py), which
+    is not a package, so `from ui.display_panel import DisplayPanel` raised
+    "'ui' is not a package" and the display screen silently never opened. The
+    by-path loader was the workaround. `ui/` is a real package now, so the
+    normal import is the fix and the machinery is gone.
     """
-    import importlib.util
-    path = BASE_DIR / "ui" / "display_panel.py"
-    spec = importlib.util.spec_from_file_location("_jarvis_display_panel", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"display panel not found at {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.DisplayPanel(parent)
+    from ui.display_panel import DisplayPanel
+    return DisplayPanel(parent)
 
 
 # ── Windows GPU via NVML DLL (no subprocess, no console window) ──────────────
@@ -6440,12 +6437,12 @@ class MainWindow(QMainWindow):
         Never opens a terminal, console, or PowerShell window on any platform.
         """
         import stat as _stat
-        script  = Path(__file__).resolve().parent / "main.py"
+        script  = base_dir() / "main.py"
         python  = Path(sys.executable)
         desktop = self._get_desktop_dir()
 
         # Arc-reactor icon (.ico — also exported as .png for Linux/macOS)
-        ico_path = Path(__file__).resolve().parent / "config" / "jarvis.ico"
+        ico_path = base_dir() / "config" / "jarvis.ico"
         if not ico_path.exists():
             self._build_jarvis_icon(ico_path)
 
@@ -8114,7 +8111,7 @@ class MainWindow(QMainWindow):
     def _toggle_autostart(self):
         currently_on = self._check_autostart()
         try:
-            script = str(Path(__file__).resolve().parent / "main.py")
+            script = str(base_dir() / "main.py")
             if _OS == "Windows":
                 import winreg
                 reg = winreg.OpenKey(winreg.HKEY_CURRENT_USER,

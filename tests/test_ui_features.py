@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from tests._ui_source import ui_source
 
 ROOT = Path(__file__).resolve().parents[1]
-UI = (ROOT / "ui.py").read_text(encoding="utf-8")
+UI = ui_source()
 
 
 def _slice(start: str, end: str) -> str:

@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._ui_source import ui_source
+
 SRC = Path("main.py").read_text(encoding="utf-8")
 
 
@@ -1904,7 +1906,7 @@ class TestRenderSurfaceFunnel:
     """show_content → hook → broadcast: the pieces must all be wired."""
 
     def test_ui_declares_content_hook(self):
-        u = Path("ui.py").read_text(encoding="utf-8")
+        u = ui_source()
         assert "self._content_hook = None" in u
         i = u.index("def show_content")
         block = u[i:i + 900]
