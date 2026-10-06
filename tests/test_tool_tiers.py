@@ -28,6 +28,7 @@ text, which is exactly the habit worth breaking.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
 from pathlib import Path
@@ -212,6 +213,21 @@ class TestTierSplit:
                      "save_memory", "recall_memory", "undo", "screen_process"):
             assert name in CORE_TOOL_NAMES, f"{name} should not be deferred"
 
+    def test_workflow_entry_points_are_never_deferred(self):
+        """The tier line: entry points and safety levers are core, leaf
+        utilities are deferred. Deferring a LEAF costs one round trip on a
+        job that was going to be one call anyway. Deferring an ENTRY POINT
+        costs a round trip in the middle of a spoken sentence, on the way
+        into a ten-step job — "roz subah 8 baje research karo" needs `rules`
+        to schedule it and `dots` to pick the researcher before any work
+        starts. If someone re-tunes the tiers, this is the line they have to
+        argue with."""
+        from core.tool_tiers import CORE_TOOL_NAMES
+        for name in ("rules", "dots", "pages", "obsidian", "task_agent"):
+            assert name in CORE_TOOL_NAMES, (
+                f"{name} starts a workflow — a router hop in front of it "
+                f"lands mid-sentence")
+
     def test_the_users_own_levers_are_never_deferred(self):
         """`privacy` and `autonomy` are not tasks, they are how someone takes
         control back from the assistant. A router hop in front of a safety
@@ -228,7 +244,11 @@ class TestTierSplit:
         core, deferred = self._decls()
         before = len(json.dumps(core + deferred))
         after = len(json.dumps(core + [tt.router_declaration()]))
-        assert after < before * 0.35, (
+        # A floor, not a target. The exact saving moves whenever the core tier
+        # is deliberately re-tuned (it went 67% -> 61% when the workflow entry
+        # points were promoted), so pinning a number here would fight the
+        # design. What must never happen is tiering quietly becoming a no-op.
+        assert after < before * 0.5, (
             f"tiering only saved {100 - after * 100 // before}% "
             f"({before:,} -> {after:,} chars)")
 
@@ -259,12 +279,26 @@ class TestSearch:
         assert tt.search(deferred, "3d model")[0]["name"] == "make_3d"
 
     def test_name_query_reaches_that_tool(self, jarvis):
+        """Every tool the router hides, the router can find again.
+
+        Derived from the live deferred list rather than a hand-written table —
+        a hardcoded name silently stops testing anything the moment that tool
+        is promoted to core (which is exactly what happened to `obsidian`).
+        """
         from core import tool_tiers as tt
-        for query, expected in (("make_3d", "make_3d"), ("manim", "manim_anim"),
-                                ("smart_home", "smart_home"), ("vault", "vault"),
-                                ("obsidian", "obsidian"), ("cad", "cad")):
-            hits = [d["name"] for d in
-                    tt.search(self._deferred(jarvis), query)]
+        deferred = self._deferred(jarvis)
+        biggest = sorted(deferred, key=lambda d: len(json.dumps(d)),
+                         reverse=True)[:8]
+        assert biggest, "nothing is deferred — tiering is off"
+        for decl in biggest:
+            name = decl["name"]
+            hits = [d["name"] for d in tt.search(deferred, name)]
+            assert name in hits[:2], f"{name!r} did not surface itself"
+        # a couple of known-specific queries still resolve by name
+        for query, expected in (("make_3d", "make_3d"),
+                                ("manim", "manim_anim"),
+                                ("smart_home", "smart_home")):
+            hits = [d["name"] for d in tt.search(deferred, query)]
             assert expected in hits[:2], f"{query!r} did not surface {expected}"
 
     def test_returns_the_full_schema_not_a_summary(self, jarvis):

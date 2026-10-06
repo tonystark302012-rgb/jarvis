@@ -93,6 +93,16 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # time the model has to go looking for it. Both are small (~1.3 KB for the
     # pair), which is a cheap price for never hiding them.
     "privacy", "autonomy",
+    # The entry points to whole workflows, not single actions. "Roz subah 8
+    # baje research karo" is not one tool call — the model has to reach for
+    # `rules` to schedule it, `dots` to pick the researcher, `pages`/`obsidian`
+    # to say where the digest lands, and `task_agent` to run the same thing
+    # once, right now. A leaf tool can afford a router hop; the tool that
+    # starts a ten-step job cannot, because every one of those hops is a
+    # round trip in the middle of a spoken sentence. This is the line the
+    # tier is drawn on: entry points and safety levers are core, leaf
+    # utilities are deferred.
+    "rules", "dots", "pages", "obsidian", "task_agent",
     # live-session tools declared inline in main.py: memory, undo, vision,
     # monitors and shutdown. These are conversational basics; routing them
     # would add a hop to "remember this" and "take that back".

@@ -702,15 +702,16 @@ class JarvisLive:
                 except Exception as _e:
                     _act_mod.fail(ev, _e)
                     raise
-                # registry.run never raises — it returns error STRINGS. The
-                # two shapes it uses for failure are how the timeline knows.
+                # registry.run never raises — it returns error STRINGS, so the
+                # verdict comes from the one classifier in core.action_loader
+                # (this block used to carry its own copy of the test, which is
+                # why the rules engine could disagree with the timeline about
+                # the same call). An empty result stays green: the tool worked,
+                # it just found nothing — red is for "this did not run".
+                from core.action_loader import (RESULT_BLOCKED, RESULT_FAILED,
+                                                classify_result)
                 text = out if isinstance(out, str) else ""
-                ok = not (
-                    ("not available" in text[:80]) or
-                    ("failed:" in text[:70]) or
-                    text.startswith("Action '") or
-                    text.startswith("Tool '")
-                )
+                ok = classify_result(text) not in (RESULT_FAILED, RESULT_BLOCKED)
                 _act_mod.finish(ev, ok, out)
                 return out or "Done."
 

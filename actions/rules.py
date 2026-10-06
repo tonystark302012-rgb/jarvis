@@ -29,6 +29,9 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from core.action_loader import (RESULT_BLOCKED, RESULT_EMPTY, RESULT_FAILED,
+                                classify_result)
+
 _LOCK = threading.Lock()
 _RULES: list[dict] = []
 _LOADED = False
@@ -187,6 +190,40 @@ def list_rules() -> str:
 
 # ── trigger evaluation ───────────────────────────────────────────────────────
 
+def _brief(text: str, cap: int = 200) -> str:
+    """One line, capped. Firings are announced on a single log line, so a
+    tool that returns a paragraph must not turn into a wall of text."""
+    one = " ".join(str(text or "").split())
+    return one[:cap] + ("…" if len(one) > cap else "")
+
+
+def _notify_fire(r: dict, why: str, kind: str, text: str) -> None:
+    """Tell the user what actually happened — including when nothing did.
+
+    This is the whole point of an unattended rule: nobody is watching the
+    tool call, so the notification IS the result. It used to say
+    "Rule 'X' fired (time 08:00)." no matter what came back, which meant a
+    research digest could find nothing at all and still report success.
+    """
+    label = r.get("label") or r.get("tool") or "rule"
+    head = f"Rule '{label}' ({why})"
+    if kind == RESULT_FAILED:
+        msg = f"{head} FAILED: {_brief(text)}"
+    elif kind == RESULT_BLOCKED:
+        msg = f"{head} was BLOCKED: {_brief(text)}"
+    elif kind == RESULT_EMPTY:
+        msg = f"{head} ran but found nothing: {_brief(text)}"
+    elif text.strip():
+        msg = f"{head} fired: {_brief(text)}"
+    else:
+        msg = f"{head} fired."
+    if _NOTIFY:
+        try:
+            _NOTIFY(msg)
+        except Exception:
+            pass
+
+
 def _exec_rule(r: dict, why: str) -> tuple[bool, str]:
     """Execute a rule's tool (or every step of a scene) via the injected
     runner. Returns (ok, message). ok=False means an EXECUTION failure
@@ -219,9 +256,26 @@ def _exec_rule(r: dict, why: str) -> tuple[bool, str]:
                         except Exception:
                             pass
                     return False, msg
+                step_text = str(o or "")
+                step_kind = classify_result(step_text)
+                if step_kind in (RESULT_FAILED, RESULT_BLOCKED):
+                    # The docstring above promises a scene stops at the first
+                    # failing step. It only ever stopped on an exception, and
+                    # a tool reports failure as a STRING — so a scene whose
+                    # step was refused ran to the end and called itself done.
+                    msg = (f"Scene '{r.get('label')}' stopped at step "
+                           f"{done + 1}/{len(steps)} ({tool}) — "
+                           f"{'blocked' if step_kind == RESULT_BLOCKED else 'failed'}: "
+                           f"{_brief(step_text)}")
+                    if _NOTIFY:
+                        try:
+                            _NOTIFY(msg)
+                        except Exception:
+                            pass
+                    return False, msg
                 done += 1
-                if o:
-                    outs.append(str(o))
+                if step_text:
+                    outs.append(step_text)
             msg = (f"Scene '{r.get('label')}' fired ({why}): "
                    f"{done}/{len(steps)} steps done.")
             if _NOTIFY:
@@ -231,13 +285,10 @@ def _exec_rule(r: dict, why: str) -> tuple[bool, str]:
                     pass
             return True, " | ".join(outs + [msg])
         out = _RUNNER(r.get("tool", ""), dict(r.get("args") or {}))
-        msg = f"Rule '{r.get('label')}' fired ({why})."
-        if _NOTIFY:
-            try:
-                _NOTIFY(msg)
-            except Exception:
-                pass
-        return True, str(out or "")
+        text = str(out or "")
+        kind = classify_result(text)
+        _notify_fire(r, why, kind, text)
+        return kind not in (RESULT_FAILED, RESULT_BLOCKED), text
     except Exception as e:
         return False, f"Rule '{r.get('label')}' failed: {e}"
 

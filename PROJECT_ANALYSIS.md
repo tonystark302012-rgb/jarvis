@@ -24,13 +24,14 @@ Neeche jo analysis hai wo **audit record** hai — kya mila, kaise mila, evidenc
 
 | # | Kaam | Status | Kya badla |
 |---|---|---|---|
-| 7 | **~23,400 tokens har connection pe** | ✅ **FIXED** | Core tier (16 tools) + `toolbox` router; **~15,250 tokens saved, 66% chhota** |
+| 7 | **~23,400 tokens har connection pe** | ✅ **FIXED** | Core tier (21 tools) + `toolbox` router; **~12,860 tokens saved, 55% chhota** |
 | 8 | `config` naam opencv se shadow ho sakta tha | ✅ **FIXED** | `main.py` app root ko `sys.path[0]` pe pin karta hai |
+| 9 | **Automation jhooth bolti thi — fail hone pe "healthy"** | ✅ **FIXED** | Ek `classify_result()`; rules ab `ok/empty/blocked/failed` sach batate hain |
 
 **Verification:**
 ```
 ruff check .                    → All checks passed!
-pytest tests/                   → 1140 passed  (start me 1084 the — +56 naye tests)
+pytest tests/                   → 1172 passed  (start me 1084 the — +88 naye tests)
 feature_audit.py                → 19/19 green
 tools/count_tools.py            → before/after numbers generate karta hai
 ```
@@ -62,7 +63,7 @@ Yani **~23,400 tokens** har connection pe — ek bhi shabd bolne se pehle. Aur `
 **Kyun lazy loading hi karna pada:** Live API `AsyncSession` me sirf `send_client_content`, `send_realtime_input`, `send_tool_response` hain — **tools mid-session update karne ka koi tarika nahi**. Toh "baad me declare karo" possible hi nahi. Model us tool ko call hi nahi kar sakta jiske baare me use bataya nahi gaya.
 
 **Solution:** Core tier + ek router.
-- **Core (16 tools):** open_app, web_search, weather_report, reminder, send_message, terminal, file_processor, file_controller, browser_control, computer_settings, computer_control, youtube_video, video_player, clip_history, **privacy, autonomy** + inline session tools (memory, undo, vision, monitors, shutdown)
+- **Core (21 tools):** open_app, web_search, weather_report, reminder, send_message, terminal, file_processor, file_controller, browser_control, computer_settings, computer_control, youtube_video, video_player, clip_history, **privacy, autonomy**, aur **workflow entry points — rules, dots, pages, obsidian, task_agent** + inline session tools (memory, undo, vision, monitors, shutdown)
   - `privacy` aur `autonomy` jaan-boojhkar core me hain: ye **user ke safety levers** hain, task nahi. Safety switch ke aage router hop lagana galat hai — jis ek baar wo zaroori ho, usi baar model ko dhoondhna padega. Dono milkar sirf ~1.3 KB hain.
 - **`toolbox` router:** `action=search` se schema milta hai, `action=run` se chalta hai
 - **Prompt me sirf naam** (~940 chars, 62 naam) — taaki model ko pata ho ki capability exist karti hai
@@ -72,9 +73,9 @@ Yani **~23,400 tokens** har connection pe — ek bhi shabd bolne se pehle. Aur `
 | | Declarations | Prompt copy | **Total** |
 |---|---|---|---|
 | Pehle | 72,263 ch · 76 tools | 12,024 ch | **93,661 ch ≈ 23,415 tokens** |
-| Ab | 19,813 ch · 16 + router | 3,464 ch | **32,651 ch ≈ 8,162 tokens** |
+| Ab | 28,614 ch · 21 + router | 4,229 ch | **42,217 ch ≈ 10,554 tokens** |
 
-**~15,252 tokens bach gaye — 66% chhota — har connection pe.**
+**~12,860 tokens bach gaye — 55% chhota — har connection pe.**
 
 **Aur safety:** Routed call **usi `_execute_tool` me wapas jaata hai**, toh autonomy gate, confirm gate, undo stack, Mission Control timeline aur audit chain — sab **real tool name** dekhte hain. Maine ye **prove kiya**:
 ```
@@ -110,6 +111,69 @@ NameError: name 'LOADER_DIR' is not defined
 Ye 30 modules ko affect karta hai (`from config import get_base_dir`).
 
 **Fix:** `main.py` ab script-launch pe app root ko `sys.path[0]` pe pin karta hai (import karne pe nahi — caller ka `sys.path` mutate nahi hota).
+
+### 🆕 P1 FIX #9 — Automation jhooth bolti thi (goal-driven finding)
+
+Ye ek real goal se nikla: *"roz subah 8 baje research karo, summary banao, save karo — aur agar kuch nahi mila to mujhe batao, chup na raho."*
+
+Goal chala kar dekha, aur wo **exactly** us jagah toota jahan user ne rok lagayi thi.
+
+`actions/rules.py` ka `_exec_rule()` tool ka jawab leke use **phenk deta tha** aur hamesha success return karta tha:
+
+```python
+out = _RUNNER(r.get("tool", ""), dict(r.get("args") or {}))   # ← asli jawab
+msg = f"Rule '{r.get('label')}' fired ({why})."                # ← generic
+if _NOTIFY: _NOTIFY(msg)                                        # ← output DISCARD
+return True, str(out or "")                                     # ← hamesha OK
+```
+
+Tool failure ko **string** me batate hain, exception se nahi — aur ye code har string ko success maanta tha. Nateeja, chaaron realistic failure modes pe:
+
+| Tool ne kya kaha | Purana verdict | User ko mila | Health |
+|---|---|---|---|
+| `No results found for: AI papers` | ✅ success | "fired" | healthy |
+| `error: dots failed (TimeoutError)` | ✅ success | "fired" | healthy |
+| `denied: 'search_web' needs permission` | ✅ success | "fired" | healthy |
+| `Autonomy mode is OBSERVE …` | ✅ success | "fired" | healthy |
+
+Yaani **jitne bhi tareeke se research fail ho sakta hai, utne hi tareeke se system "sab theek hai" bolta tha** — aur digest user tak kabhi pahunchta hi nahi tha.
+
+**Asli baat ye thi ki verdict pehle se maujood tha, bas pahunchta nahi tha.** `main.py` ka `_agent_runner` (line 686) `ok` khud compute karta hai Mission Control timeline ke liye:
+
+```python
+ok = not (("not available" in text[:80]) or ("failed:" in text[:70]) or
+          text.startswith("Action '") or text.startswith("Tool '"))
+_act_mod.finish(ev, ok, out)     # ← timeline RED ho jaata hai
+return out or "Done."            # ← aur ok verdict yahin kho jaata hai
+```
+
+Aur wahi predicate **teesri baar** `core/action_loader.py:116` (audit chain) me bhi tha. To ek hi call pe: **timeline "fail" dikhata tha, rules health "healthy" kehti thi.**
+
+**Fix — ek hi ghar:**
+
+* `core/action_loader.classify_result()` — naya, wahan rakha jahan strings paida hote hain. Chaar verdicts:
+  * `ok` — chala, kuch nikla
+  * `empty` — chala, **sach me kuch nahi mila** (ye alag verdict hai, failure nahi)
+  * `blocked` — policy ne roka (autonomy mode), tool kharab nahi hai
+  * `failed` — kaam nahi hua
+* `registry.run()` (audit) aur `main._agent_runner` (timeline) dono ab yahi call karte hain — **teen copy khatam.**
+* `_exec_rule()` ab sach bolta hai, aur notification me tool ka **asli output** bhi jaata hai (200 chars, ek line).
+* Empty result **green** rehta hai aur incident clear karta hai (kuch toota nahi) — **par user ko bataya jaata hai.**
+
+`empty` ko regex se pakda, enumerate se nahi — kyunki tools ek hi shape follow karte hain (`No results found`, `No files found.`, `No Steam games found.`, `No references found from …`), aur `^No … found` anchored hai taaki `"Saved. No errors found."` galti se empty na gine.
+
+**Ek saath ek scene bug bhi gaya:** docstring promise karta tha *"a scene stops at the first failing step"* — par rukta sirf exception pe tha. String-failure pe scene poora chal jaata tha aur khud ko "done" bolta tha.
+
+**Result — wahi goal, ab:**
+
+| Din | Pehle | Ab |
+|---|---|---|
+| Papers mile | "fired" (digest gayab) | `fired: 5 papers mile: 1) Mamba-2 …` |
+| Kuch nahi mila | "fired" • healthy | **`ran but found nothing: No results found for…`** |
+| Search crash | "fired" • healthy | `FAILED: error: dots failed (TimeoutError…)` + health incident |
+| Observe mode | "fired" • healthy | `was BLOCKED: Autonomy mode is OBSERVE…` + health incident |
+
+**Tier isi goal se derive kiya:** `rules`, `dots`, `pages`, `obsidian`, `task_agent` core me aa gaye (16 → 21 tools). Wajah: tier ka line ye hai — **entry points aur safety levers core, leaf utilities deferred.** Ek leaf ko router hop afford kar sakta hai; jo tool 10-step ka kaam *shuru* karta hai wo nahi kar sakta, kyunki wo hop bole hue vaakya ke beech me padta hai. `"open Chrome"` ko hop nahi chahiye, `"roz subah 8 baje research karo"` ko chahiye. Isse saving 66% → **55%** hui (~12,860 tokens/connection) — aur conversation se har workflow ka entry point seedha pahunch me hai.
 
 > **Note:** Neeche ke bug sections jaan-boojhkar **original form me** chhode hain (line numbers aur before-state ke saath), kyunki ye woh evidence hai jisse fix justify hua. Fixes ka exact code upar table me aur git diff me hai.
 
@@ -506,7 +570,7 @@ Aur isse **do** nuksaan hote hain:
 Sabse chhota: `open_app` (419 chars) → sabse bada `file_processor` (3,071) — **7.3x gap**.
 
 > ✅ **YE FIX HO CHUKA HAI** — dekho upar "P1 FIX #7". Actual numbers ne estimate ko beat kiya:
-> plan tha ~18K → ~4K, hua **23,415 → 8,162 tokens (66% kam)**, aur asli total plan se bada nikla
+> plan tha ~18K → ~4K, hua **23,415 → 10,554 tokens (55% kam)**, aur asli total plan se bada nikla
 > kyunki `_describe_tools()` wahi descriptions prompt me doosri baar bhej raha tha (12,024 chars extra).
 > Neeche ka text original recommendation hai, record ke liye.
 
@@ -663,6 +727,8 @@ High-value spots (jahan errors **daalni chahiye**, swallow nahi): session save, 
 print() statements : 359
 logging usage      : 10
 ```
+
+> **Re-verify kiya (branch tip pe):** asli situation isse bhi sharp hai — `import logging` **0 baar**, `getLogger` **0 baar**, poore repo me. Ye "10 logging calls" wo `logger=` **callbacks** hain jinhe registries (action/plugin loader) ko diya jaata hai, aur wo callbacks khud `print()` karte hain. Yaani stdlib logging ka ek bhi seam nahi hai.
 
 **Problem:** Koi log levels nahi (DEBUG/INFO/WARN/ERROR), koi rotation nahi, koi structured output nahi, koi "user ke liye log file bhejna" nahi. Emoji-heavy prints console pe achhe lagte hain, par `grep`/parse karna mushkil hai.
 
@@ -886,7 +952,7 @@ Ab test me fake audio backend inject karo, aur **asli behavior test** karo — g
 
 ### 1. ~22,000 tokens static payload har connection pe
 (Part 4 me detail) — **sabse bada performance win, aur ab ho chuka hai** (P1 FIX #7):
-~15,252 tokens per connection bache. Ye section original analysis hai.
+~12,860 tokens per connection bache. Ye section original analysis hai.
 
 ### 2. `core/action_loader.py` — 76 modules import at startup
 Har launch pe 76 `actions/*.py` files import hote hain (maine output me `Action loaded: X` 76 baar dekha). Ye **startup time** aur **memory** dono cost karta hai.
@@ -978,7 +1044,7 @@ Hinglish strings aur English strings code me mixed hain (`'Researcher se pucho..
 
 | # | Kaam | Effort | Impact |
 |---|---|---|---|
-| 13 | ~~**Lazy/tiered tool loading**~~ | ✅ **DONE** | 23.4K → 8.2K tokens (66% kam) |
+| 13 | ~~**Lazy/tiered tool loading**~~ | ✅ **DONE** | 23.4K → 10.6K tokens (55% kam) |
 | 14 | `ui.py` split → `ui/` package (display_panel.py already start hai) | 2-3 din | Maintainability |
 | 15 | `main.py` `JarvisLive` split → connection / audio / tools | 2 din | Testability |
 | 16 | 64 source-grep tests ko behavior tests me convert karo | 3 din | Real confidence |
@@ -1112,7 +1178,7 @@ Jon log ye banaya, unhone:
 | Priority | Kaam | Time | Kyun |
 |---|---|---|---|
 | 🥇 | `revoke_devices` fix + token TTL | 1 hr | Security jhooth abhi band karo |
-| ✅ | ~~Lazy tool loading~~ | **HO GAYA** | 23.4K → 8.2K tokens, 66% chhota |
+| ✅ | ~~Lazy tool loading~~ | **HO GAYA** | 23.4K → 10.6K tokens, 55% chhota |
 | 🥉 | Audio pipeline tests + mypy in CI | 1 hafta | Confidence real ho, dikhawa nahi |
 
 **P0 sab milaake ~2 ghante ka kaam hai.** Wo kar lo, phir ye project genuinely production-grade ho jaayega.

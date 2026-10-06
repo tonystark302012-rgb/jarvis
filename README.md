@@ -142,14 +142,14 @@ Mark LV ships **76** self-describing skills (every `actions/*.py` that declares 
 
 **Every one of those 76 can be reached — but they are no longer all announced.** Two of them matter here: the declaration cost, and the fact that 76 tools is a lot of surface to pick the wrong one from.
 
-JARVIS now declares a **core tier of 16 tools** — the ones asked for constantly (open an app, search, weather, a reminder, a file, the volume, play a video, remember this, undo that) plus **the user's own levers** (`privacy`, `autonomy`), because a safety switch is the last thing that should need a lookup — and **one router called `toolbox`**. Everything else waits behind it: the model searches (`toolbox action=search query="3d model"`), gets the matching tools with their full parameter schemas, and runs one (`toolbox action=run tool=make_3d parameters_json=...`). A deferred tool costs one extra round trip; "open Chrome" never pays it.
+JARVIS now declares a **core tier of 21 tools** and **one router called `toolbox`**. The tier is drawn on one line: **entry points and safety levers are core, leaf utilities are deferred.** So it holds the things asked for constantly (open an app, search, weather, a reminder, a file, play a video, remember this, undo that), the user's own levers (`privacy`, `autonomy` — a safety switch is the last thing that should need a lookup), and the tools that *start a workflow* rather than perform one action (`rules`, `dots`, `pages`, `obsidian`, `task_agent`). "Roz subah 8 baje research karo" is not one call — it needs `rules` to schedule it and `dots` to pick the researcher, and those round trips land in the middle of a spoken sentence. Everything else waits behind it: the model searches (`toolbox action=search query="3d model"`), gets the matching tools with their full parameter schemas, and runs one (`toolbox action=run tool=make_3d parameters_json=...`). A deferred tool costs one extra round trip; "open Chrome" never pays it.
 
 The saving is large and measurable:
 
 | | Declarations | Prompt copy | **Total per connection** |
 |---|---|---|---|
 | All declared | 72,263 ch · 76 tools | 12,024 ch | **93,661 ch ≈ 23,400 tokens** |
-| Tiered (default) | 19,813 ch · 16 + router | 3,464 ch | **32,651 ch ≈ 8,200 tokens** |
+| Tiered (default) | 28,614 ch · 21 + router | 4,229 ch | **42,217 ch ≈ 10,550 tokens** |
 
 **~15,250 tokens off every session — 66% smaller — before a word is spoken.**
 
@@ -583,7 +583,7 @@ Things worth knowing before you rely on them. Each one is a deliberate, document
 
 **Remote dashboard sessions expire.** A phone paired by QR gets a 12-hour session and can re-pair itself for 30 days, after which it must scan a new code. "Revoke devices" now kills the live bearer tokens *and* the pairing, so a revoked phone stops working immediately instead of at the next restart. (It did not, before this branch — it cleared the pairing only, so the phone in the room kept its access while the UI reported success.)
 
-**Most skills are found, not announced.** 16 core tools travel with every session; the other 60 are reached through `toolbox`, which costs one extra round trip. If the model seems to have forgotten an ability, ask it to search `toolbox` — or switch **⚙ CONTROLS → TOOLS** to "ALL DECLARED" and it sees everything up front for ~15,000 more tokens a session. Run `python tools/count_tools.py` to see the current cost.
+**Most skills are found, not announced.** 21 core tools travel with every session; the other 55 are reached through `toolbox`, which costs one extra round trip. If the model seems to have forgotten an ability, ask it to search `toolbox` — or switch **⚙ CONTROLS → TOOLS** to "ALL DECLARED" and it sees everything up front for ~13,000 more tokens a session. Run `python tools/count_tools.py` to see the current cost.
 
 **The GUI and the audio path have no automated tests.** `tools/feature_audit.py` proves the tool registry and the platform integrations run in *this* environment, and CI proves the logic layer — but nothing exercises the PyQt HUD, the TTS/STT pipeline or the wake word end to end. Run `python tools/feature_audit.py` after an upgrade rather than assuming.
 
