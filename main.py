@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import platform as _platform
 import subprocess as _subprocess
 
@@ -42,6 +44,10 @@ import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:                  # annotation only — never imported
+    from ui import JarvisUI
 
 # ── The app root must win the name "config" ──────────────────────────────────
 # This project's own package is `config/` and about thirty modules reach it with
@@ -59,11 +65,22 @@ from pathlib import Path
 if __name__ == "__main__" or __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import sounddevice as sd
 import numpy as np
 from google import genai
+
+
+def _sd():
+    """sounddevice, imported on first use.
+
+    PortAudio is a system library. Importing it at module load made
+    `python main.py --version` fail on a machine that had not installed it
+    yet — which is exactly when someone asks for the version.
+    """
+    import sounddevice as sd
+    return sd
+
+
 from google.genai import types
-from ui import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -553,7 +570,7 @@ def _keep_context_of(exc: BaseException) -> bool:
 
 
 class JarvisLive:
-    def __init__(self, ui: JarvisUI):
+    def __init__(self, ui: "JarvisUI"):
         self.ui             = ui
         # Universal render surface: every show_content() from any tool is
         # mirrored to the dashboard's DISPLAY|SCAN|3D|WEB tabs. Set early
@@ -1844,7 +1861,7 @@ class JarvisLive:
 
         try:
             def _open_mic(dev):
-                return sd.InputStream(
+                return _sd().InputStream(
                     samplerate=SEND_SAMPLE_RATE,
                     channels=CHANNELS,
                     dtype="int16",
@@ -2095,7 +2112,7 @@ class JarvisLive:
             print(f"[JARVIS] 🔊 Output device: {_spk_name}")
 
         def _open_spk(dev):
-            st = sd.RawOutputStream(
+            st = _sd().RawOutputStream(
                 samplerate=RECEIVE_SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype="int16",
@@ -2910,6 +2927,8 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
+    from ui import JarvisUI        # Qt loads here, not on `import main`
+
     ui = JarvisUI("face.png")
 
     def runner():
@@ -2932,5 +2951,44 @@ def main():
     threading.Thread(target=runner, daemon=True).start()
     ui.root.mainloop()
 
-if __name__ == "__main__":
+def _cli(argv: "list[str] | None" = None) -> int:
+    """Entry point: flags first, then logging, then the app.
+
+    Logging is configured here rather than at import time because importing
+    this module is what the test suite does, and a library that reconfigures
+    logging when you import it is a nuisance. `install_excepthook` matters for
+    the same class of problem the log file solves: a crash in a GUI launch
+    goes to a stderr nobody is looking at.
+    """
+    import argparse
+
+    from core.version import full_version
+    parser = argparse.ArgumentParser(
+        prog="jarvis", description="voice-first desktop assistant")
+    parser.add_argument("--version", action="version", version=full_version())
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="write a diagnostics zip (log + redacted config) "
+                             "and exit")
+    parser.add_argument("--doctor", action="store_true",
+                        help="check this machine for the things JARVIS needs "
+                             "and exit")
+    args = parser.parse_args(argv)
+
+    from core import logging_setup
+    logging_setup.setup()
+    logging_setup.install_excepthook()
+
+    if args.doctor:
+        from tools.doctor import run_checks, format_report
+        print(format_report(run_checks()))
+        return 0
+    if args.diagnostics:
+        print(f"wrote {logging_setup.export_diagnostics()}")
+        return 0
+
     main()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

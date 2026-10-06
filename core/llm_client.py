@@ -34,6 +34,10 @@ from typing import Callable, Generator
 
 import requests
 
+from core.logging_setup import get_logger
+
+log = get_logger(__name__)
+
 # Matches a sentence boundary: [.!?] followed by whitespace, or a blank line.
 # Avoids splitting on decimals (3.5) because those have no space after the dot.
 _SENT_END = re.compile(r'(?<=[.!?])\s+|(?<=\n)\s*\n')
@@ -169,7 +173,7 @@ def ensure_ollama_running(timeout: int = 15) -> bool:
         print("[LLM] 'ollama' command not found. Install Ollama from https://ollama.com")
         return False
     except Exception as e:
-        print(f"[LLM] Could not launch Ollama: {e}")
+        log.warning(f"Could not launch Ollama: {e}")
         return False
 
     deadline = time.time() + timeout
@@ -224,7 +228,7 @@ def warmup_model(system_prompt: str | None = None) -> bool:
             print(f"[LLM] '{model}' ready (OpenAI-compatible server).")
             return True
         except Exception as e:
-            print(f"[LLM] Warmup failed (non-fatal): {e}")
+            log.warning(f"Warmup failed (non-fatal): {e}")
             return False
 
     # ── Ollama ──────────────────────────────────────────────────────────────
@@ -243,7 +247,7 @@ def warmup_model(system_prompt: str | None = None) -> bool:
         print(f"[LLM] '{model}' loaded and KV cache primed.")
         return True
     except Exception as e:
-        print(f"[LLM] Warmup failed (non-fatal): {e}")
+        log.warning(f"Warmup failed (non-fatal): {e}")
         return False
 
 
@@ -379,7 +383,7 @@ def call_llm(
             "tool_calls": msg.get("tool_calls") or [],
         }
     except requests.exceptions.ConnectionError as e:
-        print(f"[LLM] ConnectionError — trying to restart Ollama… ({e})")
+        log.warning(f"ConnectionError — trying to restart Ollama… ({e})")
         if ensure_ollama_running():
             try:
                 resp = requests.post(endpoint, json=payload, timeout=timeout)
@@ -399,10 +403,10 @@ def call_llm(
     except requests.exceptions.Timeout:
         raise RuntimeError("Ollama request timed out after 120 s.")
     except requests.exceptions.HTTPError as e:
-        print(f"[LLM] HTTPError: {e.response.status_code} — {e.response.text[:200]}")
+        log.warning(f"HTTPError: {e.response.status_code} — {e.response.text[:200]}")
         raise RuntimeError(f"Ollama HTTP error: {e.response.status_code}")
     except Exception as e:
-        print(f"[LLM] Unexpected error: {type(e).__name__}: {e}")
+        log.warning(f"Unexpected error: {type(e).__name__}: {e}")
         raise RuntimeError(f"LLM call failed: {e}")
 
 
@@ -665,7 +669,7 @@ def call_llm_stream(
     try:
         yield from _do_stream()
     except requests.exceptions.ConnectionError as e:
-        print(f"[LLM] Stream ConnectionError — trying to restart Ollama… ({e})")
+        log.warning(f"Stream ConnectionError — trying to restart Ollama… ({e})")
         if ensure_ollama_running():
             yield from _do_stream()
             return
@@ -678,5 +682,5 @@ def call_llm_stream(
     except requests.exceptions.HTTPError as e:
         raise RuntimeError(f"Ollama HTTP error: {e.response.status_code}")
     except Exception as e:
-        print(f"[LLM] Stream error: {type(e).__name__}: {e}")
+        log.warning(f"Stream error: {type(e).__name__}: {e}")
         raise RuntimeError(f"LLM stream failed: {e}")

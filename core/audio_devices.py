@@ -28,6 +28,10 @@ from __future__ import annotations
 import threading
 import time
 
+from core.logging_setup import get_logger
+
+log = get_logger(__name__)
+
 # The label shown for "let the OS decide", and the value stored in config for
 # it. Empty string, so an untouched install and a deliberately-default install
 # are the same thing — nothing changes for anyone who never opens the picker.
@@ -166,7 +170,7 @@ def _transport_works(idx: int, kind: str, api_key) -> bool:
                 print(f"[Audio] input: host API delivered {frames[0]} frames in "
                       f"{secs*1000:.0f} ms — skipping it")
     except Exception as e:
-        print(f"[Audio] {kind} transport probe failed: {e}")
+        log.warning(f"{kind} transport probe failed: {e}")
         ok = False
 
     _probe_results[api_key] = ok
@@ -315,7 +319,7 @@ def _query() -> dict[str, list[str]]:
         return out
 
     except Exception as e:
-        print(f"[Audio] Device enumeration failed: {e}")
+        log.warning(f"Device enumeration failed: {e}")
     return out
 
 
@@ -417,5 +421,5 @@ def resolve(name: str, kind: str):
               f"{_RATES.get(kind)} Hz on any host API — using system default")
         return None
     except Exception as e:
-        print(f"[Audio] resolve({kind}) failed: {e} — using system default")
+        log.warning(f"resolve({kind}) failed: {e} — using system default")
         return None

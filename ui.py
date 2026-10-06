@@ -7397,8 +7397,29 @@ class MainWindow(QMainWindow):
         self._tier_btn.clicked.connect(self._toggle_tool_tiering)
         self._refresh_tier_btn()
 
+        # Diagnostics: the log file is only useful if it can leave the machine.
+        # One press writes a zip (log + redacted config + audit tail) and says
+        # where it went, because "send me the log" is the first thing anyone
+        # asks and hunting for ~/.jarvis/logs is the first thing that fails.
+        self._diag_btn = _row(QPushButton())
+        self._diag_btn.setText("  EXPORT DIAGNOSTICS")
+        self._diag_btn.setStyleSheet(self._BTN_DIM)
+        set_icon(self._diag_btn, "save", C.TEXT_MED, 13)
+        self._diag_btn.clicked.connect(self._export_diagnostics)
+
         w.adjustSize()
         return w
+
+    def _export_diagnostics(self) -> None:
+        """Write the bundle and tell the user exactly where it landed."""
+        try:
+            from core import logging_setup
+            if not logging_setup.is_configured():
+                logging_setup.setup(console=False)
+            dest = logging_setup.export_diagnostics()
+            self.write_log(f"SYS: Diagnostics written → {dest}")
+        except Exception as e:
+            self.write_log(f"SYS: Could not write diagnostics — {e}")
 
     def _refresh_tier_btn(self) -> None:
         from memory.config_manager import get_tool_tiering_enabled

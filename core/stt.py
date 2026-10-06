@@ -7,6 +7,10 @@ Vosk     – offline streaming transcription (lighter)
 import json
 import numpy as np
 
+from core.logging_setup import get_logger
+
+log = get_logger(__name__)
+
 
 class WhisperSTT:
     """Offline transcription using faster-whisper."""
@@ -66,7 +70,7 @@ class WhisperSTT:
             )
             return " ".join(s.text for s in segments).strip()
         except Exception as e:
-            print(f"[STT] Transcription error: {e}")
+            log.warning(f"Transcription error: {e}")
             raise
 
 
