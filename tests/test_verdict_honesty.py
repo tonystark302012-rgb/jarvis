@@ -1,14 +1,19 @@
-"""An unattended automation must never report a success that did not happen.
+"""A tool reports failure as a STRING, never as an exception — and nothing
+that has to judge a call may forget it.
 
-The bug this file locks down: a tool reports failure as a STRING, never as an
-exception, and `rules._exec_rule` returned `True` for every string it got. So a
-scheduled research run whose search came back empty — or whose call was refused
-by the autonomy gate — was filed as healthy, cleared any incident, and told the
-user "Rule 'X' fired". The Mission Control timeline marked the very same call
-as failed. Two answers, one call.
+Four consumers read that verdict: `ActionRegistry.run` (audit chain),
+`main._agent_runner` (Mission Control timeline), `rules._exec_rule` (automation
+health) and now `orchestrator.run_task` (task_agent steps). Each of the first
+three had grown its own reading of the same text, and the fourth was not
+reading it at all. The consequence was always the same shape: work that did
+not happen was reported as work that did.
 
-The test predicate had also been copy-pasted into two more places. All three
-now read `core.action_loader.classify_result`.
+    rules engine      a research run that found nothing  -> "fired", healthy
+    orchestrator      every failed step                  -> ✓, "done"
+
+All four now read `core.action_loader.classify_result`, which lives next to the
+strings it classifies. The shapes below are real output from the tools that
+produce them.
 """
 from __future__ import annotations
 
@@ -236,3 +241,155 @@ class TestTheVerdictHasOneHome:
         self._registry("web_search", EMPTY_SEARCH).run("web_search", {})
         assert "(ok)" in ac.recent(1)
         assert al.classify_result(EMPTY_SEARCH) == al.RESULT_EMPTY
+
+
+class TestOrchestratorStepVerdicts:
+    """The exception channel is not the failure channel.
+
+    `run_task` marked a step ok=True unless the runner RAISED. The runner
+    main.py wires in is `ActionRegistry.run`, which catches the handler's
+    exception and returns it as an honest string — it never raises. So every
+    failed step was ✓, `report.ok` was always True, `stop_on_error` never
+    stopped, and task_agent returned "done" for a plan that did nothing.
+
+    The pre-existing orchestrator tests all passed, because all of them made
+    their runner raise. The production runner does not.
+    """
+
+    def _steps(self):
+        from core.orchestrator import Step
+        return [Step("web_search", {"query": "papers"}),
+                Step("terminal", {"command": "x"}),
+                Step("save_memory", {"key": "k"})]
+
+    def test_a_failure_string_is_a_failed_step(self):
+        from core.orchestrator import run_task
+        rep = run_task("scan", self._steps(),
+                       lambda t, a: "error: dots failed (TimeoutError)")
+        assert not rep.ok
+        assert [s.ok for s in rep.steps] == [False]
+
+    def test_stop_on_error_applies_to_string_failures(self):
+        from core.orchestrator import run_task
+        rep = run_task("scan", self._steps(),
+                       lambda t, a: "Tool 'terminal' failed: nope",
+                       stop_on_error=True)
+        assert rep.stopped_early
+        assert len(rep.steps) == 1        # nothing after the failure ran
+        assert rep.planned == 3
+
+    def test_an_empty_result_is_not_a_failure(self):
+        """A tool that ran and found nothing did its job — the plan must keep
+        going, or "search, then save the summary" would stop at every dry day."""
+        from core.orchestrator import run_task
+        rep = run_task("scan", self._steps(),
+                       lambda t, a: "No results found for: AI papers",
+                       stop_on_error=True)
+        assert rep.ok and not rep.stopped_early
+        assert len(rep.steps) == 3
+
+    def test_a_blocked_step_stops_the_plan(self):
+        """Observe mode refusing a step is not a tool failure, but the plan
+        cannot continue past it either — the next steps depend on it."""
+        from core.orchestrator import run_task
+        rep = run_task("scan", self._steps(),
+                       lambda t, a: ("Autonomy mode is OBSERVE (read-only) — "
+                                     "'terminal' would change state, so I "
+                                     "didn't run it."),
+                       stop_on_error=True)
+        assert not rep.ok and rep.stopped_early and len(rep.steps) == 1
+
+    def test_the_report_text_shows_the_failure(self):
+        from core.orchestrator import run_task
+        rep = run_task("scan", self._steps(),
+                       lambda t, a: "error: nope", stop_on_error=True)
+        text = rep.text()
+        assert "✗" in text and "0/1 steps completed" in text
+        assert "2 planned step(s) skipped" in text
+
+    def test_the_raising_runner_still_works(self):
+        """Back-compat — this is what every pre-existing test used."""
+        from core.orchestrator import run_task
+        def boom(t, a):
+            raise RuntimeError("network down")
+        rep = run_task("scan", self._steps(), boom, stop_on_error=True)
+        assert not rep.ok and rep.stopped_early and len(rep.steps) == 1
+
+    def test_a_clean_plan_is_still_ok(self):
+        from core.orchestrator import run_task
+        rep = run_task("scan", self._steps(), lambda t, a: "done")
+        assert rep.ok and rep.done == 3 and not rep.stopped_early
+
+
+class TestTaskAgentReplansOnToolFailure:
+    """task_agent documents "a failed chunk triggers bounded re-planning of
+    ONLY the remaining work". Until the step verdict was fixed that branch was
+    unreachable in production — `report.ok` was always True, so the run always
+    returned at the success check above it."""
+
+    def _wire(self, monkeypatch, ta, plan, runner, replan):
+        from core.orchestrator import Step  # noqa: F401  (kept for clarity)
+        monkeypatch.setattr(ta, "_plan_with_llm", lambda g, n: plan)
+        monkeypatch.setattr(ta, "_replan_llm", replan)
+        ta.set_runner(runner)
+        ta.set_runner_names([s.tool for s in plan] + ["recovery"])
+        return ta
+
+    def test_a_failed_step_reaches_the_replanner(self, monkeypatch):
+        from actions import task_agent as ta
+        from core.orchestrator import Step
+        seen: list[str] = []
+
+        def replan(goal, done, failed, failed_result, names):
+            seen.append(failed.tool)
+            return [Step("recovery", {}, why="try another way")]
+
+        ran: list[str] = []
+        def runner(tool, args):
+            ran.append(tool)
+            if tool == "terminal":
+                return "error: dots failed (TimeoutError)"
+            return "done"
+
+        self._wire(monkeypatch, ta,
+                   [Step("web_search", {}), Step("terminal", {})], runner, replan)
+        out = ta.task_agent({"description": "scan the news"})
+        assert seen == ["terminal"], "the replanner was never consulted"
+        assert "recovery" in ran, "the re-planned step never ran"
+        assert "terminal" in out
+
+    def test_a_policy_refusal_does_not_burn_the_replan_budget(self, monkeypatch):
+        """Re-planning cannot un-refuse observe mode, and it cannot answer a
+        confirmation prompt. Stop and say so instead of trying again."""
+        from actions import task_agent as ta
+        from core.orchestrator import Step
+        called: list[str] = []
+        self._wire(
+            monkeypatch, ta, [Step("terminal", {})],
+            lambda t, a: ("Autonomy mode is OBSERVE (read-only) — 'terminal' "
+                          "would change state, so I didn't run it."),
+            lambda *a: called.append("replan") or [Step("recovery", {})])
+        out = ta.task_agent({"description": "run something"})
+        assert called == [], "observe mode must not be re-planned"
+        assert "OBSERVE" in out
+
+    def test_a_destructive_refusal_is_not_replanned_either(self, monkeypatch):
+        from actions import task_agent as ta
+        from core.orchestrator import Step
+        called: list[str] = []
+        self._wire(monkeypatch, ta, [Step("procman", {"action": "kill"})],
+                   lambda t, a: "unused",
+                   lambda *a: called.append("replan") or [])
+        out = ta.task_agent({"description": "kill stuff"})
+        assert called == []
+        assert "refused" in out
+
+    def test_a_clean_run_never_calls_the_replanner(self, monkeypatch):
+        from actions import task_agent as ta
+        from core.orchestrator import Step
+        called: list[str] = []
+        self._wire(monkeypatch, ta, [Step("web_search", {})],
+                   lambda t, a: "5 papers found",
+                   lambda *a: called.append("replan") or [])
+        out = ta.task_agent({"description": "scan"})
+        assert called == [] and "1/1 steps completed" in out

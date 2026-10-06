@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from core import activity
+from core.action_loader import (RESULT_BLOCKED, RESULT_FAILED,
+                                classify_result)
 
 # Tools that change or destroy state beyond the ordinary. Opening a file is
 # fine; deleting a drive is not. The list is consulted by run_task() and is
@@ -170,10 +172,25 @@ def run_task(
             try:
                 result = runner(step.tool, step.args)
                 elapsed = time.time() - t0
-                # A runner returns its outcome as text; empty is still success
-                # unless it raised. Trust the exception channel, not wording.
-                activity.finish(ev, True, result)
-                report.steps.append(StepResult(step, True, str(result or ""), elapsed))
+                text = "" if result is None else str(result)
+                # The exception channel is NOT the failure channel. The runner
+                # main.py wires in is `ActionRegistry.run`, which catches the
+                # handler's exception and returns it as an honest STRING
+                # ("Tool 'x' failed: …") — it never raises. Judging only by
+                # exceptions therefore marked every failed step ✓, which meant
+                # `report.ok` was always True: `stop_on_error` never stopped,
+                # task_agent returned "done", and its documented bounded replan
+                # was unreachable in production. Same classifier as the rules
+                # engine, the timeline and the audit chain.
+                #
+                # `empty` counts as success on purpose — a tool that ran and
+                # found nothing did its job.
+                kind = classify_result(text)
+                ok = kind not in (RESULT_FAILED, RESULT_BLOCKED)
+                activity.finish(ev, ok, text)
+                report.steps.append(StepResult(step, ok, text, elapsed))
+                if not ok and stop_on_error:
+                    report.stopped_early = True
                 break
             except Exception as e:
                 elapsed = time.time() - t0

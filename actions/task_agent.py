@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import Callable
 
 from core import orchestrator
+from core.action_loader import RESULT_BLOCKED, classify_result
 
 # Injected by main.py once the action registry exists: fn(tool, args) -> str.
 _runner: Callable[[str, dict], str] | None = None
@@ -333,8 +334,15 @@ def _execute_goal(goal: str, steps: list[orchestrator.Step],
             first_fail = next(i for i, sr in enumerate(report.steps)
                               if not sr.ok)
             failed_sr = report.steps[first_fail]
-            refusal = str(failed_sr.result or "").startswith("refused:")
-            if refusal or replans >= max_replans or _runner is None:
+            failed_text = str(failed_sr.result or "")
+            # A "no" is not a bug. Replanning is for tools that failed; a
+            # destructive step waiting on the user's confirmation, or a policy
+            # layer (observe mode) refusing, will refuse the same way however
+            # many times we re-plan it — so stop and report instead of burning
+            # the replan budget.
+            policy_no = (classify_result(failed_text) == RESULT_BLOCKED
+                         or failed_text.startswith("refused:"))
+            if policy_no or replans >= max_replans or _runner is None:
                 break
             replan = _replan_llm(
                 goal,
