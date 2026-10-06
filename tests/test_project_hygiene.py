@@ -266,3 +266,138 @@ class TestLockFile:
         machine; pinning it from one platform would break every other one."""
         text = (ROOT / "requirements.lock").read_text(encoding="utf-8")
         assert "requirements-dev.txt" in text
+
+
+class TestPyprojectMetadata:
+    """`[project]` exists so the repository is a project and not a folder, and
+    so the version and the dependency lists have exactly one home."""
+
+    def _cfg(self) -> dict:
+        import tomllib
+        return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    def test_it_is_a_real_project(self):
+        proj = self._cfg()["project"]
+        assert proj["name"] and proj["description"]
+        assert proj["requires-python"] == ">=3.11"
+        assert proj["readme"] == "README.md"
+        assert (ROOT / "README.md").is_file()
+
+    def test_the_build_backend_is_declared(self):
+        bs = self._cfg()["build-system"]
+        assert bs["build-backend"] == "setuptools.build_meta"
+        assert any(r.startswith("setuptools") for r in bs["requires"])
+
+    def test_version_is_read_from_core_version(self):
+        """Two versions in one repository is one version too many."""
+        cfg = self._cfg()
+        assert "version" in cfg["project"]["dynamic"]
+        assert cfg["tool"]["setuptools"]["dynamic"]["version"]["attr"] == \
+            "core.version.__version__"
+
+    def test_dependencies_are_read_from_the_requirements_files(self):
+        cfg = self._cfg()
+        dyn = cfg["project"]["dynamic"]
+        assert "dependencies" in dyn and "optional-dependencies" in dyn
+        se = cfg["tool"]["setuptools"]["dynamic"]
+        assert se["dependencies"]["file"] == ["requirements.txt"]
+        assert se["optional-dependencies"]["dev"]["file"] == ["requirements-dev.txt"]
+        assert (ROOT / "requirements.txt").is_file()
+        assert (ROOT / "requirements-dev.txt").is_file()
+
+    def test_the_package_list_matches_the_directories(self):
+        """A package that is renamed and not listed here becomes a wheel that
+        is missing a module — and nothing else would notice."""
+        cfg = self._cfg()["tool"]["setuptools"]
+        listed = cfg["packages"]
+        assert len(listed) >= 8
+        for pkg in listed:
+            d = ROOT / pkg
+            assert d.is_dir(), f"package listed but missing: {pkg}"
+            assert (d / "__init__.py").is_file(), f"{pkg}/ has no __init__.py"
+        assert cfg["py-modules"] == ["main"]
+        assert (ROOT / "main.py").is_file()
+
+    def test_package_data_points_at_files_that_exist(self):
+        data = self._cfg()["tool"]["setuptools"]["package-data"]
+        checked = 0
+        for pkg, patterns in data.items():
+            for pattern in patterns:
+                matches = list((ROOT / pkg).glob(pattern))
+                assert matches, f"package-data matches nothing: {pkg}/{pattern}"
+                for f in matches:
+                    # a pattern may cover a directory (dashboard/static/* has a
+                    # css/ folder); setuptools recurses into those
+                    assert f.exists(), f"package-data names a missing path: {f}"
+                    if f.is_file():
+                        checked += 1
+        assert checked >= 3, f"package-data matched only {checked} files"
+
+    def test_the_test_config_lives_here_too(self):
+        assert self._cfg()["tool"]["pytest"]["ini_options"]["testpaths"] == ["tests"]
+
+
+class TestMypyConfig:
+    """The curated list is the gate. It is only worth anything if it is clean
+    and if the files on it still exist."""
+
+    def _files(self) -> list[str]:
+        import tomllib
+        cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        return cfg["tool"]["mypy"]["files"]
+
+    def test_every_listed_module_exists(self):
+        """Move a module and this catches it. Otherwise the file silently drops
+        off the gate and the type check just gets smaller."""
+        missing = [f for f in self._files() if not (ROOT / f).is_file()]
+        assert not missing, f"mypy is configured to check files that moved: {missing}"
+
+    def test_the_list_is_worth_checking(self):
+        files = self._files()
+        assert len(files) >= 25
+        # the foundation modules must be on it
+        for f in ("core/paths.py", "core/version.py", "core/logging_setup.py"):
+            assert f in files
+
+    def test_it_does_not_hide_errors_with_suppressions(self):
+        import tomllib
+        cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        mypy = cfg["tool"]["mypy"]
+        # ignoring missing third-party stubs is a policy, not a suppression
+        assert mypy.get("ignore_missing_imports") is True
+        for key in ("disable_error_code", "follow_imports"):
+            assert key not in mypy, f"{key} would weaken the gate"
+
+    def test_the_curated_list_is_actually_clean(self):
+        if not (ROOT / ".venv" / "bin" / "mypy").exists():
+            pytest.skip("mypy is not installed in this environment")
+        out = subprocess.run([sys.executable, "-m", "mypy"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=600)
+        assert out.returncode == 0, out.stdout[-1500:]
+
+
+class TestWarnOnlyChecksAreLabelled:
+    """Two CI steps are red-by-design today. They must say so, and the numbers
+    they report must not drift silently."""
+
+    def _workflow(self) -> str:
+        return (ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8")
+
+    def test_format_and_whole_repo_types_are_continue_on_error(self):
+        text = self._workflow()
+        for name in ("Formatting (ruff format", "Types (mypy — whole repo"):
+            block = text.split(f"- name: {name}", 1)[1].split("- name:", 1)[0]
+            assert "continue-on-error: true" in block, f"{name} would fail the build"
+
+    def test_the_curated_types_step_is_a_gate(self):
+        text = self._workflow()
+        block = text.split("- name: Types (mypy — curated module list)", 1)[1]
+        head = block.split("- name:", 1)[0]
+        assert "continue-on-error" not in head
+        assert "python -m mypy" in head
+
+    def test_it_does_not_check_a_build_directory(self):
+        """`python -m build` leaves build/lib behind with a copy of every
+        package; mypy then reports duplicate modules and checks nothing."""
+        text = self._workflow()
+        assert "--ignore-missing-imports core actions dashboard" in text

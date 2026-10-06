@@ -421,15 +421,27 @@ python main.py
 ## 🛠️ Development
 
 ```bash
-pip install -r requirements-dev.txt   # pytest + ruff + test deps (fast, no PyQt needed)
-ruff check .                          # lint — pyflakes + statement errors, must be clean
-python -m pytest tests/ -q            # full suite — offline, no mic/display/API key
-python tools/ui_smoke.py              # offscreen HUD E2E (needs PyQt6 + a display server stub)
-python tools/ui_preview.py            # bootstrap the dashboard preview on :8712 with a PREVIEW token
-python tools/feature_audit.py         # live probe: every feature's real entry point (19 checks, exit≠0 = broken)
+pip install -r requirements-dev.txt   # pytest + ruff + mypy + test deps (fast, no PyQt needed)
+make test                             # full suite — offline, no mic/display/API key
+make lint                             # ruff — pyflakes + statement errors, must be clean
+make typecheck                        # mypy on the curated module list in pyproject.toml
+make audit                            # live probe: every feature's real entry point (19 checks)
+make doctor                           # what is missing on this machine
+make help                             # every target
 ```
 
-CI runs both on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`). The suite covers the security invariants: no `shell=True` in `open_app`/`dev_agent`, the run-command allowlist, project-path containment, pip-flag injection, the dashboard AES round-trip, brute-force lockout, memory recall and parallel tool dispatch.
+`make` wraps the commands so there is one definition of each; the equivalents are
+`python -m pytest tests/ -q`, `ruff check .`, `python -m mypy`. Two more, run
+directly because they need a display stub or start a server:
+
+```bash
+python tools/ui_smoke.py              # offscreen HUD E2E (needs PyQt6)
+python tools/ui_preview.py            # dashboard preview on :8712 with a PREVIEW token
+```
+
+CI runs on every push and pull request across **Python 3.11 / 3.12 / 3.13** (`.github/workflows/ci.yml`): ruff, a curated mypy gate, `compileall` over every module, then the suite. Two additional checks run **warn-only** and print their numbers — `ruff format` (176 files would change; the tree is deliberately not format-clean) and mypy over the whole app (533 errors today, nearly all missing annotations in deliberately dynamic code). Turning either into a gate is a roadmap item, not a decision to make by accident (`PROJECT_ANALYSIS.md` P1-9, P3-28).
+
+The suite covers the security invariants: no `shell=True` in `open_app`/`dev_agent`, the run-command allowlist, project-path containment, pip-flag injection, the dashboard AES round-trip and token TTL, brute-force lockout, memory recall and parallel tool dispatch.
 
 ## 📋 Requirements
 
@@ -453,10 +465,10 @@ jarvis/
 ├── main.py                   # Core loop — Gemini Live session, audio I/O, viseme extraction, tool dispatch
 ├── ui/                       # PyQt6 HUD v2 — app.py is the window, display_panel.py the screen
 ├── bootstrap.py              # OS-aware installer (skips wrong-OS dependencies, checks your Python)
-├── pyproject.toml            # ruff + pytest configuration (lint must stay clean in CI)
+├── pyproject.toml            # project metadata + ruff/mypy/pytest configuration
 ├── requirements.txt          # Runtime dependencies (OS markers filter per platform)
 ├── requirements-dev.txt      # Test/lint dependencies — pip install -r requirements-dev.txt
-├── .github/workflows/ci.yml  # CI: ruff + compileall + pytest on Python 3.11/3.12/3.13
+├── .github/workflows/ci.yml  # CI: ruff + mypy (gated) + compileall + pytest, 3.11/3.12/3.13
 ├── .gitignore                # Keeps your API key, TLS key and memories out of the repository
 ├── tests/
 │   ├── test_roadmap.py       # Biggest suite — every roadmap batch: tools, privacy, presence, agents

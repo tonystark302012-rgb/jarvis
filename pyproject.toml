@@ -1,7 +1,77 @@
-# ── MARK LV / JARVIS — project tooling ────────────────────────────────────────
-# Single source of truth for lint, format and test configuration.
-# Run locally:   ruff check .   ·   python -m pytest tests/ -q
+# ── MARK LV / JARVIS — project configuration ──────────────────────────────────
+#
+# One file for: what this project is, how it is linted, how it is type-checked,
+# how it is tested, and how it can be built.
+#
+#   pip install .                      # installs the runtime requirements + modules
+#   pip install -e ".[dev]"            # editable, with the test/lint stack
+#   ruff check .                       # the gate that must stay green
+#   python -m mypy                     # the curated module list below
+#   python -m pytest tests/ -q         # what CI runs
+#
+# The app is meant to be RUN FROM ITS CHECKOUT (it resolves config/, plugins/,
+# memory/ and its assets relative to the app root — see core/paths.py), which is
+# what bootstrap.py sets up. The packaging metadata below exists so `pip install
+# .` works, so tooling can see a real project instead of a folder, and so the
+# dependency lists live in exactly one place. It is not a way to install this as
+# a library into somebody else's environment.
 
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mark-liv-jarvis"
+description = "MARK LV (JARVIS) — a desktop voice assistant: PyQt6 HUD, phone dashboard, and a tool registry the model reaches through one router."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "CC-BY-NC-4.0" }
+authors = [{ name = "Ankit Meena" }]
+keywords = ["voice-assistant", "gemini-live", "pyqt6", "automation", "desktop"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: X11 Applications :: Qt",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Desktop Environment",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+# The version lives in core/version.py and the dependency lists live in the two
+# requirements files — read from there rather than copied here, so there is one
+# place to change.
+dynamic = ["version", "dependencies", "optional-dependencies"]
+
+[project.urls]
+Source = "https://github.com/tonystark302012-rgb/jarvis"
+Changelog = "https://github.com/tonystark302012-rgb/jarvis/blob/main/CHANGELOG.md"
+Security = "https://github.com/tonystark302012-rgb/jarvis/blob/main/SECURITY.md"
+
+[tool.setuptools]
+# Explicit, not auto-discovered: the repository has several top-level packages
+# AND top-level modules (`main`), which flat-layout discovery refuses to guess
+# between. tools/ is shipped because the doctor and the maintenance scripts are
+# genuinely useful against an install; tests/ is not.
+packages = ["actions", "config", "core", "dashboard", "dots", "memory", "tools", "ui"]
+py-modules = ["main"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+dashboard = ["static/*"]
+core = ["prompt.txt", "face_model.obj"]
+# no ui entry: the HUD's styling is built as strings in ui/app.py, not shipped
+# as .qss files. A pattern that matches nothing is a lie in the metadata.
+
+[tool.setuptools.dynamic]
+version = { attr = "core.version.__version__" }
+dependencies = { file = ["requirements.txt"] }
+optional-dependencies.dev = { file = ["requirements-dev.txt"] }
+
+# ── Lint ──────────────────────────────────────────────────────────────────────
 [tool.ruff]
 target-version = "py311"          # bootstrap.py hard floor; also silences the
 line-length = 100                 # BaseExceptionGroup false positive (3.11+ builtin)
@@ -20,6 +90,60 @@ ignore = ["E701", "E702", "E402", "E741"]
 # it must load the real production method without importing Qt.
 "tests/*" = ["F401"]
 
+# ── Types ─────────────────────────────────────────────────────────────────────
+# The audit found ~2,600 mypy errors across the repository, nearly all of them
+# "this parameter has no annotation" in code that is deliberately dynamic.
+# Turning that on as a gate would mean either a mountain of `# type: ignore` or
+# a red build nobody reads. So: a CURATED LIST of modules that are genuinely
+# clean, checked as a hard gate, and grown one module at a time. `python -m
+# mypy` with no arguments checks exactly this list.
+#
+# Adding a module here is the roadmap item (PROJECT_ANALYSIS.md P3-28). If a
+# module needs three suppressions to pass, it does not belong yet.
+[tool.mypy]
+python_version = "3.11"
+files = [
+  # core — the layers everything else depends on
+  "core/paths.py",
+  "core/version.py",
+  "core/logging_setup.py",
+  "core/audit_chain.py",
+  "core/taskstore.py",
+  "core/tool_tiers.py",
+  "core/text_search.py",
+  "core/episode_memory.py",
+  "core/activity.py",
+  "core/confirm.py",
+  "core/privacy.py",
+  "core/undo.py",
+  "core/emotion.py",
+  "core/echo.py",
+  "core/display.py",
+  "core/plugin_loader.py",
+  "core/audio_devices.py",
+  "core/agent_runtime.py",
+  "core/installer.py",
+  "core/metrics_store.py",
+  "core/stt.py",
+  "core/webrtc.py",
+  # memory / dashboard / dots
+  "memory/config_manager.py",
+  "memory/semantic_recall.py",
+  "dashboard/surface.py",
+  "dots/blocks.py",
+  "dots/db.py",
+  # tools — the maintenance scripts a contributor runs
+  "tools/doctor.py",
+  "tools/ci_report.py",
+  "tools/make_lock.py",
+  "tools/check_staged_secrets.py",
+  "bootstrap.py",
+]
+ignore_missing_imports = true          # third-party stubs are not worth the tax
+warn_redundant_casts = true
+warn_unused_configs = true
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

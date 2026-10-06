@@ -210,7 +210,7 @@ def recent(limit: int = 15) -> str:
     return (f"Audit log (last {len(rows)}):\n" + "\n".join(lines))
 
 
-def audit_log(parameters: dict = None, player=None,
+def audit_log(parameters: dict | None = None, player=None,
               session_memory=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "recent")).lower().strip()

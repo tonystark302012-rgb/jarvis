@@ -90,6 +90,12 @@ def create(goal: str, plan: list[dict]) -> int:
             " created, updated) VALUES (?, 'running', ?, '[]', ?, ?)",
             (goal, json.dumps(plan, ensure_ascii=False), now, now))
         c.commit()
+        if cur.lastrowid is None:
+            # sqlite sets this after every successful INSERT. A None here means
+            # the schema is not what this module thinks it is, and silently
+            # returning 0 would turn "resume your run later" into "resume run
+            # 0", which is not a run.
+            raise RuntimeError("INSERT into runs returned no row id")
         return int(cur.lastrowid)
 
 

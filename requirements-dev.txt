@@ -8,6 +8,9 @@
 
 pytest>=8,<9
 ruff>=0.6
+# Types: the curated module list in pyproject.toml is checked as a gate,
+# and grown one module at a time (PROJECT_ANALYSIS.md P3-28).
+mypy>=1.11
 
 # Tests exercise these runtime modules directly:
 fastapi>=0.110,<1               # dashboard/server.py — skipped if absent

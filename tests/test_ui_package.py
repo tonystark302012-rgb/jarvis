@@ -169,15 +169,29 @@ class TestReadersOfTheSource:
         assert "class JarvisUI" in text
         assert len(text) > 200_000
 
-    def test_no_test_still_opens_ui_py(self):
+    def test_no_test_still_reads_the_old_module(self):
+        """AST, not a text search: the guards that describe the old name build
+        it as `"ui" + ".py"` and regexes escape it, so a text search finds
+        itself. A constant string equal to the old filename is the thing that
+        actually opens it."""
+        import ast
         needle = "ui" + ".py"                     # not written literally here
         offenders = []
         for p in (ROOT / "tests").glob("*.py"):
             if p.name == Path(__file__).name:
                 continue
-            if f'"{needle}"' in p.read_text(encoding="utf-8"):
-                offenders.append(p.name)
-        assert not offenders, f"still reading ui.py: {offenders}"
+            src = p.read_text(encoding="utf-8")
+            lines = src.splitlines()
+            for node in ast.walk(ast.parse(src)):
+                if not isinstance(node, ast.Constant) or node.value != needle:
+                    continue
+                # `not (ROOT / "ui.py").exists()` asserts it is GONE — the
+                # opposite of a stale reference.
+                line = lines[node.lineno - 1]
+                if ".exists()" in line:
+                    continue
+                offenders.append(f"{p.name}:{node.lineno}")
+        assert not offenders, f"still naming the old module: {offenders}"
 
     def test_the_smoke_tool_still_parses(self):
         out = subprocess.run([sys.executable, "-m", "compileall", "-q",
